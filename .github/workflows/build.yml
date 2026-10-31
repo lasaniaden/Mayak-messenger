@@ -21,18 +21,55 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.27.1'
           channel: 'stable'
           cache: true
 
-      - name: Create Android/Windows platform folders if missing
+      - name: Create Android platform folder & inject Permissions
         run: |
-          flutter create --platforms=android,windows --project-name=p2p_mesh .
+          flutter create --platforms=android --project-name=p2p_mesh .
+          python3 -c '
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path, "r") as f:
+              content = f.read()
+          perms = """
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+              <uses-permission android:name="android.permission.BLUETOOTH"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+          """
+          if "android.permission.INTERNET" not in content:
+              content = content.replace("<application", perms + "\n    <application", 1)
+          with open(path, "w") as f:
+              f.write(content)
+          '
+
+      - name: Set minSdkVersion to 23 for Bluetooth Mesh
+        run: |
+          python3 -c '
+          for p in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
+              import os
+              if os.path.exists(p):
+                  with open(p, "r") as f:
+                      c = f.read()
+                  c = c.replace("flutter.minSdkVersion", "23")
+                  with open(p, "w") as f:
+                      f.write(c)
+          '
 
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Release APK (Split per ABI + Universal)
+      - name: Build Release APK
         run: flutter build apk --release
 
       - name: Upload APK Artifact
