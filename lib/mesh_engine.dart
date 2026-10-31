@@ -4,6 +4,9 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
+import 'package:nearby_connections/nearby_connections.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class MeshPacket {
   final String type; // 'DATA' или 'ACK'
@@ -72,6 +75,7 @@ class MeshPacket {
 class MeshEngine {
   static const int discoveryPort = 42069;
   static const int maxBufferPackets = 300;
+  static const String serviceId = 'com.p2pmesh.intercom';
 
   final _ed25519 = Ed25519();
   final _x25519 = X25519();
@@ -80,24 +84,28 @@ class MeshEngine {
 
   late SimpleKeyPair _signKeyPair;
   late SimpleKeyPair _dhKeyPair;
-  late String nodeId;
-  late String dhPubHex;
-  late String signPubHex;
+  String nodeId = '';
+  String dhPubHex = '';
+  String signPubHex = '';
 
   ServerSocket? _tcpServer;
   RawDatagramSocket? _udpBeacon;
   Timer? _beaconTimer;
   int listenPort = 0;
+  bool bleMeshActive = false;
 
-  // Подключенные соседние узлы: Socket -> peerNodeId
-  final Map<Socket, String> _peers = {};
+  // TCP-пиры (LAN / Hotspot / Direct IP): Socket -> peerNodeId
+  final Map<Socket, String> _tcpPeers = {};
   final Set<String> _connectedEndpoints = {};
 
-  // Временный транзитный буфер (Store-and-Forward) в RAM
+  // Bluetooth / Wi-Fi Direct пиры (Android Nearby): endpointId -> peerNodeId
+  final Map<String, String> _blePeers = {};
+
+  // Временный транзитный буфер (Store-and-Forward)
   final Map<String, MeshPacket> transitBuffer = {};
-  // Кэш доставленных сообщений (ACK tombstones)
+  // Квитанции доставки (ACK)
   final Map<String, MeshPacket> deliveredAcks = {};
-  // Известные контакты: nodeId -> {dhPubHex, signPubHex}
+  // Контакты: nodeId -> {dh, sg}
   final Map<String, Map<String, String>> knownContacts = {};
 
   final void Function(String senderId, String text) onMessageReceived;
@@ -109,16 +117,8 @@ class MeshEngine {
   });
 
   Future<void> init({int preferredPort = 0}) async {
-    _signKeyPair = await _ed25519.newKeyPair();
-    _dhKeyPair = await _x25519.newKeyPair();
+    await _loadOrCreateIdentity();
 
-    final dhPub = await _dhKeyPair.extractPublicKey();
-    final signPub = await _signKeyPair.extractPublicKey();
-    dhPubHex = _toHex(dhPub.bytes);
-    signPubHex = _toHex(signPub.bytes);
-    nodeId = await _calcNodeId(dhPub.bytes);
-
-    // Поднимаем TCP-сервер на самом устройстве (IPv6 + IPv4 Dual-Stack)
     _tcpServer = await ServerSocket.bind(
       InternetAddress.anyIPv6,
       preferredPort,
@@ -126,10 +126,157 @@ class MeshEngine {
       shared: true,
     );
     listenPort = _tcpServer!.port;
-    _tcpServer!.listen(_handleIncomingSocket);
+    _tcpServer!.listen(_setupTcpSocket);
 
     await _startLanAutoDiscovery();
+    if (Platform.isAndroid) {
+      await startAndroidBleMesh();
+    }
     onStateChanged();
+  }
+
+  /// Сохраняем ключи на устройстве, чтобы ID пользователя был постоянным
+  Future<void> _loadOrCreateIdentity() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedSignSeed = prefs.getString('sign_seed');
+    final savedDhSeed = prefs.getString('dh_seed');
+
+    if (savedSignSeed != null && savedDhSeed != null) {
+      _signKeyPair = await _ed25519.newKeyPairFromSeed(_fromHex(savedSignSeed));
+      _dhKeyPair = await _x25519.newKeyPairFromSeed(_fromHex(savedDhSeed));
+    } else {
+      final signSeed = _randomBytes(32);
+      final dhSeed = _randomBytes(32);
+      await prefs.setString('sign_seed', _toHex(signSeed));
+      await prefs.setString('dh_seed', _toHex(dhSeed));
+      _signKeyPair = await _ed25519.newKeyPairFromSeed(signSeed);
+      _dhKeyPair = await _x25519.newKeyPairFromSeed(dhSeed);
+    }
+
+    final dhPub = await _dhKeyPair.extractPublicKey();
+    final signPub = await _signKeyPair.extractPublicKey();
+    dhPubHex = _toHex(dhPub.bytes);
+    signPubHex = _toHex(signPub.bytes);
+    nodeId = await _calcNodeId(dhPub.bytes);
+  }
+
+  /// Запуск Bluetooth LE + Wi-Fi Direct Mesh на Android (Strategy.P2P_CLUSTER)
+  Future<void> startAndroidBleMesh() async {
+    if (!Platform.isAndroid || bleMeshActive) return;
+    try {
+      await [
+        Permission.bluetooth,
+        Permission.bluetoothAdvertise,
+        Permission.bluetoothConnect,
+        Permission.bluetoothScan,
+        Permission.nearbyWifiDevices,
+        Permission.locationWhenInUse,
+      ].request();
+
+      final nearby = Nearby();
+      await nearby.startAdvertising(
+        nodeId,
+        Strategy.P2P_CLUSTER,
+        serviceId: serviceId,
+        onConnectionInitiated: (String endpointId, ConnectionInfo info) {
+          nearby.acceptConnection(
+            endpointId,
+            onPayLoadRecieved: (endId, payload) => _onBlePayload(endId, payload),
+          );
+        },
+        onConnectionResult: (String endpointId, Status status) {
+          if (status == Status.CONNECTED) {
+            _sendBleHello(endpointId);
+          } else {
+            _blePeers.remove(endpointId);
+            onStateChanged();
+          }
+        },
+        onDisconnected: (String endpointId) {
+          _blePeers.remove(endpointId);
+          onStateChanged();
+        },
+      );
+
+      await nearby.startDiscovery(
+        nodeId,
+        Strategy.P2P_CLUSTER,
+        serviceId: serviceId,
+        onEndpointFound: (String endpointId, String name, String srvId) {
+          // Чтобы два телефона не ломились друг к другу одновременно, инициатор — тот, чей ID лексикографически меньше
+          if (nodeId.compareTo(name) < 0) {
+            nearby.requestConnection(
+              nodeId,
+              endpointId,
+              onConnectionInitiated: (id, info) {
+                nearby.acceptConnection(
+                  id,
+                  onPayLoadRecieved: (endId, payload) => _onBlePayload(endId, payload),
+                );
+              },
+              onConnectionResult: (id, status) {
+                if (status == Status.CONNECTED) {
+                  _sendBleHello(id);
+                }
+              },
+              onDisconnected: (id) {
+                _blePeers.remove(id);
+                onStateChanged();
+              },
+            );
+          }
+        },
+        onEndpointLost: (String? endpointId) {
+          if (endpointId != null) {
+            _blePeers.remove(endpointId);
+            onStateChanged();
+          }
+        },
+      );
+
+      bleMeshActive = true;
+      onStateChanged();
+    } catch (_) {}
+  }
+
+  void _sendBleHello(String endpointId) {
+    final hello = jsonEncode({
+      'hello': nodeId,
+      'dh': dhPubHex,
+      'sg': signPubHex,
+    });
+    _sendBleLine(endpointId, hello);
+  }
+
+  void _sendBleLine(String endpointId, String line) {
+    try {
+      final bytes = Uint8List.fromList(utf8.encode(line));
+      Nearby().sendBytesPayload(endpointId, bytes);
+    } catch (_) {}
+  }
+
+  Future<void> _onBlePayload(String endpointId, Payload payload) async {
+    if (payload.type != PayloadType.BYTES || payload.bytes == null) return;
+    final line = utf8.decode(payload.bytes!);
+    await _processIncomingJsonLine(
+      line,
+      onHello: (peerId) async {
+        _blePeers[endpointId] = peerId;
+        onStateChanged();
+        _evictExpired();
+        for (final ack in deliveredAcks.values) {
+          _sendBleLine(endpointId, jsonEncode(ack.toJson()));
+        }
+        for (final entry in transitBuffer.entries.toList()) {
+          _sendBleLine(endpointId, jsonEncode(entry.value.toJson()));
+          if (peerId == entry.value.dstNodeId) {
+            transitBuffer.remove(entry.key);
+          }
+        }
+      },
+      replyDirect: (replyJson) => _sendBleLine(endpointId, replyJson),
+      excludeBleId: endpointId,
+    );
   }
 
   Future<String> _calcNodeId(List<int> dhPubBytes) async {
@@ -137,7 +284,6 @@ class MeshEngine {
     return _toHex(hash.bytes.sublist(0, 8));
   }
 
-  /// Строка приглашения (можно передать через QR или скопировать)
   Future<String> getInviteCode() async {
     final ips = <String>[];
     final interfaces = await NetworkInterface.list(
@@ -162,7 +308,6 @@ class MeshEngine {
     return base64UrlEncode(utf8.encode(jsonEncode(bundle)));
   }
 
-  /// Подключение к другому человеку по его коду приглашения
   Future<String> connectWithInviteCode(String code) async {
     final decoded = jsonDecode(utf8.decode(base64Url.decode(code.trim())));
     final ip = decoded['ip'] as String;
@@ -187,74 +332,86 @@ class MeshEngine {
         port,
         timeout: const Duration(seconds: 4),
       );
-      _setupSocket(socket);
+      _setupTcpSocket(socket);
     } catch (_) {
       _connectedEndpoints.remove(key);
     }
   }
 
-  void _handleIncomingSocket(Socket socket) {
-    _setupSocket(socket);
-  }
-
-  void _setupSocket(Socket socket) {
-    // Отправляем свой анонс при рукопожатии
+  void _setupTcpSocket(Socket socket) {
     final hello = jsonEncode({
       'hello': nodeId,
       'dh': dhPubHex,
       'sg': signPubHex,
     });
-    _sendLine(socket, hello);
+    _sendTcpLine(socket, hello);
 
     utf8.decoder
         .bind(socket)
         .transform(const LineSplitter())
         .listen(
-          (line) => _onSocketLine(socket, line),
+          (line) => _processIncomingJsonLine(
+            line,
+            onHello: (peerId) async {
+              _tcpPeers[socket] = peerId;
+              onStateChanged();
+              _evictExpired();
+              for (final ack in deliveredAcks.values) {
+                _sendTcpLine(socket, jsonEncode(ack.toJson()));
+              }
+              for (final entry in transitBuffer.entries.toList()) {
+                _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
+                if (peerId == entry.value.dstNodeId) {
+                  transitBuffer.remove(entry.key);
+                }
+              }
+            },
+            replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
+            excludeTcpSocket: socket,
+          ),
           onDone: () => _cleanupSocket(socket),
           onError: (_) => _cleanupSocket(socket),
         );
   }
 
-  Future<void> _onSocketLine(Socket socket, String line) async {
+  Future<void> _processIncomingJsonLine(
+    String line, {
+    required Future<void> Function(String peerId) onHello,
+    required void Function(String jsonLine) replyDirect,
+    Socket? excludeTcpSocket,
+    String? excludeBleId,
+  }) async {
     try {
       final map = jsonDecode(line) as Map<String, dynamic>;
       if (map.containsKey('hello')) {
         final peerId = map['hello'] as String;
-        _peers[socket] = peerId;
         knownContacts[peerId] = {
           'dh': map['dh'] as String,
           'sg': map['sg'] as String,
         };
+        await onHello(peerId);
         onStateChanged();
-        await _syncBufferWithPeer(socket, peerId);
         return;
       }
 
       final pkt = MeshPacket.fromJson(map);
       if (pkt.type == 'DATA') {
-        await _handleDataPacket(pkt, socket);
+        await _handleDataPacket(
+          pkt,
+          replyDirect: replyDirect,
+          excludeTcpSocket: excludeTcpSocket,
+          excludeBleId: excludeBleId,
+        );
       } else if (pkt.type == 'ACK') {
-        await _handleAckPacket(pkt, socket);
+        await _handleAckPacket(
+          pkt,
+          excludeTcpSocket: excludeTcpSocket,
+          excludeBleId: excludeBleId,
+        );
       }
     } catch (_) {}
   }
 
-  Future<void> _syncBufferWithPeer(Socket socket, String peerId) async {
-    _evictExpired();
-    for (final ack in deliveredAcks.values) {
-      _sendLine(socket, jsonEncode(ack.toJson()));
-    }
-    for (final entry in transitBuffer.entries.toList()) {
-      _sendLine(socket, jsonEncode(entry.value.toJson()));
-      if (peerId == entry.value.dstNodeId) {
-        transitBuffer.remove(entry.key);
-      }
-    }
-    onStateChanged();
-  }
-
-  /// Отправка зашифрованного сообщения (работает напрямую и через промежуточные узлы)
   Future<void> sendMessage(String targetNodeId, String plainText) async {
     final contact = knownContacts[targetNodeId];
     if (contact == null) return;
@@ -302,19 +459,23 @@ class MeshEngine {
     );
 
     transitBuffer[msgId] = pkt;
-    _floodPacket(pkt, exclude: null);
+    _floodAllTransports(pkt);
     onStateChanged();
   }
 
-  Future<void> _handleDataPacket(MeshPacket pkt, Socket sender) async {
+  Future<void> _handleDataPacket(
+    MeshPacket pkt, {
+    required void Function(String) replyDirect,
+    Socket? excludeTcpSocket,
+    String? excludeBleId,
+  }) async {
     _evictExpired();
     if (deliveredAcks.containsKey(pkt.msgId)) {
-      _sendLine(sender, jsonEncode(deliveredAcks[pkt.msgId]!.toJson()));
+      replyDirect(jsonEncode(deliveredAcks[pkt.msgId]!.toJson()));
       return;
     }
     if (transitBuffer.containsKey(pkt.msgId)) return;
 
-    // Проверяем подпись отправителя
     final sigValid = await _ed25519.verify(
       utf8.encode('${pkt.msgId}|${pkt.dstNodeId}|${pkt.ciphertextHex}'),
       signature: Signature(
@@ -324,7 +485,6 @@ class MeshEngine {
     );
     if (!sigValid) return;
 
-    // Если пакет адресован нам — расшифровываем и рассылаем ACK на удаление из памяти
     if (pkt.dstNodeId == nodeId) {
       final shared = await _x25519.sharedSecretKey(
         keyPair: _dhKeyPair,
@@ -348,7 +508,6 @@ class MeshEngine {
       };
       onMessageReceived(senderId, utf8.decode(clearBytes));
 
-      // Формируем крипто-квитанцию (ACK), которая сотрет пакет из памяти всех ретрансляторов
       final ackSig = await _ed25519.sign(
         utf8.encode('ACK:${pkt.msgId}'),
         keyPair: _signKeyPair,
@@ -369,21 +528,28 @@ class MeshEngine {
         ttl: 7,
       );
       deliveredAcks[pkt.msgId] = ackPkt;
-      _floodPacket(ackPkt, exclude: null);
+      _floodAllTransports(ackPkt);
       onStateChanged();
       return;
     }
 
-    // Иначе мы промежуточный узел ("три улицы"): временно храним и пересылаем дальше
     if (pkt.ttl > 1 && transitBuffer.length < maxBufferPackets) {
       pkt.ttl -= 1;
       transitBuffer[pkt.msgId] = pkt;
-      _floodPacket(pkt, exclude: sender);
+      _floodAllTransports(
+        pkt,
+        excludeTcpSocket: excludeTcpSocket,
+        excludeBleId: excludeBleId,
+      );
       onStateChanged();
     }
   }
 
-  Future<void> _handleAckPacket(MeshPacket ack, Socket sender) async {
+  Future<void> _handleAckPacket(
+    MeshPacket ack, {
+    Socket? excludeTcpSocket,
+    String? excludeBleId,
+  }) async {
     if (deliveredAcks.containsKey(ack.msgId)) return;
 
     final stored = transitBuffer[ack.msgId];
@@ -396,34 +562,49 @@ class MeshEngine {
         ),
       );
       if (!valid) return;
-      // Мгновенно очищаем оперативную память от доставленного сообщения
       transitBuffer.remove(ack.msgId);
     }
 
     deliveredAcks[ack.msgId] = ack;
-    _floodPacket(ack, exclude: sender);
+    _floodAllTransports(
+      ack,
+      excludeTcpSocket: excludeTcpSocket,
+      excludeBleId: excludeBleId,
+    );
     onStateChanged();
   }
 
-  void _floodPacket(MeshPacket pkt, {Socket? exclude}) {
+  /// Рассылка пакета сразу по всем активным каналам (Wi-Fi/TCP + Bluetooth/Wi-Fi Direct)
+  void _floodAllTransports(
+    MeshPacket pkt, {
+    Socket? excludeTcpSocket,
+    String? excludeBleId,
+  }) {
     final serialized = jsonEncode(pkt.toJson());
-    for (final entry in _peers.entries.toList()) {
-      if (entry.key == exclude) continue;
-      _sendLine(entry.key, serialized);
+
+    for (final entry in _tcpPeers.entries.toList()) {
+      if (entry.key == excludeTcpSocket) continue;
+      _sendTcpLine(entry.key, serialized);
+      if (pkt.type == 'DATA' && entry.value == pkt.dstNodeId) {
+        transitBuffer.remove(pkt.msgId);
+      }
+    }
+
+    for (final entry in _blePeers.entries.toList()) {
+      if (entry.key == excludeBleId) continue;
+      _sendBleLine(entry.key, serialized);
       if (pkt.type == 'DATA' && entry.value == pkt.dstNodeId) {
         transitBuffer.remove(pkt.msgId);
       }
     }
   }
 
-  /// Автопоиск устройств в одной Wi-Fi сети / точке доступа без интернета
   Future<void> _startLanAutoDiscovery() async {
     try {
       _udpBeacon = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
         discoveryPort,
         reuseAddress: true,
-        reusePort: true,
       );
       _udpBeacon!.broadcastEnabled = true;
       _udpBeacon!.listen((event) {
@@ -462,7 +643,7 @@ class MeshEngine {
     transitBuffer.removeWhere((_, pkt) => pkt.expiresAt <= now);
   }
 
-  void _sendLine(Socket s, String line) {
+  void _sendTcpLine(Socket s, String line) {
     try {
       s.writeln(line);
     } catch (_) {
@@ -471,12 +652,13 @@ class MeshEngine {
   }
 
   void _cleanupSocket(Socket s) {
-    _peers.remove(s);
+    _tcpPeers.remove(s);
     s.destroy();
     onStateChanged();
   }
 
-  int get connectedPeersCount => _peers.length;
+  int get connectedPeersCount => _tcpPeers.length + _blePeers.length;
+  int get blePeersCount => _blePeers.length;
 
   static String _toHex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
