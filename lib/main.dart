@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'mesh_engine.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const MeshMessengerApp());
 }
 
@@ -33,7 +35,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final TextEditingController _inviteCtrl = TextEditingController();
   final TextEditingController _msgCtrl = TextEditingController();
   String? _selectedContactId;
-  String _myInvite = 'Генерация...';
+  String _myInvite = '';
 
   @override
   void initState() {
@@ -63,19 +65,51 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  void _showQrModal() {
+    if (_myInvite.isEmpty) return;
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Мой узел: ${_engine.nodeId}'),
+        content: SizedBox(
+          width: 240,
+          height: 240,
+          child: Center(
+            child: QrImageView(
+              data: _myInvite,
+              size: 220,
+              backgroundColor: Colors.white,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Закрыть'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final contacts = _engine.knownContacts.keys.toList();
     return Scaffold(
       appBar: AppBar(
-        title: Text('Узел: ${_engine.listenPort > 0 ? _engine.nodeId : "..."}'),
+        title: Text('ID: ${_engine.nodeId.isEmpty ? "..." : _engine.nodeId}'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.qr_code),
+            tooltip: 'Показать QR-код',
+            onPressed: _showQrModal,
+          ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Center(
               child: Text(
-                'Соседей: ${_engine.connectedPeersCount} | Буфер: ${_engine.transitBuffer.length}',
-                style: const TextStyle(fontSize: 13, color: Colors.greenAccent),
+                'Пиры: ${_engine.connectedPeersCount} (BLE: ${_engine.blePeersCount}) | Буфер: ${_engine.transitBuffer.length}',
+                style: const TextStyle(fontSize: 12, color: Colors.greenAccent),
               ),
             ),
           ),
@@ -92,16 +126,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Режим раздачи (Мой код подключения):',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 4),
                     Row(
                       children: [
                         Expanded(
                           child: Text(
-                            _myInvite,
+                            _myInvite.isEmpty ? 'Генерация ключа...' : _myInvite,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(fontFamily: 'monospace'),
@@ -180,7 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: TextField(
                     controller: _msgCtrl,
                     decoration: const InputDecoration(
-                      hintText: 'Сообщение (E2EE + Mesh)...',
+                      hintText: 'Сообщение (Wi-Fi / Bluetooth Mesh)...',
                     ),
                   ),
                 ),
