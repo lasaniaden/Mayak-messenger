@@ -42,7 +42,7 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
 
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout Private Repo
         uses: actions/checkout@v4
@@ -50,12 +50,13 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.27.1'
           channel: 'stable'
           cache: true
 
       - name: Create Windows platform folder if missing
         run: |
+          flutter config --enable-windows-desktop
           flutter create --platforms=windows --project-name=p2p_mesh .
 
       - name: Install dependencies
