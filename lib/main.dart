@@ -1,13 +1,24 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'mesh_engine.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MeshMessengerApp());
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+    FlutterError.onError = (FlutterErrorDetails details) {
+      FlutterError.presentError(details);
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      return true; // Не даем необработанным нативным исключениям ронять приложение
+    };
+    runApp(const MeshMessengerApp());
+  }, (error, stack) {});
 }
 
 class MeshMessengerApp extends StatelessWidget {
@@ -16,7 +27,7 @@ class MeshMessengerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'P2P Mesh Intercom',
+      title: 'Mayak P2P Mesh',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
       home: const HomeScreen(),
@@ -64,6 +75,16 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _initNode() async {
     await _engine.init();
     await _refreshInviteAndIps();
+
+    // На Android запрашиваем разрешения и запускаем BLE ТОЛЬКО после полной отрисовки экрана
+    if (Platform.isAndroid) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await Future.delayed(const Duration(milliseconds: 600));
+        if (mounted) {
+          await _engine.startAndroidBleMesh();
+        }
+      });
+    }
   }
 
   Future<void> _refreshInviteAndIps() async {
@@ -105,7 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'ID узла: ${_engine.nodeId}\nЛокальные IP: ${_myIps.join(", ")}:${_engine.listenPort}',
+              'ID узла: ${_engine.nodeId}\nЛокальные IP: ${_myIps.join(", ")}:${_engine.listenPort}\nСтатус: ${_engine.lastStatusLog}',
               style: const TextStyle(fontSize: 12, color: Colors.white70),
             ),
             const SizedBox(height: 12),
@@ -179,6 +200,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openQrScanner() async {
+    if (Platform.isAndroid || Platform.isIOS) {
+      final camStatus = await Permission.camera.request();
+      if (!camStatus.isGranted) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Нужен доступ к камере для сканирования QR')),
+        );
+        return;
+      }
+    }
+
+    if (!mounted) return;
     final scannedCode = await Navigator.push<String>(
       context,
       MaterialPageRoute(builder: (_) => const QrScannerScreen()),
@@ -243,6 +276,15 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         actions: [
+          if (Platform.isAndroid)
+            IconButton(
+              icon: Icon(
+                Icons.bluetooth_audio,
+                color: _engine.bleMeshActive ? Colors.lightBlueAccent : Colors.white54,
+              ),
+              tooltip: 'Включить/перезапустить Bluetooth Mesh',
+              onPressed: () => _engine.startAndroidBleMesh(),
+            ),
           IconButton(
             icon: const Icon(Icons.qr_code),
             tooltip: 'Мой QR-код',
@@ -277,8 +319,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Мои IP в сети: ${_myIps.join(", ")} (Порт: ${_engine.listenPort})',
-                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      'IP: ${_myIps.join(", ")}:${_engine.listenPort} | ${_engine.lastStatusLog}',
+                      style: const TextStyle(fontSize: 11, color: Colors.white70),
                     ),
                     const SizedBox(height: 4),
                     Row(
@@ -362,7 +404,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               Icon(
                                 Icons.circle,
                                 size: 10,
-                                color: c.isOnline ? Colors.greenAccent : Colors.orangeAccent,
+                                color: c.isOnline
+                                    ? Colors.greenAccent
+                                    : Colors.orangeAccent,
                               ),
                               const SizedBox(width: 8),
                               Expanded(
@@ -442,19 +486,28 @@ class QrScannerScreen extends StatefulWidget {
 }
 
 class _QrScannerScreenState extends State<QrScannerScreen> {
+  final MobileScannerController _controller = MobileScannerController();
   bool _alreadyScanned = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Наведи камеру на QR-код')),
       body: MobileScanner(
+        controller: _controller,
         onDetect: (capture) {
           if (_alreadyScanned) return;
           for (final barcode in capture.barcodes) {
             final raw = barcode.rawValue;
             if (raw != null && raw.trim().isNotEmpty) {
               _alreadyScanned = true;
+              _controller.stop();
               Navigator.pop(context, raw.trim());
               break;
             }
