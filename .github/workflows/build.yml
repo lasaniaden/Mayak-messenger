@@ -54,17 +54,31 @@ jobs:
               f.write(content)
           '
 
-      - name: Set minSdkVersion to 23
+      - name: Configure Android SDK 36, minSdk 23, and Kotlin 2.1.0
         run: |
           python3 -c '
-          import os
+          import os, re
           for p in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(p):
                   with open(p, "r") as f:
                       c = f.read()
                   c = c.replace("flutter.minSdkVersion", "23")
+                  c = c.replace("flutter.compileSdkVersion", "36")
+                  c = re.sub(r"compileSdk\s*=?\s*\d+", "compileSdk = 36", c)
                   with open(p, "w") as f:
                       f.write(c)
+
+          for s in ["android/settings.gradle", "android/settings.gradle.kts"]:
+              if os.path.exists(s):
+                  with open(s, "r") as f:
+                      sc = f.read()
+                  sc = re.sub(
+                      r"(id\s+[\"\x27]org\.jetbrains\.kotlin\.android[\"\x27]\s+version\s+[\"\x27])[^\"\x27]+([\"\x27])",
+                      r"\g<1>2.1.0\g<2>",
+                      sc
+                  )
+                  with open(s, "w") as f:
+                      f.write(sc)
           '
 
       - name: Install dependencies
