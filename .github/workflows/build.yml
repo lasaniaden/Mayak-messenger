@@ -33,14 +33,16 @@ jobs:
           with open(path, "r") as f:
               content = f.read()
           perms = """
+              <uses-feature android:name="android.hardware.camera" android:required="false"/>
+              <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
               <uses-permission android:name="android.permission.CAMERA"/>
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
               <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
               <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
-              <uses-permission android:name="android.permission.BLUETOOTH"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
               <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
               <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
@@ -59,7 +61,6 @@ jobs:
           python3 -c '
           import os, re
 
-          # 1. Выставляем compileSdk = 36, targetSdk = 35, minSdk = 23 в app/build.gradle(.kts)
           for p in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(p):
                   with open(p, "r") as f:
@@ -74,7 +75,6 @@ jobs:
                   with open(p, "w") as f:
                       f.write(c)
 
-          # 2. Выставляем AGP 8.7.0 и Kotlin 2.1.0 в settings.gradle(.kts)
           for s in ["android/settings.gradle", "android/settings.gradle.kts"]:
               if os.path.exists(s):
                   with open(s, "r") as f:
@@ -92,7 +92,6 @@ jobs:
                   with open(s, "w") as f:
                       f.write(sc)
 
-          # 3. Выставляем совместимый Gradle Wrapper 8.9 (требуется для AGP 8.7.0)
           gw = "android/gradle/wrapper/gradle-wrapper.properties"
           if os.path.exists(gw):
               with open(gw, "r") as f:
@@ -109,8 +108,8 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Release APK
-        run: flutter build apk --release
+      - name: Build Release APK (No R8 shrink to prevent JNI/Nearby crash)
+        run: flutter build apk --release --no-shrink
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
