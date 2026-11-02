@@ -79,7 +79,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _initNode() async {
     await _engine.init();
     await _refreshInviteAndIps();
-    // На Android запрашиваем разрешение на пуш-уведомления после загрузки экрана
     if (Platform.isAndroid) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         await Future.delayed(const Duration(milliseconds: 800));
@@ -186,10 +185,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 4),
               const Text(
-                '• Вариант А (Точка доступа с телефона): Выключи «Мобильные данные» на телефоне и включи «Точку доступа Wi-Fi». Подключи к ней ПК или второй телефон. Интернета нет, но локальная связь работает на 100%.
-'
-                '• Вариант Б (Домашний роутер без интернета): Выдерни кабель провайдера (WAN) из роутера. Устройства внутри квартиры продолжат общаться через Wi-Fi.
-'
+                '• Вариант А (Точка доступа с телефона): Выключи «Мобильные данные» на телефоне и включи «Точку доступа Wi-Fi». Подключи к ней ПК или второй телефон. Интернета нет, но локальная связь работает на 100%.\n'
+                '• Вариант Б (Домашний роутер без интернета): Выдерни кабель провайдера (WAN) из роутера. Устройства внутри квартиры продолжат общаться через Wi-Fi.\n'
                 '• Вариант В (Bluetooth Mesh без Wi-Fi): Нажми кнопку «Вкл BLE» на двух Android-телефонах — они свяжутся напрямую по радиоканалу.',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
@@ -201,10 +198,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 4),
               const Text(
-                '• Тебе НЕ нужно переключать профиль сети Windows в «Частная сеть»!
-'
-                '• Оставь в настройках Windows безопасный профиль «Общедоступная сеть» (чтобы общие папки и системные службы ПК были закрыты).
-'
+                '• Тебе НЕ нужно переключать профиль сети Windows в «Частная сеть»!\n'
+                '• Оставь в настройках Windows безопасный профиль «Общедоступная сеть» (чтобы общие папки и системные службы ПК были закрыты).\n'
                 '• Просто нажми кнопку «Открыть доступ в Общественной сети (Firewall)» выше (или запусти файл allow_public_network_firewall.bat из папки с программой от имени Администратора). Это откроет в Брандмауэре ТОЛЬКО порты Маяка (42069 UDP и 42070 TCP).',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
@@ -216,8 +211,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 4),
               const Text(
-                '• В v0.6.0 Маяк автоматически игнорирует виртуальные адаптеры VPN (tun0, WireGuard, Sing-box, Clash, Radmin) и берет прямой IP Wi-Fi (192.168.x.x).
-'
+                '• В v0.6.0 Маяк автоматически игнорирует виртуальные адаптеры VPN (tun0, WireGuard, Sing-box, Clash, Radmin) и берет прямой IP Wi-Fi (192.168.x.x).\n'
                 '• Если VPN на телефоне блокирует широковещательный автопоиск, просто введи IP второго устройства (например 192.168.1.5) в строку подключения или включи в настройках VPN «Обход локальной сети (Bypass LAN)».',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
@@ -714,7 +708,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-/// Безопасный экран QR-сканера (с фиксом жизненного цикла текстуры камеры и отключенным Impeller)
 class QrScannerScreen extends StatefulWidget {
   const QrScannerScreen({super.key});
 
@@ -736,7 +729,6 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       facing: CameraFacing.back,
       formats: const [BarcodeFormat.qrCode],
     );
-    // Запускаем поток камеры только после завершения анимации перехода на экран
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await Future.delayed(const Duration(milliseconds: 250));
       if (!mounted) return;
