@@ -117,6 +117,7 @@ class MeshEngine {
   Timer? _beaconTimer;
   int listenPort = 0;
   bool bleMeshActive = false;
+  String lastStatusLog = 'Инициализация...';
 
   final Map<Socket, String> _tcpPeers = {};
   final Set<String> _connectingHosts = {};
@@ -126,7 +127,8 @@ class MeshEngine {
   final Map<String, MeshPacket> deliveredAcks = {};
   final Map<String, ContactProfile> knownContacts = {};
 
-  final void Function(String senderId, String senderName, String text) onMessageReceived;
+  final void Function(String senderId, String senderName, String text)
+      onMessageReceived;
   final void Function() onStateChanged;
 
   MeshEngine({
@@ -134,23 +136,44 @@ class MeshEngine {
     required this.onStateChanged,
   });
 
+  /// Безопасная инициализация сети (не падает на Android без IPv6 или без разрешений)
   Future<void> init({int preferredPort = 0}) async {
-    await _loadOrCreateIdentity();
+    try {
+      await _loadOrCreateIdentity();
+    } catch (e) {
+      lastStatusLog = 'Ошибка ключей: $e';
+    }
 
-    // Dual-stack сервер: принимает и IPv4 (192.168.x.x), и глобальный IPv6
-    _tcpServer = await ServerSocket.bind(
-      InternetAddress.anyIPv6,
-      preferredPort,
-      v6Only: false,
-      shared: true,
-    );
-    listenPort = _tcpServer!.port;
-    _tcpServer!.listen(_setupTcpSocket);
+    // Безопасный запуск TCP-сервера: сначала пробуем Dual-Stack IPv6, при ошибке — чистый IPv4
+    try {
+      _tcpServer = await ServerSocket.bind(
+        InternetAddress.anyIPv6,
+        preferredPort,
+        v6Only: false,
+        shared: true,
+      );
+    } catch (_) {
+      try {
+        _tcpServer = await ServerSocket.bind(
+          InternetAddress.anyIPv4,
+          preferredPort,
+          shared: true,
+        );
+      } catch (e) {
+        lastStatusLog = 'Ошибка TCP-сервера: $e';
+      }
+    }
+
+    if (_tcpServer != null) {
+      listenPort = _tcpServer!.port;
+      _tcpServer!.listen(
+        _setupTcpSocket,
+        onError: (_) {},
+      );
+    }
 
     await _startLanAutoDiscovery();
-    if (Platform.isAndroid) {
-      await startAndroidBleMesh();
-    }
+    lastStatusLog = 'Wi-Fi / LAN готов (порт $listenPort)';
     onStateChanged();
   }
 
@@ -181,13 +204,14 @@ class MeshEngine {
     nickname = prefs.getString('user_nickname') ?? defaultName;
   }
 
-  /// Смена имени профиля с немедленным оповещением всех подключенных пиров
   Future<void> updateNickname(String newName) async {
     final clean = newName.trim();
     if (clean.isEmpty) return;
     nickname = clean;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('user_nickname', nickname);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('user_nickname', nickname);
+    } catch (_) {}
 
     final hello = _buildHelloJson();
     for (final s in _tcpPeers.keys.toList()) {
@@ -206,8 +230,6 @@ class MeshEngine {
         'sg': signPubHex,
       });
 
-  /// Умный сбор всех реальных IPv4-адресов (Wi-Fi роутер, точка доступа телефона, Ethernet)
-  /// с фильтрацией виртуальных адаптеров Docker/WSL/VirtualBox
   Future<List<String>> getLocalIPv4Addresses() async {
     final ipv4List = <String>[];
     try {
@@ -227,7 +249,6 @@ class MeshEngine {
         for (final addr in iface.addresses) {
           final ip = addr.address;
           if (!ip.startsWith('169.254.')) {
-            // Приоритет классическим домашним и хотспот подсетям 192.168.x.x и 10.x.x.x
             if (ip.startsWith('192.168.') || ip.startsWith('10.')) {
               ipv4List.insert(0, ip);
             } else {
@@ -241,8 +262,8 @@ class MeshEngine {
     return ipv4List.toSet().toList();
   }
 
-  /// Формирование кода приглашения (содержит ВСЕ локальные IP для надежного коннекта ПК <-> Телефон)
   Future<String> getInviteCode() async {
+    if (nodeId.isEmpty) return '';
     final ips = await getLocalIPv4Addresses();
     final bundle = {
       'ips': ips,
@@ -255,14 +276,13 @@ class MeshEngine {
     return base64UrlEncode(utf8.encode(jsonEncode(bundle)));
   }
 
-  /// Подключение по отсканированному QR или вставленному коду
   Future<String> connectWithInviteCode(String code) async {
-    final decoded = jsonDecode(utf8.decode(base64Url.decode(code.trim()))) as Map<String, dynamic>;
+    final decoded =
+        jsonDecode(utf8.decode(base64Url.decode(code.trim()))) as Map<String, dynamic>;
     final port = decoded['p'] as int;
     final targetId = decoded['id'] as String;
     final targetNick = (decoded['nick'] as String?) ?? 'Узел $targetId';
 
-    // Поддержка как списка 'ips', так и одиночного 'ip'
     final List<String> candidateIps = [];
     if (decoded['ips'] is List) {
       candidateIps.addAll((decoded['ips'] as List).map((e) => e.toString()));
@@ -277,7 +297,6 @@ class MeshEngine {
       nick: targetNick,
     );
 
-    // Пробуем подключиться ко всем IP-адресам узла параллельно (кто первый ответит)
     for (final ip in candidateIps) {
       unawaited(connectToHost(ip, port, expectedNodeId: targetId));
     }
@@ -291,7 +310,7 @@ class MeshEngine {
     required String signPubHex,
     String? nick,
   }) {
-    if (nodeId == this.nodeId) return;
+    if (nodeId.isEmpty || nodeId == this.nodeId) return;
     final existing = knownContacts[nodeId];
     final isPeerConnected =
         _tcpPeers.containsValue(nodeId) || _blePeers.containsValue(nodeId);
@@ -305,7 +324,9 @@ class MeshEngine {
         nodeId: nodeId,
         dhPubHex: dhPubHex,
         signPubHex: signPubHex,
-        nickname: (nick != null && nick.trim().isNotEmpty) ? nick.trim() : 'Узел $nodeId',
+        nickname: (nick != null && nick.trim().isNotEmpty)
+            ? nick.trim()
+            : 'Узел $nodeId',
         isOnline: isPeerConnected,
       );
     }
@@ -316,6 +337,7 @@ class MeshEngine {
     int port, {
     String? expectedNodeId,
   }) async {
+    if (port <= 0) return;
     if (expectedNodeId != null && _tcpPeers.containsValue(expectedNodeId)) {
       return;
     }
@@ -345,7 +367,6 @@ class MeshEngine {
           (line) => _processIncomingJsonLine(
             line,
             onHello: (peerId, peerNick) async {
-              // Если уже есть активное TCP-соединение с этим же узлом — закрываем дубликат
               for (final entry in _tcpPeers.entries.toList()) {
                 if (entry.value == peerId && entry.key != socket) {
                   _cleanupSocket(socket);
@@ -372,6 +393,7 @@ class MeshEngine {
           ),
           onDone: () => _cleanupSocket(socket),
           onError: (_) => _cleanupSocket(socket),
+          cancelOnError: true,
         );
   }
 
@@ -488,8 +510,8 @@ class MeshEngine {
       utf8.encode('${pkt.msgId}|${pkt.dstNodeId}|${pkt.ciphertextHex}'),
       signature: Signature(
         _fromHex(pkt.signatureHex),
-        publicKey:
-            SimplePublicKey(_fromHex(pkt.srcSignPubHex), type: KeyPairType.ed25519),
+        publicKey: SimplePublicKey(
+            _fromHex(pkt.srcSignPubHex), type: KeyPairType.ed25519),
       ),
     );
     if (!sigValid) return;
@@ -572,8 +594,8 @@ class MeshEngine {
         utf8.encode('ACK:${ack.msgId}'),
         signature: Signature(
           _fromHex(ack.signatureHex),
-          publicKey:
-              SimplePublicKey(_fromHex(stored.dstSignPubHex), type: KeyPairType.ed25519),
+          publicKey: SimplePublicKey(
+              _fromHex(stored.dstSignPubHex), type: KeyPairType.ed25519),
         ),
       );
       if (!valid) return;
@@ -613,7 +635,6 @@ class MeshEngine {
     }
   }
 
-  /// Автопоиск по всем локальным подсетям (бьет и в 255.255.255.255, и в x.x.x.255 каждой сетевой карты)
   Future<void> _startLanAutoDiscovery() async {
     try {
       _udpBeacon = await RawDatagramSocket.bind(
@@ -622,29 +643,35 @@ class MeshEngine {
         reuseAddress: true,
       );
       _udpBeacon!.broadcastEnabled = true;
-      _udpBeacon!.listen((event) {
-        if (event == RawSocketEvent.read) {
-          final dg = _udpBeacon!.receive();
-          if (dg == null) return;
-          try {
-            final data = jsonDecode(utf8.decode(dg.data)) as Map<String, dynamic>;
-            final peerId = data['id'] as String;
-            final peerPort = data['p'] as int;
-            final peerNick = (data['nick'] as String?) ?? '';
-            if (peerId != nodeId) {
-              _upsertContact(
-                nodeId: peerId,
-                dhPubHex: data['dh'] as String,
-                signPubHex: data['sg'] as String,
-                nick: peerNick,
-              );
-              connectToHost(dg.address.address, peerPort, expectedNodeId: peerId);
-            }
-          } catch (_) {}
-        }
-      });
+      _udpBeacon!.listen(
+        (event) {
+          if (event == RawSocketEvent.read) {
+            final dg = _udpBeacon!.receive();
+            if (dg == null) return;
+            try {
+              final data =
+                  jsonDecode(utf8.decode(dg.data)) as Map<String, dynamic>;
+              final peerId = data['id'] as String;
+              final peerPort = data['p'] as int;
+              final peerNick = (data['nick'] as String?) ?? '';
+              if (peerId != nodeId) {
+                _upsertContact(
+                  nodeId: peerId,
+                  dhPubHex: data['dh'] as String,
+                  signPubHex: data['sg'] as String,
+                  nick: peerNick,
+                );
+                connectToHost(dg.address.address, peerPort,
+                    expectedNodeId: peerId);
+              }
+            } catch (_) {}
+          }
+        },
+        onError: (_) {},
+      );
 
       _beaconTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
+        if (nodeId.isEmpty || listenPort <= 0) return;
         final beacon = utf8.encode(jsonEncode({
           'id': nodeId,
           'nick': nickname,
@@ -652,16 +679,19 @@ class MeshEngine {
           'dh': dhPubHex,
           'sg': signPubHex,
         }));
-        _udpBeacon?.send(beacon, InternetAddress('255.255.255.255'), discoveryPort);
+        try {
+          _udpBeacon?.send(
+              beacon, InternetAddress('255.255.255.255'), discoveryPort);
+        } catch (_) {}
 
-        // Дополнительно шлем directed broadcast (например 192.168.1.255) для обхода фильтрации Windows
         final ips = await getLocalIPv4Addresses();
         for (final ip in ips) {
           final parts = ip.split('.');
           if (parts.length == 4 && parts[0] != '127') {
             final subnetBroadcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
             try {
-              _udpBeacon?.send(beacon, InternetAddress(subnetBroadcast), discoveryPort);
+              _udpBeacon?.send(
+                  beacon, InternetAddress(subnetBroadcast), discoveryPort);
             } catch (_) {}
           }
         }
@@ -669,12 +699,11 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// Запуск Bluetooth LE + Wi-Fi Direct Mesh на Android
+  /// Безопасный запуск Bluetooth / Wi-Fi Direct Mesh (вызывается ТОЛЬКО после отрисовки UI)
   Future<void> startAndroidBleMesh() async {
     if (!Platform.isAndroid || bleMeshActive) return;
     try {
-      await [
-        Permission.bluetooth,
+      final statuses = await [
         Permission.bluetoothAdvertise,
         Permission.bluetoothConnect,
         Permission.bluetoothScan,
@@ -682,16 +711,27 @@ class MeshEngine {
         Permission.locationWhenInUse,
       ].request();
 
+      final hasLocation =
+          statuses[Permission.locationWhenInUse]?.isGranted ?? false;
+      if (!hasLocation) {
+        lastStatusLog = 'Wi-Fi работает (Для BLE Mesh дай доступ к Геолокации)';
+        onStateChanged();
+        return;
+      }
+
       final nearby = Nearby();
       await nearby.startAdvertising(
         nodeId,
         Strategy.P2P_CLUSTER,
         serviceId: serviceId,
-        onConnectionInitiated: (String endpointId, ConnectionInfo info) {
-          nearby.acceptConnection(
-            endpointId,
-            onPayLoadRecieved: (endId, payload) => _onBlePayload(endId, payload),
-          );
+        onConnectionInitiated: (String endpointId, ConnectionInfo info) async {
+          try {
+            await nearby.acceptConnection(
+              endpointId,
+              onPayLoadRecieved: (endId, payload) =>
+                  _onBlePayload(endId, payload),
+            );
+          } catch (_) {}
         },
         onConnectionResult: (String endpointId, Status status) {
           if (status == Status.CONNECTED) {
@@ -713,28 +753,33 @@ class MeshEngine {
         nodeId,
         Strategy.P2P_CLUSTER,
         serviceId: serviceId,
-        onEndpointFound: (String endpointId, String name, String srvId) {
+        onEndpointFound: (String endpointId, String name, String srvId) async {
           if (nodeId.compareTo(name) < 0) {
-            nearby.requestConnection(
-              nodeId,
-              endpointId,
-              onConnectionInitiated: (id, info) {
-                nearby.acceptConnection(
-                  id,
-                  onPayLoadRecieved: (endId, payload) => _onBlePayload(endId, payload),
-                );
-              },
-              onConnectionResult: (id, status) {
-                if (status == Status.CONNECTED) {
-                  _sendBleLine(id, _buildHelloJson());
-                }
-              },
-              onDisconnected: (id) {
-                _blePeers.remove(id);
-                _refreshOnlineStatuses();
-                onStateChanged();
-              },
-            );
+            try {
+              await nearby.requestConnection(
+                nodeId,
+                endpointId,
+                onConnectionInitiated: (id, info) async {
+                  try {
+                    await nearby.acceptConnection(
+                      id,
+                      onPayLoadRecieved: (endId, payload) =>
+                          _onBlePayload(endId, payload),
+                    );
+                  } catch (_) {}
+                },
+                onConnectionResult: (id, status) {
+                  if (status == Status.CONNECTED) {
+                    _sendBleLine(id, _buildHelloJson());
+                  }
+                },
+                onDisconnected: (id) {
+                  _blePeers.remove(id);
+                  _refreshOnlineStatuses();
+                  onStateChanged();
+                },
+              );
+            } catch (_) {}
           }
         },
         onEndpointLost: (String? endpointId) {
@@ -747,8 +792,12 @@ class MeshEngine {
       );
 
       bleMeshActive = true;
+      lastStatusLog = 'Wi-Fi + BLE Mesh активны';
       onStateChanged();
-    } catch (_) {}
+    } catch (e) {
+      lastStatusLog = 'Wi-Fi активен (BLE отключен: $e)';
+      onStateChanged();
+    }
   }
 
   void _sendBleLine(String endpointId, String line) {
@@ -810,7 +859,9 @@ class MeshEngine {
 
   void _cleanupSocket(Socket s) {
     _tcpPeers.remove(s);
-    s.destroy();
+    try {
+      s.destroy();
+    } catch (_) {}
     _refreshOnlineStatuses();
     onStateChanged();
   }
