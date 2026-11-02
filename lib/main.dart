@@ -4,7 +4,6 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'mesh_engine.dart';
 
@@ -15,7 +14,7 @@ void main() {
       FlutterError.presentError(details);
     };
     PlatformDispatcher.instance.onError = (error, stack) {
-      return true; // Не даем необработанным нативным исключениям ронять приложение
+      return true;
     };
     runApp(const MeshMessengerApp());
   }, (error, stack) {});
@@ -27,9 +26,14 @@ class MeshMessengerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Mayak P2P Mesh',
+      title: 'Маяк P2P Mesh',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true),
+      theme: ThemeData.dark(useMaterial3: true).copyWith(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.tealAccent,
+          brightness: Brightness.dark,
+        ),
+      ),
       home: const HomeScreen(),
     );
   }
@@ -75,16 +79,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _initNode() async {
     await _engine.init();
     await _refreshInviteAndIps();
-
-    // На Android запрашиваем разрешения и запускаем BLE ТОЛЬКО после полной отрисовки экрана
-    if (Platform.isAndroid) {
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        await Future.delayed(const Duration(milliseconds: 600));
-        if (mounted) {
-          await _engine.startAndroidBleMesh();
-        }
-      });
-    }
   }
 
   Future<void> _refreshInviteAndIps() async {
@@ -120,29 +114,34 @@ class _HomeScreenState extends State<HomeScreen> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Мой профиль'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'ID узла: ${_engine.nodeId}\nЛокальные IP: ${_myIps.join(", ")}:${_engine.listenPort}\nСтатус: ${_engine.lastStatusLog}',
-              style: const TextStyle(fontSize: 12, color: Colors.white70),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: nameCtrl,
-              autofocus: true,
-              decoration: const InputDecoration(
-                labelText: 'Твое имя / Никнейм',
-                border: OutlineInputBorder(),
+        title: const Text('Мой профиль и сеть'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'ID узла: ${_engine.nodeId}\n'
+                'Локальные IP: ${_myIps.join(", ")}\n'
+                'TCP-порт: ${_engine.listenPort}\n'
+                'Статус: ${_engine.lastStatusLog}',
+                style: const TextStyle(fontSize: 12, color: Colors.white70),
               ),
-              onSubmitted: (_) async {
-                await _engine.updateNickname(nameCtrl.text);
-                if (ctx.mounted) Navigator.pop(ctx);
-              },
-            ),
-          ],
+              const SizedBox(height: 12),
+              TextField(
+                controller: nameCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Твое имя / Позывной',
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (_) async {
+                  await _engine.updateNickname(nameCtrl.text);
+                  if (ctx.mounted) Navigator.pop(ctx);
+                },
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -161,6 +160,58 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _showLogsModal() {
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Журнал работы узла Маяк',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+                TextButton.icon(
+                  onPressed: () {
+                    Clipboard.setData(
+                      ClipboardData(text: _engine.debugLogs.join('\n')),
+                    );
+                    Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Журнал скопирован')),
+                    );
+                  },
+                  icon: const Icon(Icons.copy, size: 16),
+                  label: const Text('Скопировать'),
+                ),
+              ],
+            ),
+            const Divider(),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _engine.debugLogs.length,
+                itemBuilder: (_, i) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Text(
+                    _engine.debugLogs[i],
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showMyQrModal() {
     if (_myInvite.isEmpty) return;
     showDialog(
@@ -170,7 +221,12 @@ class _HomeScreenState extends State<HomeScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SizedBox(
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+              ),
               width: 230,
               height: 230,
               child: Center(
@@ -181,16 +237,26 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-            Text(
-              'IP: ${_myIps.join(", ")} : ${_engine.listenPort}',
-              style: const TextStyle(fontSize: 12, color: Colors.white70),
+            const SizedBox(height: 10),
+            SelectableText(
+              'Прямой IP: ${_myIps.join(", ")}:${_engine.listenPort}',
+              style: const TextStyle(fontSize: 12, color: Colors.tealAccent),
               textAlign: TextAlign.center,
             ),
           ],
         ),
         actions: [
-          TextButton(
+          TextButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: _myInvite));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Код скопирован')),
+              );
+            },
+            icon: const Icon(Icons.copy, size: 16),
+            label: const Text('Копировать код'),
+          ),
+          FilledButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Закрыть'),
           ),
@@ -200,12 +266,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openQrScanner() async {
-    if (Platform.isAndroid || Platform.isIOS) {
-      final camStatus = await Permission.camera.request();
-      if (!camStatus.isGranted) {
+    if (Platform.isAndroid) {
+      final camGranted = await _engine.requestCameraPermission();
+      if (!camGranted) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Нужен доступ к камере для сканирования QR')),
+          const SnackBar(
+              content: Text('Для сканирования QR разрешите доступ к камере')),
         );
         return;
       }
@@ -217,22 +284,30 @@ class _HomeScreenState extends State<HomeScreen> {
       MaterialPageRoute(builder: (_) => const QrScannerScreen()),
     );
     if (scannedCode != null && scannedCode.trim().isNotEmpty) {
-      try {
-        final id = await _engine.connectWithInviteCode(scannedCode);
-        if (!mounted) return;
-        setState(() {
-          _selectedContactId = id;
-        });
-        final name = _engine.knownContacts[id]?.nickname ?? id;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Подключен контакт: $name')),
-        );
-      } catch (_) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Неверный формат QR-кода')),
-        );
-      }
+      await _handleConnectInput(scannedCode);
+    }
+  }
+
+  Future<void> _handleConnectInput(String raw) async {
+    try {
+      final id = await _engine.connectWithInviteOrIp(raw);
+      if (!mounted) return;
+      setState(() {
+        if (id != null) _selectedContactId = id;
+        _inviteCtrl.clear();
+      });
+      final label = id != null
+          ? (_engine.knownContacts[id]?.nickname ?? id)
+          : raw.trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Запрос подключения отправлен: $label')),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Неверный формат кода или IP (пример: 192.168.1.5)')),
+      );
     }
   }
 
@@ -266,25 +341,27 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(width: 8),
               Flexible(
                 child: Text(
-                  _engine.nickname.isEmpty ? '...' : _engine.nickname,
+                  _engine.nickname.isEmpty ? 'Маяк' : _engine.nickname,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               const SizedBox(width: 4),
-              const Icon(Icons.edit, size: 16, color: Colors.white54),
+              const Icon(Icons.edit, size: 15, color: Colors.white54),
             ],
           ),
         ),
         actions: [
-          if (Platform.isAndroid)
-            IconButton(
-              icon: Icon(
-                Icons.bluetooth_audio,
-                color: _engine.bleMeshActive ? Colors.lightBlueAccent : Colors.white54,
-              ),
-              tooltip: 'Включить/перезапустить Bluetooth Mesh',
-              onPressed: () => _engine.startAndroidBleMesh(),
-            ),
+          IconButton(
+            icon: _engine.isScanningSubnet
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.radar),
+            tooltip: 'Поиск узлов в Wi-Fi / Точке доступа',
+            onPressed: () => _engine.scanLocalSubnet(),
+          ),
           IconButton(
             icon: const Icon(Icons.qr_code),
             tooltip: 'Мой QR-код',
@@ -296,14 +373,10 @@ class _HomeScreenState extends State<HomeScreen> {
               tooltip: 'Сканировать QR камерой',
               onPressed: _openQrScanner,
             ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Center(
-              child: Text(
-                'Онлайн: ${_engine.connectedPeersCount} | Буфер: ${_engine.transitBuffer.length}',
-                style: const TextStyle(fontSize: 12, color: Colors.greenAccent),
-              ),
-            ),
+          IconButton(
+            icon: const Icon(Icons.terminal),
+            tooltip: 'Журнал сети',
+            onPressed: _showLogsModal,
           ),
         ],
       ),
@@ -318,62 +391,65 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'IP: ${_myIps.join(", ")}:${_engine.listenPort} | ${_engine.lastStatusLog}',
-                      style: const TextStyle(fontSize: 11, color: Colors.white70),
-                    ),
-                    const SizedBox(height: 4),
                     Row(
                       children: [
                         Expanded(
                           child: Text(
-                            _myInvite.isEmpty ? 'Генерация...' : _myInvite,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontFamily: 'monospace'),
+                            'IP: ${_myIps.join(", ")}:${_engine.listenPort} | Онлайн: ${_engine.connectedPeersCount} | Буфер: ${_engine.transitBuffer.length}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.greenAccent,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.copy),
-                          tooltip: 'Скопировать мой код',
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(text: _myInvite));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Код скопирован')),
-                            );
-                          },
-                        ),
+                        if (Platform.isAndroid)
+                          FilledButton.tonalIcon(
+                            onPressed: () async {
+                              await _engine.toggleAndroidBleMesh();
+                              if (mounted) setState(() {});
+                            },
+                            icon: Icon(
+                              _engine.bleMeshActive
+                                  ? Icons.bluetooth_connected
+                                  : Icons.bluetooth,
+                              size: 16,
+                              color: _engine.bleMeshActive
+                                  ? Colors.lightBlueAccent
+                                  : Colors.white70,
+                            ),
+                            label: Text(
+                              _engine.bleMeshActive ? 'BLE Вкл' : 'Вкл BLE',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
                       ],
                     ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _engine.lastStatusLog,
+                      style:
+                          const TextStyle(fontSize: 11, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 8),
                     Row(
                       children: [
                         Expanded(
                           child: TextField(
                             controller: _inviteCtrl,
                             decoration: const InputDecoration(
-                              hintText: 'Вставь код или сканируй QR кнопкой сверху...',
+                              hintText:
+                                  'Вставь IP (напр. 192.168.1.5) или код узла...',
                               isDense: true,
+                              border: OutlineInputBorder(),
                             ),
-                            onSubmitted: (_) async {
-                              if (_inviteCtrl.text.trim().isEmpty) return;
-                              final id = await _engine.connectWithInviteCode(_inviteCtrl.text);
-                              setState(() {
-                                _selectedContactId = id;
-                                _inviteCtrl.clear();
-                              });
-                            },
+                            onSubmitted: (val) => _handleConnectInput(val),
                           ),
                         ),
                         const SizedBox(width: 8),
                         ElevatedButton(
-                          onPressed: () async {
-                            if (_inviteCtrl.text.trim().isEmpty) return;
-                            final id = await _engine.connectWithInviteCode(_inviteCtrl.text);
-                            setState(() {
-                              _selectedContactId = id;
-                              _inviteCtrl.clear();
-                            });
-                          },
+                          onPressed: () =>
+                              _handleConnectInput(_inviteCtrl.text),
                           child: const Text('Подключить'),
                         ),
                       ],
@@ -411,7 +487,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
-                                  c.displayTitle,
+                                  c.lastAddress.isNotEmpty
+                                      ? '${c.displayTitle} [${c.lastAddress}]'
+                                      : c.displayTitle,
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
@@ -426,7 +504,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Expanded(
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 8),
-                padding: const EdgeInsets.all(8),
+                padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
                   color: Colors.black26,
                   borderRadius: BorderRadius.circular(8),
@@ -434,16 +512,19 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: _messages.isEmpty
                     ? const Center(
                         child: Text(
-                          'Сообщений пока нет.\nОтсканируй QR-код второго устройства или подожди автопоиска в одной Wi-Fi / Bluetooth сети.',
+                          'Сообщений пока нет.\n'
+                          '• В одной Wi-Fi сети или Точке доступа узлы находятся автоматически (или нажми иконку радара сверху).\n'
+                          '• Также можно ввести IP второго устройства (например 192.168.1.5) или отсканировать QR-код.\n'
+                          '• Для связи без Wi-Fi по Bluetooth нажми «Вкл BLE».',
                           textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white38),
+                          style: TextStyle(color: Colors.white54, fontSize: 13),
                         ),
                       )
                     : ListView.builder(
                         itemCount: _messages.length,
                         itemBuilder: (_, i) => Padding(
                           padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: Text(_messages[i]),
+                          child: SelectableText(_messages[i]),
                         ),
                       ),
               ),
@@ -501,6 +582,17 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       appBar: AppBar(title: const Text('Наведи камеру на QR-код')),
       body: MobileScanner(
         controller: _controller,
+        errorBuilder: (context, error, child) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Не удалось открыть камеру: ${error.errorCode}\nИспользуйте подключение по IP или коду.',
+                textAlign: TextAlign.center,
+              ),
+            ),
+          );
+        },
         onDetect: (capture) {
           if (_alreadyScanned) return;
           for (final barcode in capture.barcodes) {
