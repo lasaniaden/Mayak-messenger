@@ -117,9 +117,12 @@ class MeshEngine {
   ServerSocket? _tcpServer;
   RawDatagramSocket? _udpBeacon;
   Timer? _beaconTimer;
+  Timer? _autoScanTimer;
   int listenPort = 0;
   bool bleMeshActive = false;
   bool isScanningSubnet = false;
+  bool vpnDetected = false;
+  bool notificationsEnabled = true;
   String lastStatusLog = 'Запуск ядра...';
   final List<String> debugLogs = [];
 
@@ -184,7 +187,6 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// Безопасная инициализация: НЕ вызывает диалоги разрешений или Bluetooth при холодном старте
   Future<void> init() async {
     try {
       await _loadOrCreateIdentity();
@@ -221,8 +223,16 @@ class MeshEngine {
     await _startLanAutoDiscovery();
     _addLog('Wi-Fi / Hotspot готов (порт $listenPort)');
 
-    // Запускаем фоновый поиск по локальной подсети (для мобильных точек доступа)
+    // Первый автопоиск сразу при старте
     unawaited(scanLocalSubnet());
+
+    // Фоновый автопоиск каждые 15 секунд, если пока нет подключенных пиров
+    _autoScanTimer?.cancel();
+    _autoScanTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (connectedPeersCount == 0 && !isScanningSubnet) {
+        unawaited(scanLocalSubnet(silent: true));
+      }
+    });
   }
 
   Future<void> _loadOrCreateIdentity() async {
@@ -254,7 +264,6 @@ class MeshEngine {
           Platform.isAndroid ? 'Android-$nodeId' : 'PC-$nodeId';
       nickname = prefs.getString('user_nickname') ?? defaultName;
     } catch (_) {
-      // Fallback в RAM, если SharedPreferences недоступен
       final signSeed = _randomBytes(32);
       final dhSeed = _randomBytes(32);
       _signKeyPair = await _ed25519.newKeyPairFromSeed(signSeed);
@@ -294,8 +303,28 @@ class MeshEngine {
         'sg': signPubHex,
       });
 
+  /// Умное получение реальных локальных IP с жесткой фильтрацией VPN / TUN / Wintun / Clash / Radmin адаптеров
   Future<List<String>> getLocalIPv4Addresses() async {
-    final ipv4List = <String>[];
+    final preferredLan = <String>[];
+    final fallbackLan = <String>[];
+    bool detectedVpnInterface = false;
+
+    // 1. На Android запрашиваем прямой IP физического Wi-Fi чипа через WifiManager (работает даже поверх VPN!)
+    if (Platform.isAndroid) {
+      try {
+        final res = await _nativeChannel
+            .invokeMapMethod<String, dynamic>('getWifiIpAndVpnState');
+        if (res != null) {
+          final wifiIp = (res['wifiIp'] as String?) ?? '';
+          final isVpn = (res['vpnActive'] as bool?) ?? false;
+          if (isVpn) detectedVpnInterface = true;
+          if (wifiIp.isNotEmpty && wifiIp != '0.0.0.0') {
+            preferredLan.add(wifiIp);
+          }
+        }
+      } catch (_) {}
+    }
+
     try {
       final interfaces = await NetworkInterface.list(
         includeLoopback: false,
@@ -303,29 +332,63 @@ class MeshEngine {
       );
       for (final iface in interfaces) {
         final lower = iface.name.toLowerCase();
+        // Отсекаем все известные VPN-туннели и виртуальные адаптеры
+        if (lower.contains('tun') ||
+            lower.contains('tap') ||
+            lower.contains('ppp') ||
+            lower.contains('wg') ||
+            lower.contains('utun') ||
+            lower.contains('wintun') ||
+            lower.contains('wireguard') ||
+            lower.contains('proton') ||
+            lower.contains('amnezia') ||
+            lower.contains('clash') ||
+            lower.contains('sing') ||
+            lower.contains('nekobox') ||
+            lower.contains('v2ray') ||
+            lower.contains('outline') ||
+            lower.contains('tailscale') ||
+            lower.contains('zerotier') ||
+            lower.contains('radmin') ||
+            lower.contains('hamachi') ||
+            lower.contains('NordLynx'.toLowerCase())) {
+          detectedVpnInterface = true;
+          continue;
+        }
         if (lower.contains('wsl') ||
             lower.contains('docker') ||
             lower.contains('vbox') ||
             lower.contains('vethernet') ||
-            lower.contains('vmware')) {
+            lower.contains('vmware') ||
+            lower.contains('hyper-v')) {
           continue;
         }
+
         for (final addr in iface.addresses) {
           final ip = addr.address;
-          if (!ip.startsWith('169.254.')) {
-            if (ip.startsWith('192.168.') ||
-                ip.startsWith('10.') ||
-                ip.startsWith('172.')) {
-              ipv4List.insert(0, ip);
-            } else {
-              ipv4List.add(ip);
-            }
+          // Игнорируем link-local, CGNAT/Tailscale (100.64.*) и фейковые подсети Clash/Sing-box (198.18.*)
+          if (ip.startsWith('169.254.') ||
+              ip.startsWith('198.18.') ||
+              ip.startsWith('198.19.') ||
+              ip.startsWith('100.')) {
+            detectedVpnInterface = true;
+            continue;
+          }
+
+          // Приоритет отдаем классическим Wi-Fi / Hotspot подсетям 192.168.*
+          if (ip.startsWith('192.168.')) {
+            if (!preferredLan.contains(ip)) preferredLan.add(ip);
+          } else {
+            if (!fallbackLan.contains(ip)) fallbackLan.add(ip);
           }
         }
       }
     } catch (_) {}
-    if (ipv4List.isEmpty) ipv4List.add('127.0.0.1');
-    return ipv4List.toSet().toList();
+
+    vpnDetected = detectedVpnInterface;
+    final result = [...preferredLan, ...fallbackLan];
+    if (result.isEmpty) result.add('127.0.0.1');
+    return result;
   }
 
   Future<String> getInviteCode() async {
@@ -342,25 +405,23 @@ class MeshEngine {
     return base64UrlEncode(utf8.encode(jsonEncode(bundle)));
   }
 
-  /// Подключение по QR/Base64 коду ИЛИ напрямую по IP[:port]
   Future<String?> connectWithInviteOrIp(String rawInput) async {
     final input = rawInput.trim();
     if (input.isEmpty) return null;
 
-    // 1. Проверяем, не ввел ли пользователь обычный IP-адрес (например 192.168.1.5 или 192.168.43.1:42070)
-    final ipRegex = RegExp(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::(\d+))?$');
+    final ipRegex =
+        RegExp(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::(\d+))?$');
     final match = ipRegex.firstMatch(input);
     if (match != null) {
       final host = match.group(1)!;
       final port = int.tryParse(match.group(2) ?? '') ?? defaultTcpPort;
-      _addLog('Подключение к $host:$port...');
+      _addLog('Прямое подключение к $host:$port...');
       await connectToHost(host, port);
       return null;
     }
 
-    // 2. Иначе декодируем Base64Url инвайт-код
-    final decoded =
-        jsonDecode(utf8.decode(base64Url.decode(input))) as Map<String, dynamic>;
+    final decoded = jsonDecode(utf8.decode(base64Url.decode(input)))
+        as Map<String, dynamic>;
     final port = (decoded['p'] as int?) ?? defaultTcpPort;
     final targetId = decoded['id'] as String;
     final targetNick = (decoded['nick'] as String?) ?? 'Узел $targetId';
@@ -387,24 +448,29 @@ class MeshEngine {
     return targetId;
   }
 
-  /// Активное сканирование локальной подсети (находит ПК и телефоны на точке доступа даже при блокировке UDP Broadcast)
-  Future<void> scanLocalSubnet() async {
+  /// Активное сканирование локальной подсети (работает даже при включенном VPN и заблокированном UDP Broadcast)
+  Future<void> scanLocalSubnet({bool silent = false}) async {
     if (isScanningSubnet) return;
     isScanningSubnet = true;
+    if (!silent) _addLog('Поиск устройств в локальной Wi-Fi сети...');
     onStateChanged();
     try {
       final myIps = await getLocalIPv4Addresses();
       final prefixes = <String>{};
       for (final ip in myIps) {
         final parts = ip.split('.');
+        // Сканируем прежде всего реальные локальные подсети 192.168.x.* и 172.x.*
         if (parts.length == 4 && parts[0] != '127') {
           prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
         }
       }
+      // На случай если Android Hotspot использует 192.168.43.* или Windows Hotspot 192.168.137.*
+      if (prefixes.isEmpty) {
+        prefixes.addAll(['192.168.1', '192.168.0', '192.168.43', '192.168.137']);
+      }
 
       for (final prefix in prefixes) {
-        // Сначала проверяем популярные адреса шлюзов/хотспотов (.1, .2, .43.1, .137.1)
-        final priorityHosts = <int>[1, 2, 100, 101, 102];
+        final priorityHosts = <int>[1, 2, 100, 101, 102, 103, 104, 105];
         for (final lastOctet in priorityHosts) {
           final targetIp = '$prefix.$lastOctet';
           if (!myIps.contains(targetIp)) {
@@ -413,7 +479,6 @@ class MeshEngine {
           }
         }
 
-        // Затем быстрыми пачками по 25 узлов проверяем подсеть /24 на дефолтном порту 42070
         final batch = <Future<void>>[];
         for (int i = 1; i <= 254; i++) {
           final targetIp = '$prefix.$i';
@@ -423,7 +488,7 @@ class MeshEngine {
             defaultTcpPort,
             timeout: const Duration(milliseconds: 350),
           ));
-          if (batch.length >= 25) {
+          if (batch.length >= 30) {
             await Future.wait(batch);
             batch.clear();
           }
@@ -432,10 +497,75 @@ class MeshEngine {
           await Future.wait(batch);
         }
       }
+      if (!silent) {
+        _addLog('Поиск завершен (найдено онлайн: $connectedPeersCount)');
+      }
     } catch (_) {
     } finally {
       isScanningSubnet = false;
       onStateChanged();
+    }
+  }
+
+  /// Автонастройка Windows Firewall для профиля «Общественная сеть (Public)» без переключения самой сети в Частную!
+  Future<String> configureWindowsPublicFirewall() async {
+    if (!Platform.isWindows) return 'Только для Windows';
+    try {
+      final cmdArgs =
+          '/c netsh advfirewall firewall delete rule name="Mayak P2P TCP 42070" >nul 2>&1 & '
+          'netsh advfirewall firewall delete rule name="Mayak P2P UDP 42069" >nul 2>&1 & '
+          'netsh advfirewall firewall add rule name="Mayak P2P TCP 42070" dir=in action=allow protocol=TCP localport=42070 profile=public,private,domain & '
+          'netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain';
+
+      final res = await Process.run('powershell', [
+        '-NoProfile',
+        '-Command',
+        "Start-Process cmd -ArgumentList '$cmdArgs' -Verb RunAs -Wait"
+      ]);
+      if (res.exitCode == 0) {
+        _addLog(
+            'Правила Брандмауэра Windows для Общественной сети успешно добавлены!');
+        return 'OK';
+      } else {
+        _addLog('Не удалось применить правила автоматически: ${res.stderr}');
+        return 'ERROR';
+      }
+    } catch (e) {
+      _addLog('Ошибка вызова UAC: $e');
+      return 'ERROR';
+    }
+  }
+
+  Future<bool> requestAndroidNotifications() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      final ok = await _nativeChannel
+              .invokeMethod<bool>('requestNotificationPermission') ??
+          false;
+      notificationsEnabled = ok;
+      if (ok) {
+        _addLog('Уведомления о новых СМС включены');
+      }
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _triggerIncomingNotification(
+      String senderName, String text) async {
+    try {
+      await SystemSound.play(SystemSoundType.alert);
+      await HapticFeedback.heavyImpact();
+    } catch (_) {}
+
+    if (Platform.isAndroid && notificationsEnabled) {
+      try {
+        await _nativeChannel.invokeMethod('showNotification', {
+          'title': 'Маяк: $senderName',
+          'body': text,
+        });
+      } catch (_) {}
     }
   }
 
@@ -686,7 +816,9 @@ class MeshEngine {
         nick: pkt.srcNickname,
       );
       final senderName = knownContacts[senderId]?.nickname ?? senderId;
-      onMessageReceived(senderId, senderName, utf8.decode(clearBytes));
+      final decodedText = utf8.decode(clearBytes);
+      onMessageReceived(senderId, senderName, decodedText);
+      unawaited(_triggerIncomingNotification(senderName, decodedText));
 
       final ackSig = await _ed25519.sign(
         utf8.encode('ACK:${pkt.msgId}'),
@@ -839,6 +971,16 @@ class MeshEngine {
               _udpBeacon?.send(
                   beacon, InternetAddress(subnetBroadcast), discoveryPort);
             } catch (_) {}
+
+            // При включенном VPN отправляем пакет напрямую с привязкой к физическому IP Wi-Fi адаптера
+            try {
+              final ifaceSocket =
+                  await RawDatagramSocket.bind(InternetAddress(ip), 0);
+              ifaceSocket.broadcastEnabled = true;
+              ifaceSocket.send(
+                  beacon, InternetAddress(subnetBroadcast), discoveryPort);
+              ifaceSocket.close();
+            } catch (_) {}
           }
         }
       });
@@ -847,7 +989,6 @@ class MeshEngine {
     }
   }
 
-  /// Безопасное включение Bluetooth / Wi-Fi Direct Mesh через наш защищенный нативный мост в MainActivity.kt
   Future<bool> toggleAndroidBleMesh() async {
     if (!Platform.isAndroid) return false;
     try {
@@ -930,7 +1071,8 @@ class MeshEngine {
             }
           }
         },
-        replyDirect: (replyJson) => unawaited(_sendBleLine(endpointId, replyJson)),
+        replyDirect: (replyJson) =>
+            unawaited(_sendBleLine(endpointId, replyJson)),
         excludeBleId: endpointId,
       );
     }
