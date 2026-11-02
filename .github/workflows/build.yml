@@ -18,63 +18,32 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Flutter
+      - name: Setup Flutter 3.27.1
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.27.1'
           channel: 'stable'
           cache: true
 
-      - name: Create Android platform folder & inject Permissions
+      - name: Recreate Clean Android Platform & Inject Crash-Proof Native Bridge
         run: |
-          flutter create --platforms=android --project-name=p2p_mesh .
+          rm -rf android
+          flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
           python3 -c '
-          path = "android/app/src/main/AndroidManifest.xml"
-          with open(path, "r") as f:
-              content = f.read()
-          perms = """
-              <uses-feature android:name="android.hardware.camera" android:required="false"/>
-              <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
-              <uses-permission android:name="android.permission.CAMERA"/>
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
-              <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
-              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
-              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation"/>
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-          """
-          if "android.permission.CAMERA" not in content:
-              content = content.replace("<application", perms + "\n    <application", 1)
-          with open(path, "w") as f:
-              f.write(content)
-          '
+          import glob, os, re
 
-      - name: Configure Android SDK 36, minSdk 23, AGP 8.7.0, Gradle 8.9, and Kotlin 2.1.0
-        run: |
-          python3 -c '
-          import os, re
+          # 1. Настраиваем gradle.properties (отключаем R8 fullMode и увеличиваем память)
+          gp_path = "android/gradle.properties"
+          gp_content = ""
+          if os.path.exists(gp_path):
+              with open(gp_path, "r") as f:
+                  gp_content = f.read()
+          if "android.enableR8.fullMode" not in gp_content:
+              gp_content += "\nandroid.enableR8.fullMode=false\n"
+          with open(gp_path, "w") as f:
+              f.write(gp_content)
 
-          for p in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              if os.path.exists(p):
-                  with open(p, "r") as f:
-                      c = f.read()
-                  c = c.replace("flutter.minSdkVersion", "23")
-                  c = c.replace("flutter.compileSdkVersion", "36")
-                  c = c.replace("flutter.targetSdkVersion", "35")
-                  c = re.sub(r"compileSdk\s*=?\s*\d+", "compileSdk = 36", c)
-                  c = re.sub(r"compileSdkVersion\s+\d+", "compileSdkVersion 36", c)
-                  c = re.sub(r"minSdk\s*=?\s*\d+", "minSdk = 23", c)
-                  c = re.sub(r"minSdkVersion\s+\d+", "minSdkVersion 23", c)
-                  with open(p, "w") as f:
-                      f.write(c)
-
+          # 2. Обновляем settings.gradle / settings.gradle.kts (AGP 8.7.0, Kotlin 2.1.0)
           for s in ["android/settings.gradle", "android/settings.gradle.kts"]:
               if os.path.exists(s):
                   with open(s, "r") as f:
@@ -92,6 +61,7 @@ jobs:
                   with open(s, "w") as f:
                       f.write(sc)
 
+          # 3. Обновляем Gradle Wrapper до 8.9
           gw = "android/gradle/wrapper/gradle-wrapper.properties"
           if os.path.exists(gw):
               with open(gw, "r") as f:
@@ -103,13 +73,495 @@ jobs:
               )
               with open(gw, "w") as f:
                   f.write(gwc)
+
+          # 4. Переписываем android/app/build.gradle(.kts) с compileSdk = 36, targetSdk = 34,
+          #    явным отключением R8-минификации, useLegacyPackaging = true и Google Play Services Nearby
+          kts_path = "android/app/build.gradle.kts"
+          groovy_path = "android/app/build.gradle"
+
+          if os.path.exists(kts_path):
+              with open(kts_path, "w") as f:
+                  f.write("""plugins {
+              id("com.android.application")
+              id("kotlin-android")
+              id("dev.flutter.flutter-gradle-plugin")
+          }
+
+          android {
+              namespace = "com.mayak.mesh.p2p_mesh"
+              compileSdk = 36
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              defaultConfig {
+                  applicationId = "com.mayak.mesh.p2p_mesh"
+                  minSdk = 23
+                  targetSdk = 34
+                  versionCode = 5
+                  versionName = "0.5.0"
+              }
+
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                  }
+              }
+
+              buildTypes {
+                  getByName("release") {
+                      signingConfig = signingConfigs.getByName("debug")
+                      isMinifyEnabled = false
+                      isShrinkResources = false
+                  }
+              }
+          }
+
+          flutter {
+              source = "../.."
+          }
+
+          dependencies {
+              implementation("com.google.android.gms:play-services-nearby:19.3.0")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+          }
+          """)
+          elif os.path.exists(groovy_path):
+              with open(groovy_path, "w") as f:
+                  f.write("""plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          android {
+              namespace "com.mayak.mesh.p2p_mesh"
+              compileSdk 36
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              defaultConfig {
+                  applicationId "com.mayak.mesh.p2p_mesh"
+                  minSdkVersion 23
+                  targetSdkVersion 34
+                  versionCode 5
+                  versionName "0.5.0"
+              }
+
+              packagingOptions {
+                  jniLibs {
+                      useLegacyPackaging true
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.debug
+                      minifyEnabled false
+                      shrinkResources false
+                  }
+              }
+          }
+
+          flutter {
+              source "../.."
+          }
+
+          dependencies {
+              implementation "com.google.android.gms:play-services-nearby:19.3.0"
+              implementation "androidx.core:core-ktx:1.13.1"
+              implementation "androidx.appcompat:appcompat:1.7.0"
+          }
+          """)
+
+          # 5. Записываем правильный AndroidManifest.xml (БЕЗ maxSdkVersion="30" на BLUETOOTH,
+          #    из-за которого падал Google Play Services Nearby на Android 12-15!)
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          with open(manifest_path, "w") as f:
+              f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-feature android:name="android.hardware.camera" android:required="false"/>
+              <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
+              <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+              <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
+              <uses-feature android:name="android.hardware.wifi" android:required="false"/>
+
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
+
+              <uses-permission android:name="android.permission.BLUETOOTH"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+
+              <application
+                  android:label="Маяк P2P"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher"
+                  android:usesCleartextTraffic="true"
+                  android:enableOnBackInvokedCallback="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme"
+                        />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          """)
+
+          # 6. Записываем защищенный MainActivity.kt с нативным мостом MethodChannel("mayak/native")
+          kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
+          kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
+          os.makedirs(os.path.dirname(kt_path), exist_ok=True)
+          with open(kt_path, "w") as f:
+              f.write("""package com.mayak.mesh.p2p_mesh
+
+          import android.Manifest
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.net.wifi.WifiManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+          import com.google.android.gms.nearby.Nearby
+          import com.google.android.gms.nearby.connection.AdvertisingOptions
+          import com.google.android.gms.nearby.connection.ConnectionInfo
+          import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback
+          import com.google.android.gms.nearby.connection.ConnectionResolution
+          import com.google.android.gms.nearby.connection.DiscoveredEndpointInfo
+          import com.google.android.gms.nearby.connection.DiscoveryOptions
+          import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback
+          import com.google.android.gms.nearby.connection.Payload
+          import com.google.android.gms.nearby.connection.PayloadCallback
+          import com.google.android.gms.nearby.connection.PayloadTransferUpdate
+          import com.google.android.gms.nearby.connection.Strategy
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private val CHANNEL = "mayak/native"
+              private var methodChannel: MethodChannel? = null
+              private var multicastLock: WifiManager.MulticastLock? = null
+              private var pendingPermResult: MethodChannel.Result? = null
+              private var localNodeId: String = ""
+              private var serviceId: String = "com.p2pmesh.intercom"
+              private val mainHandler = Handler(Looper.getMainLooper())
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+                  Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                      try {
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNativeLog", "Перехвачена ошибка [${thread.name}]: ${throwable.message}")
+                          }
+                      } catch (_: Throwable) {}
+                      if (thread.name != "main") {
+                          return@setDefaultUncaughtExceptionHandler
+                      }
+                      defaultHandler?.uncaughtException(thread, throwable)
+                  }
+              }
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+                  methodChannel = channel
+
+                  channel.setMethodCallHandler { call, result ->
+                      try {
+                          when (call.method) {
+                              "acquireMulticastLock" -> {
+                                  acquireWifiMulticastLock()
+                                  result.success(true)
+                              }
+                              "checkNearbyPermissions" -> {
+                                  result.success(getMissingNearbyPermissions().isEmpty())
+                              }
+                              "requestNearbyPermissions" -> {
+                                  val missing = getMissingNearbyPermissions()
+                                  if (missing.isEmpty()) {
+                                      result.success(true)
+                                  } else {
+                                      pendingPermResult = result
+                                      ActivityCompat.requestPermissions(this, missing.toTypedArray(), 7001)
+                                  }
+                              }
+                              "requestCameraPermission" -> {
+                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                      result.success(true)
+                                  } else {
+                                      pendingPermResult = result
+                                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 7002)
+                                  }
+                              }
+                              "startNearby" -> {
+                                  val nodeIdArg = call.argument<String>("nodeId") ?: "node"
+                                  val srvIdArg = call.argument<String>("serviceId") ?: "com.p2pmesh.intercom"
+                                  startNearbyMesh(nodeIdArg, srvIdArg, result)
+                              }
+                              "sendNearbyPayload" -> {
+                                  val endpointId = call.argument<String>("endpointId") ?: ""
+                                  val data = call.argument<String>("data") ?: ""
+                                  sendPayloadSafe(endpointId, data)
+                                  result.success(true)
+                              }
+                              "stopNearby" -> {
+                                  stopNearbySafe()
+                                  result.success(true)
+                              }
+                              else -> result.notImplemented()
+                          }
+                      } catch (t: Throwable) {
+                          result.success("ERROR: ${t.message}")
+                      }
+                  }
+              }
+
+              private fun acquireWifiMulticastLock() {
+                  try {
+                      val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                      if (wifi != null && multicastLock == null) {
+                          multicastLock = wifi.createMulticastLock("mayak_multicast_lock").apply {
+                              setReferenceCounted(false)
+                              acquire()
+                          }
+                      }
+                  } catch (_: Throwable) {}
+              }
+
+              private fun getMissingNearbyPermissions(): List<String> {
+                  val required = mutableListOf(
+                      Manifest.permission.ACCESS_FINE_LOCATION,
+                      Manifest.permission.ACCESS_COARSE_LOCATION
+                  )
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      required.add(Manifest.permission.BLUETOOTH_SCAN)
+                      required.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+                      required.add(Manifest.permission.BLUETOOTH_CONNECT)
+                  }
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      required.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                  }
+                  return required.filter {
+                      ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+                  }
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int,
+                  permissions: Array<out String>,
+                  grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  val res = pendingPermResult
+                  pendingPermResult = null
+                  if (res != null) {
+                      try {
+                          if (requestCode == 7001) {
+                              res.success(getMissingNearbyPermissions().isEmpty())
+                          } else if (requestCode == 7002) {
+                              val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                              res.success(granted)
+                          } else {
+                              res.success(false)
+                          }
+                      } catch (_: Throwable) {}
+                  }
+              }
+
+              private val payloadCallback = object : PayloadCallback() {
+                  override fun onPayloadReceived(endpointId: String, payload: Payload) {
+                      try {
+                          if (payload.type == Payload.Type.BYTES) {
+                              val bytes = payload.asBytes() ?: return
+                              val str = String(bytes, Charsets.UTF_8)
+                              mainHandler.post {
+                                  methodChannel?.invokeMethod(
+                                      "onNearbyPayload",
+                                      mapOf("endpointId" to endpointId, "data" to str)
+                                  )
+                              }
+                          }
+                      } catch (_: Throwable) {}
+                  }
+
+                  override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {}
+              }
+
+              private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
+                  override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
+                      try {
+                          Nearby.getConnectionsClient(applicationContext)
+                              .acceptConnection(endpointId, payloadCallback)
+                      } catch (_: Throwable) {}
+                  }
+
+                  override fun onConnectionResult(endpointId: String, resolution: ConnectionResolution) {
+                      try {
+                          mainHandler.post {
+                              if (resolution.status.isSuccess) {
+                                  methodChannel?.invokeMethod("onNearbyConnected", endpointId)
+                              } else {
+                                  methodChannel?.invokeMethod("onNearbyDisconnected", endpointId)
+                              }
+                          }
+                      } catch (_: Throwable) {}
+                  }
+
+                  override fun onDisconnected(endpointId: String) {
+                      try {
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNearbyDisconnected", endpointId)
+                          }
+                      } catch (_: Throwable) {}
+                  }
+              }
+
+              private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
+                  override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
+                      try {
+                          if (localNodeId.isNotEmpty() && localNodeId != info.endpointName) {
+                              if (localNodeId < info.endpointName) {
+                                  Nearby.getConnectionsClient(applicationContext).requestConnection(
+                                      localNodeId,
+                                      endpointId,
+                                      connectionLifecycleCallback
+                                  )
+                              }
+                          }
+                      } catch (_: Throwable) {}
+                  }
+
+                  override fun onEndpointLost(endpointId: String) {
+                      try {
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNearbyDisconnected", endpointId)
+                          }
+                      } catch (_: Throwable) {}
+                  }
+              }
+
+              private fun startNearbyMesh(nodeIdArg: String, srvIdArg: String, result: MethodChannel.Result) {
+                  val missing = getMissingNearbyPermissions()
+                  if (missing.isNotEmpty()) {
+                      result.success("MISSING_PERMISSIONS")
+                      return
+                  }
+                  localNodeId = nodeIdArg
+                  serviceId = srvIdArg
+                  try {
+                      val client = Nearby.getConnectionsClient(applicationContext)
+                      client.stopAdvertising()
+                      client.stopDiscovery()
+
+                      val advOptions = AdvertisingOptions.Builder()
+                          .setStrategy(Strategy.P2P_CLUSTER)
+                          .build()
+                      val discOptions = DiscoveryOptions.Builder()
+                          .setStrategy(Strategy.P2P_CLUSTER)
+                          .build()
+
+                      client.startAdvertising(
+                          localNodeId,
+                          serviceId,
+                          connectionLifecycleCallback,
+                          advOptions
+                      ).addOnFailureListener { e ->
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNativeLog", "BLE Advertising warning: ${e.message}")
+                          }
+                      }
+
+                      client.startDiscovery(
+                          serviceId,
+                          endpointDiscoveryCallback,
+                          discOptions
+                      ).addOnFailureListener { e ->
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNativeLog", "BLE Discovery warning: ${e.message}")
+                          }
+                      }
+
+                      result.success("OK")
+                  } catch (t: Throwable) {
+                      result.success("ERROR: ${t.message}")
+                  }
+              }
+
+              private fun sendPayloadSafe(endpointId: String, data: String) {
+                  try {
+                      val bytes = data.toByteArray(Charsets.UTF_8)
+                      Nearby.getConnectionsClient(applicationContext)
+                          .sendPayload(endpointId, Payload.fromBytes(bytes))
+                  } catch (_: Throwable) {}
+              }
+
+              private fun stopNearbySafe() {
+                  try {
+                      val client = Nearby.getConnectionsClient(applicationContext)
+                      client.stopAdvertising()
+                      client.stopDiscovery()
+                      client.stopAllEndpoints()
+                  } catch (_: Throwable) {}
+              }
+
+              override fun onDestroy() {
+                  try {
+                      multicastLock?.release()
+                  } catch (_: Throwable) {}
+                  super.onDestroy()
+              }
+          }
+          """)
           '
 
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Release APK (No R8 shrink to prevent JNI/Nearby crash)
-        run: flutter build apk --release --no-shrink
+      - name: Build Release APK
+        run: flutter build apk --release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -123,14 +575,14 @@ jobs:
       - name: Checkout Private Repo
         uses: actions/checkout@v4
 
-      - name: Setup Flutter
+      - name: Setup Flutter 3.27.1
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.27.1'
           channel: 'stable'
           cache: true
 
-      - name: Create Windows platform folder if missing
+      - name: Create Windows platform folder
         run: |
           flutter config --enable-windows-desktop
           flutter create --platforms=windows --project-name=p2p_mesh .
