@@ -54,31 +54,56 @@ jobs:
               f.write(content)
           '
 
-      - name: Configure Android SDK 36, minSdk 23, and Kotlin 2.1.0
+      - name: Configure Android SDK 36, minSdk 23, AGP 8.7.0, Gradle 8.9, and Kotlin 2.1.0
         run: |
           python3 -c '
           import os, re
+
+          # 1. Выставляем compileSdk = 36, targetSdk = 35, minSdk = 23 в app/build.gradle(.kts)
           for p in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(p):
                   with open(p, "r") as f:
                       c = f.read()
                   c = c.replace("flutter.minSdkVersion", "23")
                   c = c.replace("flutter.compileSdkVersion", "36")
+                  c = c.replace("flutter.targetSdkVersion", "35")
                   c = re.sub(r"compileSdk\s*=?\s*\d+", "compileSdk = 36", c)
+                  c = re.sub(r"compileSdkVersion\s+\d+", "compileSdkVersion 36", c)
+                  c = re.sub(r"minSdk\s*=?\s*\d+", "minSdk = 23", c)
+                  c = re.sub(r"minSdkVersion\s+\d+", "minSdkVersion 23", c)
                   with open(p, "w") as f:
                       f.write(c)
 
+          # 2. Выставляем AGP 8.7.0 и Kotlin 2.1.0 в settings.gradle(.kts)
           for s in ["android/settings.gradle", "android/settings.gradle.kts"]:
               if os.path.exists(s):
                   with open(s, "r") as f:
                       sc = f.read()
                   sc = re.sub(
-                      r"(id\s+[\"\x27]org\.jetbrains\.kotlin\.android[\"\x27]\s+version\s+[\"\x27])[^\"\x27]+([\"\x27])",
+                      r"(id\s*[\(\"\x27]+com\.android\.application[\)\"\x27]+\s+version\s+[\"\x27])[^\"\x27]+([\"\x27])",
+                      r"\g<1>8.7.0\g<2>",
+                      sc
+                  )
+                  sc = re.sub(
+                      r"(id\s*[\(\"\x27]+org\.jetbrains\.kotlin\.android[\)\"\x27]+\s+version\s+[\"\x27])[^\"\x27]+([\"\x27])",
                       r"\g<1>2.1.0\g<2>",
                       sc
                   )
                   with open(s, "w") as f:
                       f.write(sc)
+
+          # 3. Выставляем совместимый Gradle Wrapper 8.9 (требуется для AGP 8.7.0)
+          gw = "android/gradle/wrapper/gradle-wrapper.properties"
+          if os.path.exists(gw):
+              with open(gw, "r") as f:
+                  gwc = f.read()
+              gwc = re.sub(
+                  r"distributionUrl=.*gradle-[0-9.]+-all\.zip",
+                  "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.9-all.zip",
+                  gwc
+              )
+              with open(gw, "w") as f:
+                  f.write(gwc)
           '
 
       - name: Install dependencies
