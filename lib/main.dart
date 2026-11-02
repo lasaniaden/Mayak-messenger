@@ -79,6 +79,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _initNode() async {
     await _engine.init();
     await _refreshInviteAndIps();
+    // На Android запрашиваем разрешение на пуш-уведомления после загрузки экрана
+    if (Platform.isAndroid) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await Future.delayed(const Duration(milliseconds: 800));
+        if (mounted) {
+          await _engine.requestAndroidNotifications();
+        }
+      });
+    }
   }
 
   Future<void> _refreshInviteAndIps() async {
@@ -109,6 +118,116 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  void _showTutorialAndAutoSetupModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.82,
+        maxChildSize: 0.95,
+        builder: (_, scrollCtrl) => Padding(
+          padding: const EdgeInsets.all(16),
+          child: ListView(
+            controller: scrollCtrl,
+            children: [
+              const Text(
+                'Мастер автонастройки и Туториал «Маяк»',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _engine.scanLocalSubnet();
+                    },
+                    icon: const Icon(Icons.radar, size: 18),
+                    label: const Text('Автопоиск устройств в сети'),
+                  ),
+                  if (Platform.isWindows)
+                    FilledButton.tonalIcon(
+                      onPressed: () async {
+                        final res =
+                            await _engine.configureWindowsPublicFirewall();
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(res == 'OK'
+                                ? 'Порты 42069/42070 открыты для Общественной сети!'
+                                : 'Запустите allow_public_network_firewall.bat от имени Администратора'),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.security, size: 18),
+                      label: const Text(
+                          'Открыть доступ в Общественной сети (Firewall)'),
+                    ),
+                  if (Platform.isAndroid)
+                    FilledButton.tonalIcon(
+                      onPressed: () async {
+                        await _engine.requestAndroidNotifications();
+                        await _engine.toggleAndroidBleMesh();
+                        if (mounted) setState(() {});
+                      },
+                      icon: const Icon(Icons.bluetooth_connected, size: 18),
+                      label: const Text('Включить BLE + Уведомления'),
+                    ),
+                ],
+              ),
+              const Divider(height: 24),
+              const Text(
+                '1. Как протестировать связь полностью БЕЗ интернета:',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, color: Colors.tealAccent),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                '• Вариант А (Точка доступа с телефона): Выключи «Мобильные данные» на телефоне и включи «Точку доступа Wi-Fi». Подключи к ней ПК или второй телефон. Интернета нет, но локальная связь работает на 100%.
+'
+                '• Вариант Б (Домашний роутер без интернета): Выдерни кабель провайдера (WAN) из роутера. Устройства внутри квартиры продолжат общаться через Wi-Fi.
+'
+                '• Вариант В (Bluetooth Mesh без Wi-Fi): Нажми кнопку «Вкл BLE» на двух Android-телефонах — они свяжутся напрямую по радиоканалу.',
+                style: TextStyle(fontSize: 13, color: Colors.white70),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                '2. Как оставить «Общественную сеть» на Windows (не светить ПК в Частной сети):',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, color: Colors.tealAccent),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                '• Тебе НЕ нужно переключать профиль сети Windows в «Частная сеть»!
+'
+                '• Оставь в настройках Windows безопасный профиль «Общедоступная сеть» (чтобы общие папки и системные службы ПК были закрыты).
+'
+                '• Просто нажми кнопку «Открыть доступ в Общественной сети (Firewall)» выше (или запусти файл allow_public_network_firewall.bat из папки с программой от имени Администратора). Это откроет в Брандмауэре ТОЛЬКО порты Маяка (42069 UDP и 42070 TCP).',
+                style: TextStyle(fontSize: 13, color: Colors.white70),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                '3. Если на телефоне или ПК включен VPN:',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, color: Colors.tealAccent),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                '• В v0.6.0 Маяк автоматически игнорирует виртуальные адаптеры VPN (tun0, WireGuard, Sing-box, Clash, Radmin) и берет прямой IP Wi-Fi (192.168.x.x).
+'
+                '• Если VPN на телефоне блокирует широковещательный автопоиск, просто введи IP второго устройства (например 192.168.1.5) в строку подключения или включи в настройках VPN «Обход локальной сети (Bypass LAN)».',
+                style: TextStyle(fontSize: 13, color: Colors.white70),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   void _showEditProfileDialog() {
     final nameCtrl = TextEditingController(text: _engine.nickname);
     showDialog(
@@ -122,8 +241,9 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               Text(
                 'ID узла: ${_engine.nodeId}\n'
-                'Локальные IP: ${_myIps.join(", ")}\n'
+                'Физические IP (без VPN): ${_myIps.join(", ")}\n'
                 'TCP-порт: ${_engine.listenPort}\n'
+                'VPN обнаружен: ${_engine.vpnDetected ? "Да (включен фильтр обхода)" : "Нет"}\n'
                 'Статус: ${_engine.lastStatusLog}',
                 style: const TextStyle(fontSize: 12, color: Colors.white70),
               ),
@@ -374,6 +494,11 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: _openQrScanner,
             ),
           IconButton(
+            icon: const Icon(Icons.help_outline, color: Colors.amberAccent),
+            tooltip: 'Автонастройка и Туториал',
+            onPressed: _showTutorialAndAutoSetupModal,
+          ),
+          IconButton(
             icon: const Icon(Icons.terminal),
             tooltip: 'Журнал сети',
             onPressed: _showLogsModal,
@@ -423,8 +548,26 @@ class _HomeScreenState extends State<HomeScreen> {
                               style: const TextStyle(fontSize: 12),
                             ),
                           ),
+                        if (Platform.isWindows)
+                          FilledButton.tonalIcon(
+                            onPressed: _showTutorialAndAutoSetupModal,
+                            icon: const Icon(Icons.shield_outlined, size: 16),
+                            label: const Text(
+                              'Автонастройка Сети',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
                       ],
                     ),
+                    if (_engine.vpnDetected)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text(
+                          '⚡ Обнаружен активный VPN: включена фильтрация туннеля и прямой поиск по локальному Wi-Fi IP',
+                          style:
+                              TextStyle(fontSize: 11, color: Colors.amberAccent),
+                        ),
+                      ),
                     const SizedBox(height: 4),
                     Text(
                       _engine.lastStatusLog,
@@ -510,14 +653,26 @@ class _HomeScreenState extends State<HomeScreen> {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: _messages.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'Сообщений пока нет.\n'
-                          '• В одной Wi-Fi сети или Точке доступа узлы находятся автоматически (или нажми иконку радара сверху).\n'
-                          '• Также можно ввести IP второго устройства (например 192.168.1.5) или отсканировать QR-код.\n'
-                          '• Для связи без Wi-Fi по Bluetooth нажми «Вкл BLE».',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white54, fontSize: 13),
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'Сообщений пока нет.\n'
+                              '• Автопоиск проверяет локальную сеть каждые 15 секунд.\n'
+                              '• Можно ввести IP второго устройства (например 192.168.1.5) или отсканировать QR-код.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  color: Colors.white54, fontSize: 13),
+                            ),
+                            const SizedBox(height: 10),
+                            OutlinedButton.icon(
+                              onPressed: _showTutorialAndAutoSetupModal,
+                              icon: const Icon(Icons.help_outline, size: 18),
+                              label: const Text(
+                                  'Как подключить без интернета / с VPN / в Общественной сети'),
+                            ),
+                          ],
                         ),
                       )
                     : ListView.builder(
@@ -559,6 +714,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+/// Безопасный экран QR-сканера (с фиксом жизненного цикла текстуры камеры и отключенным Impeller)
 class QrScannerScreen extends StatefulWidget {
   const QrScannerScreen({super.key});
 
@@ -567,8 +723,31 @@ class QrScannerScreen extends StatefulWidget {
 }
 
 class _QrScannerScreenState extends State<QrScannerScreen> {
-  final MobileScannerController _controller = MobileScannerController();
+  late final MobileScannerController _controller;
   bool _alreadyScanned = false;
+  bool _cameraStarted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = MobileScannerController(
+      autoStart: false,
+      detectionSpeed: DetectionSpeed.normal,
+      facing: CameraFacing.back,
+      formats: const [BarcodeFormat.qrCode],
+    );
+    // Запускаем поток камеры только после завершения анимации перехода на экран
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future.delayed(const Duration(milliseconds: 250));
+      if (!mounted) return;
+      try {
+        await _controller.start();
+        if (mounted) {
+          setState(() => _cameraStarted = true);
+        }
+      } catch (_) {}
+    });
+  }
 
   @override
   void dispose() {
@@ -579,32 +758,81 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Наведи камеру на QR-код')),
-      body: MobileScanner(
-        controller: _controller,
-        errorBuilder: (context, error, child) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Не удалось открыть камеру: ${error.errorCode}\nИспользуйте подключение по IP или коду.',
-                textAlign: TextAlign.center,
+      appBar: AppBar(
+        title: const Text('Наведи камеру на QR-код'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.cameraswitch),
+            tooltip: 'Переключить камеру',
+            onPressed: () => _controller.switchCamera(),
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Перезапустить камеру',
+            onPressed: () async {
+              try {
+                await _controller.stop();
+                await Future.delayed(const Duration(milliseconds: 200));
+                await _controller.start();
+              } catch (_) {}
+            },
+          ),
+        ],
+      ),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: _controller,
+            errorBuilder: (context, error, child) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Не удалось запустить превью камеры (${error.errorCode}).\nНажмите «Перезапустить» или подключитесь по IP.',
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 12),
+                      FilledButton.icon(
+                        onPressed: () => _controller.start(),
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Перезапустить камеру'),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+            onDetect: (capture) {
+              if (_alreadyScanned) return;
+              for (final barcode in capture.barcodes) {
+                final raw = barcode.rawValue;
+                if (raw != null && raw.trim().isNotEmpty) {
+                  _alreadyScanned = true;
+                  HapticFeedback.mediumImpact();
+                  Navigator.pop(context, raw.trim());
+                  break;
+                }
+              }
+            },
+          ),
+          if (!_cameraStarted)
+            const Center(
+              child: CircularProgressIndicator(),
+            ),
+          Center(
+            child: Container(
+              width: 240,
+              height: 240,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.tealAccent, width: 2),
+                borderRadius: BorderRadius.circular(16),
               ),
             ),
-          );
-        },
-        onDetect: (capture) {
-          if (_alreadyScanned) return;
-          for (final barcode in capture.barcodes) {
-            final raw = barcode.rawValue;
-            if (raw != null && raw.trim().isNotEmpty) {
-              _alreadyScanned = true;
-              _controller.stop();
-              Navigator.pop(context, raw.trim());
-              break;
-            }
-          }
-        },
+          ),
+        ],
       ),
     );
   }
