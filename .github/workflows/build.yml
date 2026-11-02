@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Crash-Proof Native Bridge
+      - name: Recreate Clean Android Platform & Inject Crash-Proof Native Bridge v0.6.0
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
@@ -74,8 +74,7 @@ jobs:
               with open(gw, "w") as f:
                   f.write(gwc)
 
-          # 4. Переписываем android/app/build.gradle(.kts) с compileSdk = 36, targetSdk = 34,
-          #    явным отключением R8-минификации, useLegacyPackaging = true и Google Play Services Nearby
+          # 4. Переписываем android/app/build.gradle(.kts)
           kts_path = "android/app/build.gradle.kts"
           groovy_path = "android/app/build.gradle"
 
@@ -104,8 +103,8 @@ jobs:
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 5
-                  versionName = "0.5.0"
+                  versionCode = 6
+                  versionName = "0.6.0"
               }
 
               packaging {
@@ -158,8 +157,8 @@ jobs:
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 5
-                  versionName "0.5.0"
+                  versionCode 6
+                  versionName "0.6.0"
               }
 
               packagingOptions {
@@ -188,8 +187,9 @@ jobs:
           }
           """)
 
-          # 5. Записываем правильный AndroidManifest.xml (БЕЗ maxSdkVersion="30" на BLUETOOTH,
-          #    из-за которого падал Google Play Services Nearby на Android 12-15!)
+          # 5. Записываем AndroidManifest.xml:
+          #    - EnableImpeller = false (убирает черный экран и битые помехи камеры в Flutter 3.27!)
+          #    - POST_NOTIFICATIONS + VIBRATE (для пуш-уведомлений о новых сообщениях)
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "w") as f:
               f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -206,6 +206,8 @@ jobs:
               <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
               <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
               <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
               <uses-permission android:name="android.permission.BLUETOOTH"/>
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
@@ -222,6 +224,12 @@ jobs:
                   android:icon="@mipmap/ic_launcher"
                   android:usesCleartextTraffic="true"
                   android:enableOnBackInvokedCallback="true">
+
+                  <!-- ОТКЛЮЧАЕМ IMPELLER: исправляет черный экран и битые помехи текстуры камеры CameraX -->
+                  <meta-data
+                      android:name="io.flutter.embedding.android.EnableImpeller"
+                      android:value="false" />
+
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
@@ -246,7 +254,10 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем защищенный MainActivity.kt с нативным мостом MethodChannel("mayak/native")
+          # 6. Записываем MainActivity.kt с поддержкой:
+          #    - Системных уведомлений Android (NotificationChannel + PendingIntent + звук/вибрация)
+          #    - Прямого получения физического Wi-Fi IP через WifiManager (в обход VPN tun0!)
+          #    - Защищенного моста Nearby Connections и MulticastLock
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -254,14 +265,21 @@ jobs:
               f.write("""package com.mayak.mesh.p2p_mesh
 
           import android.Manifest
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
           import android.content.Context
+          import android.content.Intent
           import android.content.pm.PackageManager
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
           import android.net.wifi.WifiManager
           import android.os.Build
           import android.os.Bundle
           import android.os.Handler
           import android.os.Looper
           import androidx.core.app.ActivityCompat
+          import androidx.core.app.NotificationCompat
           import androidx.core.content.ContextCompat
           import com.google.android.gms.nearby.Nearby
           import com.google.android.gms.nearby.connection.AdvertisingOptions
@@ -278,18 +296,22 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.util.Locale
 
           class MainActivity : FlutterActivity() {
               private val CHANNEL = "mayak/native"
+              private val NOTIF_CHANNEL_ID = "mayak_messages_channel"
               private var methodChannel: MethodChannel? = null
               private var multicastLock: WifiManager.MulticastLock? = null
               private var pendingPermResult: MethodChannel.Result? = null
               private var localNodeId: String = ""
               private var serviceId: String = "com.p2pmesh.intercom"
+              private var notifIdCounter = 1001
               private val mainHandler = Handler(Looper.getMainLooper())
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  createNotificationChannel()
                   val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
                   Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
                       try {
@@ -304,6 +326,23 @@ jobs:
                   }
               }
 
+              private fun createNotificationChannel() {
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          val channel = NotificationChannel(
+                              NOTIF_CHANNEL_ID,
+                              "Сообщения Маяк P2P",
+                              NotificationManager.IMPORTANCE_HIGH
+                          ).apply {
+                              description = "Уведомления о входящих сообщениях в P2P-сети"
+                              enableVibration(true)
+                          }
+                          val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                          nm?.createNotificationChannel(channel)
+                      }
+                  } catch (_: Throwable) {}
+              }
+
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
@@ -314,6 +353,27 @@ jobs:
                           when (call.method) {
                               "acquireMulticastLock" -> {
                                   acquireWifiMulticastLock()
+                                  result.success(true)
+                              }
+                              "getWifiIpAndVpnState" -> {
+                                  result.success(getWifiIpAndVpnInfo())
+                              }
+                              "requestNotificationPermission" -> {
+                                  if (Build.VERSION.SDK_INT >= 33) {
+                                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                                          result.success(true)
+                                      } else {
+                                          pendingPermResult = result
+                                          ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7003)
+                                      }
+                                  } else {
+                                      result.success(true)
+                                  }
+                              }
+                              "showNotification" -> {
+                                  val title = call.argument<String>("title") ?: "Новое сообщение"
+                                  val body = call.argument<String>("body") ?: ""
+                                  showSystemNotification(title, body)
                                   result.success(true)
                               }
                               "checkNearbyPermissions" -> {
@@ -359,6 +419,69 @@ jobs:
                   }
               }
 
+              private fun getWifiIpAndVpnInfo(): Map<String, Any> {
+                  var wifiIp = ""
+                  var vpnActive = false
+                  try {
+                      val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                      val ipInt = wifi?.connectionInfo?.ipAddress ?: 0
+                      if (ipInt != 0) {
+                          wifiIp = String.format(
+                              Locale.US,
+                              "%d.%d.%d.%d",
+                              ipInt and 0xff,
+                              ipInt shr 8 and 0xff,
+                              ipInt shr 16 and 0xff,
+                              ipInt shr 24 and 0xff
+                          )
+                      }
+                  } catch (_: Throwable) {}
+
+                  try {
+                      val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                      if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          val activeNet = cm.activeNetwork
+                          val caps = cm.getNetworkCapabilities(activeNet)
+                          if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                              vpnActive = true
+                          }
+                      }
+                  } catch (_: Throwable) {}
+
+                  return mapOf("wifiIp" to wifiIp, "vpnActive" to vpnActive)
+              }
+
+              private fun showSystemNotification(title: String, body: String) {
+                  try {
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                              return
+                          }
+                      }
+                      val intent = Intent(this, MainActivity::class.java).apply {
+                          flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                      }
+                      val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                      } else {
+                          PendingIntent.FLAG_UPDATE_CURRENT
+                      }
+                      val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
+
+                      val builder = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
+                          .setSmallIcon(android.R.drawable.stat_notify_chat)
+                          .setContentTitle(title)
+                          .setContentText(body)
+                          .setPriority(NotificationCompat.PRIORITY_HIGH)
+                          .setDefaults(NotificationCompat.DEFAULT_ALL)
+                          .setAutoCancel(true)
+                          .setContentIntent(pendingIntent)
+
+                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                      nm?.notify(notifIdCounter++, builder.build())
+                  } catch (_: Throwable) {}
+              }
+
               private fun acquireWifiMulticastLock() {
                   try {
                       val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -401,7 +524,7 @@ jobs:
                       try {
                           if (requestCode == 7001) {
                               res.success(getMissingNearbyPermissions().isEmpty())
-                          } else if (requestCode == 7002) {
+                          } else if (requestCode == 7002 || requestCode == 7003) {
                               val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
                               res.success(granted)
                           } else {
@@ -592,6 +715,18 @@ jobs:
 
       - name: Build Windows Release
         run: flutter build windows --release
+
+      - name: Create 1-Click Firewall Script for Public Network inside Release folder
+        shell: cmd
+        run: |
+          echo @echo off > build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo chcp 65001 ^>nul >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo netsh advfirewall firewall delete rule name="Mayak P2P TCP 42070" ^>nul 2^>^&1 >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo netsh advfirewall firewall delete rule name="Mayak P2P UDP 42069" ^>nul 2^>^&1 >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo netsh advfirewall firewall add rule name="Mayak P2P TCP 42070" dir=in action=allow protocol=TCP localport=42070 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo echo Готово! Порты Маяк P2P (42069 UDP / 42070 TCP) открыты для Общественной сети! >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo pause >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
 
       - name: Upload Windows Portable ZIP
         uses: actions/upload-artifact@v4
