@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Crash-Proof Native Bridge v0.7.0
+      - name: Recreate Clean Android Platform & Inject Native Bridge + Foreground Service v0.8.0
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
@@ -103,8 +103,8 @@ jobs:
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 7
-                  versionName = "0.7.0"
+                  versionCode = 8
+                  versionName = "0.8.0"
               }
 
               packaging {
@@ -157,8 +157,8 @@ jobs:
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 7
-                  versionName "0.7.0"
+                  versionCode 8
+                  versionName "0.8.0"
               }
 
               packagingOptions {
@@ -187,7 +187,7 @@ jobs:
           }
           """)
 
-          # 5. Записываем AndroidManifest.xml (EnableImpeller = false + POST_NOTIFICATIONS + Nearby permissions)
+          # 5. Записываем AndroidManifest.xml с поддержкой Фонового Сервиса (MayakBackgroundService), WakeLock и отключением оптимизации батареи
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "w") as f:
               f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -206,6 +206,11 @@ jobs:
               <uses-permission android:name="android.permission.CAMERA"/>
               <uses-permission android:name="android.permission.VIBRATE"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
               <uses-permission android:name="android.permission.BLUETOOTH"/>
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
@@ -226,6 +231,12 @@ jobs:
                   <meta-data
                       android:name="io.flutter.embedding.android.EnableImpeller"
                       android:value="false" />
+
+                  <service
+                      android:name=".MayakBackgroundService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
 
                   <activity
                       android:name=".MainActivity"
@@ -251,7 +262,7 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем MainActivity.kt с улучшенным мульти-пир BLE коннектором и проверкой включенного GPS в шторке
+          # 6. Записываем MainActivity.kt + MayakBackgroundService (фоновое дежурство + аппаратный ANDROID_ID + пуши в фоне)
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -262,17 +273,23 @@ jobs:
           import android.app.NotificationChannel
           import android.app.NotificationManager
           import android.app.PendingIntent
+          import android.app.Service
           import android.content.Context
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.content.pm.ServiceInfo
           import android.location.LocationManager
           import android.net.ConnectivityManager
           import android.net.NetworkCapabilities
+          import android.net.Uri
           import android.net.wifi.WifiManager
           import android.os.Build
           import android.os.Bundle
           import android.os.Handler
+          import android.os.IBinder
           import android.os.Looper
+          import android.os.PowerManager
+          import android.provider.Settings
           import androidx.core.app.ActivityCompat
           import androidx.core.app.NotificationCompat
           import androidx.core.content.ContextCompat
@@ -293,15 +310,91 @@ jobs:
           import io.flutter.plugin.common.MethodChannel
           import java.util.Locale
 
+          // Фоновая служба Android, удерживающая CPU WakeLock и Wi-Fi в активном состоянии при свернутом приложении и заблокированном экране
+          class MayakBackgroundService : Service() {
+              private var wakeLock: PowerManager.WakeLock? = null
+              private var wifiLock: WifiManager.WifiLock? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          val chan = NotificationChannel(
+                              "mayak_bg_service",
+                              "Фоновое дежурство Маяк P2P",
+                              NotificationManager.IMPORTANCE_LOW
+                          ).apply {
+                              description = "Поддерживает работу узла связи при выключенном экране"
+                              setShowBadge(false)
+                          }
+                          val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                          nm?.createNotificationChannel(chan)
+                      }
+
+                      val intent = Intent(this, MainActivity::class.java).apply {
+                          flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                      }
+                      val pFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                      } else {
+                          PendingIntent.FLAG_UPDATE_CURRENT
+                      }
+                      val pendingIntent = PendingIntent.getActivity(this, 0, intent, pFlags)
+
+                      val notif = NotificationCompat.Builder(this, "mayak_bg_service")
+                          .setSmallIcon(android.R.drawable.ic_dialog_info)
+                          .setContentTitle("Маяк P2P на дежурстве")
+                          .setContentText("Фоновый прием сообщений и ретрансляция активны")
+                          .setOngoing(true)
+                          .setPriority(NotificationCompat.PRIORITY_LOW)
+                          .setContentIntent(pendingIntent)
+                          .build()
+
+                      if (Build.VERSION.SDK_INT >= 34) {
+                          startForeground(9001, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                      } else {
+                          startForeground(9001, notif)
+                      }
+
+                      val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                      wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Mayak::BgWakeLock")?.apply {
+                          setReferenceCounted(false)
+                          acquire()
+                      }
+
+                      val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                      wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Mayak::BgWifiLock")?.apply {
+                          setReferenceCounted(false)
+                          acquire()
+                      }
+                  } catch (_: Throwable) {}
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  try {
+                      if (wakeLock?.isHeld == true) wakeLock?.release()
+                      if (wifiLock?.isHeld == true) wifiLock?.release()
+                  } catch (_: Throwable) {}
+                  super.onDestroy()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
+
           class MainActivity : FlutterActivity() {
               private val CHANNEL = "mayak/native"
-              private val NOTIF_CHANNEL_ID = "mayak_messages_channel"
+              private val NOTIF_CHANNEL_ID = "mayak_messages_channel_v2"
               private var methodChannel: MethodChannel? = null
               private var multicastLock: WifiManager.MulticastLock? = null
               private var pendingPermResult: MethodChannel.Result? = null
               private var localNodeId: String = ""
               private var serviceId: String = "com.p2pmesh.intercom"
               private var notifIdCounter = 1001
+              private var isAppInForeground = true
               private val connectedBleEndpoints = mutableSetOf<String>()
               private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -322,15 +415,30 @@ jobs:
                   }
               }
 
+              override fun onResume() {
+                  super.onResume()
+                  isAppInForeground = true
+              }
+
+              override fun onPause() {
+                  isAppInForeground = false
+                  super.onPause()
+              }
+
+              override fun onStop() {
+                  isAppInForeground = false
+                  super.onStop()
+              }
+
               private fun createNotificationChannel() {
                   try {
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                           val channel = NotificationChannel(
                               NOTIF_CHANNEL_ID,
-                              "Сообщения Маяк P2P",
+                              "Входящие сообщения Маяк",
                               NotificationManager.IMPORTANCE_HIGH
                           ).apply {
-                              description = "Уведомления о входящих сообщениях в P2P-сети"
+                              description = "Звуковые пуш-уведомления о новых сообщениях"
                               enableVibration(true)
                           }
                           val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -347,6 +455,19 @@ jobs:
                   channel.setMethodCallHandler { call, result ->
                       try {
                           when (call.method) {
+                              "getHardwareId" -> {
+                                  val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: ""
+                                  val model = "${Build.MANUFACTURER}_${Build.MODEL}"
+                                  result.success("${androidId}_$model")
+                              }
+                              "startBackgroundService" -> {
+                                  startBgServiceSafe()
+                                  result.success(true)
+                              }
+                              "requestIgnoreBatteryOptimizations" -> {
+                                  requestBatteryExemption()
+                                  result.success(true)
+                              }
                               "acquireMulticastLock" -> {
                                   acquireWifiMulticastLock()
                                   result.success(true)
@@ -369,7 +490,11 @@ jobs:
                               "showNotification" -> {
                                   val title = call.argument<String>("title") ?: "Новое сообщение"
                                   val body = call.argument<String>("body") ?: ""
-                                  showSystemNotification(title, body)
+                                  val forceWhenOpen = call.argument<Boolean>("forceWhenOpen") ?: false
+                                  // Показываем системный пуш ТОЛЬКО когда приложение свернуто/заблокировано или открыт другой чат!
+                                  if (!isAppInForeground || forceWhenOpen) {
+                                      showSystemNotification(title, body)
+                                  }
                                   result.success(true)
                               }
                               "checkNearbyPermissions" -> {
@@ -413,6 +538,31 @@ jobs:
                           result.success("ERROR: ${t.message}")
                       }
                   }
+              }
+
+              private fun startBgServiceSafe() {
+                  try {
+                      val intent = Intent(this, MayakBackgroundService::class.java)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          startForegroundService(intent)
+                      } else {
+                          startService(intent)
+                      }
+                  } catch (_: Throwable) {}
+              }
+
+              private fun requestBatteryExemption() {
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                          if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
+                              val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                  data = Uri.parse("package:$packageName")
+                              }
+                              startActivity(intent)
+                          }
+                      }
+                  } catch (_: Throwable) {}
               }
 
               private fun isLocationTurnedOn(): Boolean {
@@ -603,7 +753,6 @@ jobs:
                   override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
                       try {
                           if (localNodeId.isNotEmpty() && localNodeId != info.endpointName && !connectedBleEndpoints.contains(endpointId)) {
-                              // Узел с меньшим ID подключается сразу, а с большим ID — через 2.2 сек, если первый не успел!
                               val delayMs = if (localNodeId < info.endpointName) 100L else 2200L
                               mainHandler.postDelayed({
                                   try {
