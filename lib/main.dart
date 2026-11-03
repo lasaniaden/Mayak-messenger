@@ -51,13 +51,9 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late final MeshEngine _engine;
   final TextEditingController _inviteCtrl = TextEditingController();
-  final TextEditingController _msgCtrl = TextEditingController();
   final ScrollController _chatScrollCtrl = ScrollController();
-  final FocusNode _msgFocus = FocusNode();
 
-  String? _activeChatId; // null на списке чатов (для телефона), либо ID контакта / 'BROADCAST'
-  String _myInvite = '';
-  List<String> _myIps = [];
+  String? _activeChatId;
 
   @override
   void initState() {
@@ -70,7 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       onStateChanged: () {
         if (!mounted) return;
-        _refreshInviteAndIps();
+        setState(() {});
       },
     );
     _initNode();
@@ -78,7 +74,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _initNode() async {
     await _engine.init();
-    await _refreshInviteAndIps();
+    if (!mounted) return;
+    setState(() {});
     if (Platform.isAndroid) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         await Future.delayed(const Duration(milliseconds: 800));
@@ -87,16 +84,6 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       });
     }
-  }
-
-  Future<void> _refreshInviteAndIps() async {
-    final code = await _engine.getInviteCode();
-    final ips = await _engine.getLocalIPv4Addresses();
-    if (!mounted) return;
-    setState(() {
-      _myInvite = code;
-      _myIps = ips;
-    });
   }
 
   void _openChat(String chatId) {
@@ -119,25 +106,108 @@ class _HomeScreenState extends State<HomeScreen> {
       if (_chatScrollCtrl.hasClients) {
         _chatScrollCtrl.animateTo(
           _chatScrollCtrl.position.maxScrollExtent + 80,
-          duration: const Duration(milliseconds: 220),
+          duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
       }
     });
   }
 
-  Future<void> _sendCurrentMessage() async {
+  Future<void> _sendTextMessage(String text) async {
     final target = _activeChatId;
-    final text = _msgCtrl.text.trim();
     if (target == null || text.isEmpty) return;
-
-    _msgCtrl.clear();
-    _msgFocus.requestFocus();
-
     await _engine.sendMessage(target, text);
     if (!mounted) return;
     setState(() {});
     _scrollToBottom();
+  }
+
+  Future<void> _showSafetyNumberDialog(ContactProfile contact) async {
+    final safetyCode = await _engine.computeSafetyNumber(contact.nodeId);
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.verified_user, color: Colors.tealAccent),
+            SizedBox(width: 8),
+            Expanded(child: Text('Код безопасности E2EE v2')),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Сверьте этот код с устройством «${contact.displayTitle}»:',
+              style: const TextStyle(fontSize: 13, color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.black38,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.tealAccent.withOpacity(0.4)),
+              ),
+              child: Text(
+                safetyCode,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  fontFamily: 'monospace',
+                  color: Colors.tealAccent,
+                  letterSpacing: 1.5,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '• Шифрование: Double X25519 + HKDF-SHA256 + ChaCha20-Poly1305\n'
+              '• Подпись пакетов: Ed25519\n'
+              '• Защита метаданных: Sealed Sender (промежуточные узлы не видят ваше имя и длину текста)',
+              style: TextStyle(fontSize: 11.5, color: Colors.white60),
+            ),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Понятно'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmDeleteContact(ContactProfile contact) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Удалить «${contact.displayTitle}»?'),
+        content: Text(
+          'Старый узел (${contact.nodeId}) и переписка с ним будут удалены из списка.',
+          style: const TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _engine.deleteContact(contact.nodeId);
+            },
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showAddContactModal() {
@@ -191,7 +261,7 @@ class _HomeScreenState extends State<HomeScreen> {
       isScrollControlled: true,
       builder: (ctx) => DraggableScrollableSheet(
         expand: false,
-        initialChildSize: 0.82,
+        initialChildSize: 0.84,
         maxChildSize: 0.95,
         builder: (_, scrollCtrl) => Padding(
           padding: const EdgeInsets.all(16),
@@ -199,7 +269,7 @@ class _HomeScreenState extends State<HomeScreen> {
             controller: scrollCtrl,
             children: [
               const Text(
-                'Мастер автонастройки и Помощь «Маяк»',
+                'Мастер автонастройки и Защита «Маяк v0.8.0»',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 10),
@@ -213,8 +283,16 @@ class _HomeScreenState extends State<HomeScreen> {
                       _engine.scanLocalSubnet();
                     },
                     icon: const Icon(Icons.radar, size: 18),
-                    label: const Text('Автопоиск устройств в сети'),
+                    label: const Text('Полный поиск устройств в сети'),
                   ),
+                  if (Platform.isAndroid)
+                    FilledButton.tonalIcon(
+                      onPressed: () async {
+                        await _engine.requestIgnoreBatteryOptimizations();
+                      },
+                      icon: const Icon(Icons.battery_charging_full, size: 18),
+                      label: const Text('Разрешить работу в фоне без сна'),
+                    ),
                   if (Platform.isWindows)
                     FilledButton.tonalIcon(
                       onPressed: () async {
@@ -233,52 +311,44 @@ class _HomeScreenState extends State<HomeScreen> {
                       label: const Text(
                           'Открыть доступ в Общественной сети (Firewall)'),
                     ),
-                  if (Platform.isAndroid)
-                    FilledButton.tonalIcon(
-                      onPressed: () async {
-                        await _engine.requestAndroidNotifications();
-                        await _engine.toggleAndroidBleMesh();
-                        if (mounted) setState(() {});
-                      },
-                      icon: const Icon(Icons.bluetooth_connected, size: 18),
-                      label: const Text('Включить BLE + Уведомления'),
-                    ),
                 ],
               ),
               const Divider(height: 24),
               const Text(
-                '1. Почему к одному другу подключилось, а ко второму нет?',
+                '1. Уведомления при закрытом/свернутом экране:',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
               const SizedBox(height: 4),
               const Text(
-                '• Если подключаетесь по Bluetooth (BLE): убедитесь, что у всех включен не только Bluetooth, но и значок «Геолокация (GPS)» в верхней шторке телефона (без него Android блокирует сканирование Bluetooth-устройств рядом).\n'
-                '• В v0.7.0 исправлена ошибка одновременного подключения к нескольким друзьям и добавлена авто-синхронизация контактов: если ты подключился к Другу 1, а он подключен к Другу 2, то Друг 2 автоматически появится у тебя в списке чатов!',
+                '• В v0.8.0 встроен фоновый сервис Android («Маяк P2P на дежурстве»), который не дает системе усыпить сокеты при блокировке экрана.\n'
+                '• Нажми кнопку «Разрешить работу в фоне без сна» выше, чтобы оболочка телефона (Xiaomi/Samsung/Realme) не убивала фоновый прием СМС.\n'
+                '• Пуш-уведомления теперь приходят именно тогда, когда программа свернута или открыт другой чат.',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
               const SizedBox(height: 14),
               const Text(
-                '2. Дальность связи без интернета:',
+                '2. Как устроена криптозащита при передаче через чужие телефоны:',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
               const SizedBox(height: 4),
               const Text(
-                '• Bluetooth LE напрямую: 15–25 м в здании (через стены), до 50–80 м на улице.\n'
-                '• Wi-Fi Direct / Точка доступа смартфона: 40–120 м.\n'
-                '• Через цепочку телефонов (Mesh «через три улицы»): каждый телефон увеличивает радиус еще на 50–100 м (до 500–700 м в реальном времени или без ограничений через прохожих-курьеров).',
+                '• Протокол Mayak E2EE v2 использует двойной обмен ключами X25519 (Static + Ephemeral) + HKDF-SHA256 + ChaCha20-Poly1305.\n'
+                '• Режим Sealed Sender: твой позывной и длина текста зашифрованы внутри пакета и выровнены случайным шумом (Padding). Чужой телефон-ретранслятор видит только случайные байты и не знает даже имени отправителя.\n'
+                '• В каждом личном чате можно нажать на иконку щита сверху и сверить 12-значный Код безопасности.',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
               const SizedBox(height: 14),
               const Text(
-                '3. Как оставить «Общественную сеть» на Windows (не светить ПК в Частной сети):',
+                '3. Как убрать старый дубликат телефона из списка:',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
               const SizedBox(height: 4),
               const Text(
-                '• Оставь в настройках Windows профиль «Общедоступная сеть» и нажми кнопку «Открыть доступ в Общественной сети (Firewall)» выше (или запусти allow_public_network_firewall.bat от Администратора).',
+                '• Теперь ID узла привязан к аппаратному ANDROID_ID телефона и больше не меняется при переустановке.\n'
+                '• Чтобы удалить старый неактивный контакт с прошлых тестов — просто зажми его пальцем (или нажми иконку корзины в чате).',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
             ],
@@ -300,10 +370,11 @@ class _HomeScreenState extends State<HomeScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'ID узла: ${_engine.nodeId}\n'
-                'Физические IP (без VPN): ${_myIps.join(", ")}\n'
+                'Постоянный ID узла: ${_engine.nodeId}\n'
+                'Аппаратный отпечаток: ${_engine.myHwFingerprint}\n'
+                'Физические IP: ${_engine.cachedIps.join(", ")}\n'
                 'TCP-порт: ${_engine.listenPort}\n'
-                'VPN обнаружен: ${_engine.vpnDetected ? "Да (включен обход)" : "Нет"}\n'
+                'Фоновая служба: ${_engine.bgServiceActive ? "Активна" : "Стандарт"}\n'
                 'Статус: ${_engine.lastStatusLog}',
                 style: const TextStyle(fontSize: 12, color: Colors.white70),
               ),
@@ -392,8 +463,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showMyQrModal() {
-    if (_myInvite.isEmpty) return;
+  Future<void> _showMyQrModal() async {
+    await _engine.refreshNetworkCache();
+    if (!mounted || _engine.cachedInviteCode.isEmpty) return;
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
@@ -411,7 +483,7 @@ class _HomeScreenState extends State<HomeScreen> {
               height: 230,
               child: Center(
                 child: QrImageView(
-                  data: _myInvite,
+                  data: _engine.cachedInviteCode,
                   size: 210,
                   backgroundColor: Colors.white,
                 ),
@@ -419,7 +491,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 10),
             SelectableText(
-              'Прямой IP: ${_myIps.join(", ")}:${_engine.listenPort}',
+              'Прямой IP: ${_engine.cachedIps.join(", ")}:${_engine.listenPort}',
               style: const TextStyle(fontSize: 12, color: Colors.tealAccent),
               textAlign: TextAlign.center,
             ),
@@ -428,7 +500,7 @@ class _HomeScreenState extends State<HomeScreen> {
         actions: [
           TextButton.icon(
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: _myInvite));
+              Clipboard.setData(ClipboardData(text: _engine.cachedInviteCode));
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Код скопирован')),
               );
@@ -491,7 +563,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Левая панель / Главный экран со списком всех чатов (как в Telegram)
   Widget _buildChatsListPane({required bool isWideScreen}) {
     final contacts = _engine.knownContacts.values.toList()
       ..sort((a, b) {
@@ -506,7 +577,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Column(
       children: [
-        // Информационная плашка состояния сети
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           color: const Color(0xFF161F27),
@@ -515,11 +585,11 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               Row(
                 children: [
-                  const Icon(Icons.router, size: 15, color: Colors.tealAccent),
+                  const Icon(Icons.shield, size: 15, color: Colors.tealAccent),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      'IP: ${_myIps.join(", ")}:${_engine.listenPort} • Онлайн: ${_engine.connectedPeersCount} • Буфер: ${_engine.transitBuffer.length}',
+                      'IP: ${_engine.cachedIps.join(", ")}:${_engine.listenPort} • Онлайн: ${_engine.connectedPeersCount} • Буфер: ${_engine.transitBuffer.length}',
                       style: const TextStyle(
                         fontSize: 11.5,
                         color: Colors.tealAccent,
@@ -569,7 +639,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const Padding(
                   padding: EdgeInsets.only(top: 4),
                   child: Text(
-                    '⚠️ Включи значок Геолокации (GPS) в верхней шторке телефона, иначе Android не видит Bluetooth рядом!',
+                    '⚠️ Включи значок Геолокации (GPS) в верхней шторке телефона для поиска по Bluetooth!',
                     style: TextStyle(fontSize: 11, color: Colors.orangeAccent),
                   ),
                 ),
@@ -587,7 +657,6 @@ class _HomeScreenState extends State<HomeScreen> {
         Expanded(
           child: ListView(
             children: [
-              // 1. Закрепленный канал "Общий эфир (Всем рядом)"
               ListTile(
                 selected: _activeChatId == MeshEngine.broadcastChannelId &&
                     isWideScreen,
@@ -652,9 +721,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 12),
                       const Text(
                         'Пока нет найденных друзей.\n\n'
-                        '• Если вы в одной Wi-Fi сети или Точке доступа — устройства появятся здесь автоматически.\n'
-                        '• Для Bluetooth-связи без Wi-Fi нажмите «Вкл BLE» на обоих телефонах (и включите GPS в шторке).\n'
-                        '• Или добавьте друга вручную по IP / QR-коду кнопкой ниже.',
+                        '• В одной Wi-Fi сети или Точке доступа устройства находятся автоматически.\n'
+                        '• Для Bluetooth-связи без Wi-Fi нажмите «Вкл BLE» на обоих телефонах.\n'
+                        '• Или добавьте друга по IP / QR-коду кнопкой ниже.',
                         textAlign: TextAlign.center,
                         style: TextStyle(color: Colors.white54, fontSize: 13),
                       ),
@@ -680,7 +749,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
 
-              // 2. Список индивидуальных чатов с каждым пользователем
               ...contacts.map((c) {
                 final lastMsg = _engine.getLastMessageFor(c.nodeId);
                 final isSelected = _activeChatId == c.nodeId && isWideScreen;
@@ -747,7 +815,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         lastMsg != null
                             ? '${lastMsg.isMe ? "Вы: " : ""}${lastMsg.text}'
                             : (c.isOnline
-                                ? 'В сети (${c.lastAddress}) — нажмите, чтобы написать'
+                                ? 'В сети (${c.lastAddress}) • Защищено E2EE v2'
                                 : 'Оффлайн / Доставка через Mesh-курьеров'),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -792,6 +860,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                       onTap: () => _openChat(c.nodeId),
+                      onLongPress: () => _confirmDeleteContact(c),
                     ),
                     const Divider(height: 1, indent: 70),
                   ],
@@ -804,7 +873,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Правая панель / Экран открытого диалога с конкретным другом
   Widget _buildConversationPane({required bool showBackButton}) {
     final chatId = _activeChatId;
     if (chatId == null) {
@@ -825,14 +893,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final subtitle = isBroadcast
         ? 'Видят все устройства поблизости (Онлайн: ${_engine.connectedPeersCount})'
         : (contact?.isOnline == true
-            ? '🟢 В сети напрямую (${contact?.lastAddress ?? "P2P"}) • E2EE ChaCha20'
-            : '🟠 Нет прямой связи — доставка через буфер Mesh («3 улицы»)');
+            ? '🟢 Прямая связь (${contact?.lastAddress ?? "P2P"}) • Sealed E2EE v2'
+            : '🟠 Через буфер Mesh («3 улицы») • Sealed E2EE v2');
 
     final messages = _engine.getMessagesFor(chatId);
 
     return Column(
       children: [
-        // Шапка открытого диалога
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
           decoration: const BoxDecoration(
@@ -881,11 +948,23 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
+              if (!isBroadcast && contact != null) ...[
+                IconButton(
+                  icon: const Icon(Icons.verified_user_outlined,
+                      color: Colors.tealAccent, size: 20),
+                  tooltip: 'Проверить Код безопасности E2EE',
+                  onPressed: () => _showSafetyNumberDialog(contact),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline,
+                      color: Colors.white54, size: 20),
+                  tooltip: 'Удалить контакт',
+                  onPressed: () => _confirmDeleteContact(contact),
+                ),
+              ],
             ],
           ),
         ),
-
-        // Пузыри сообщений этого диалога
         Expanded(
           child: messages.isEmpty
               ? Center(
@@ -894,7 +973,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Text(
                       isBroadcast
                           ? 'Здесь отображаются открытые сообщения для всех участников вокруг вас.'
-                          : 'Личный зашифрованный чат с «$title».\nСообщения шифруются сквозным ключом X25519 + ChaCha20-Poly1305.',
+                          : 'Защищенный E2EE v2 диалог с «$title».\nПромежуточные узлы не видят ваше имя, длину и содержимое сообщений.',
                       textAlign: TextAlign.center,
                       style:
                           const TextStyle(color: Colors.white38, fontSize: 13),
@@ -986,46 +1065,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   },
                 ),
         ),
-
-        // Нижняя панель ввода сообщения
-        Container(
-          padding: const EdgeInsets.all(8),
-          color: const Color(0xFF18222C),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _msgCtrl,
-                  focusNode: _msgFocus,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: (_) => _sendCurrentMessage(),
-                  decoration: InputDecoration(
-                    hintText: isBroadcast
-                        ? 'Сообщение всем вокруг...'
-                        : 'Написать $title...',
-                    filled: true,
-                    fillColor: const Color(0xFF23303C),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
-                    isDense: true,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              CircleAvatar(
-                radius: 22,
-                backgroundColor: Colors.tealAccent.shade700,
-                child: IconButton(
-                  icon: const Icon(Icons.send, color: Colors.black, size: 20),
-                  onPressed: _sendCurrentMessage,
-                ),
-              ),
-            ],
-          ),
+        // Изолированный виджет поля ввода: НЕ перерисовывается от сетевых событий и работает без малейших лагов!
+        ChatInputBar(
+          hintText: isBroadcast
+              ? 'Сообщение всем вокруг...'
+              : 'Зашифрованное сообщение для $title...',
+          onSend: _sendTextMessage,
         ),
       ],
     );
@@ -1107,7 +1152,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 IconButton(
                   icon:
                       const Icon(Icons.help_outline, color: Colors.amberAccent),
-                  tooltip: 'Автонастройка и Туториал',
+                  tooltip: 'Автонастройка и Защита',
                   onPressed: _showTutorialAndAutoSetupModal,
                 ),
                 IconButton(
@@ -1136,6 +1181,82 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Изолированная панель ввода текста (предотвращает любые задержки клавиатуры при сетевой активности)
+class ChatInputBar extends StatefulWidget {
+  final String hintText;
+  final Future<void> Function(String text) onSend;
+
+  const ChatInputBar({
+    super.key,
+    required this.hintText,
+    required this.onSend,
+  });
+
+  @override
+  State<ChatInputBar> createState() => _ChatInputBarState();
+}
+
+class _ChatInputBarState extends State<ChatInputBar> {
+  final TextEditingController _ctrl = TextEditingController();
+  final FocusNode _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final text = _ctrl.text.trim();
+    if (text.isEmpty) return;
+    _ctrl.clear();
+    _focus.requestFocus();
+    widget.onSend(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      color: const Color(0xFF18222C),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _ctrl,
+              focusNode: _focus,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _submit(),
+              decoration: InputDecoration(
+                hintText: widget.hintText,
+                filled: true,
+                fillColor: const Color(0xFF23303C),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
+                isDense: true,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          CircleAvatar(
+            radius: 22,
+            backgroundColor: Colors.tealAccent.shade700,
+            child: IconButton(
+              icon: const Icon(Icons.send, color: Colors.black, size: 20),
+              onPressed: _submit,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
