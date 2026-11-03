@@ -6,13 +6,64 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+class ChatMessage {
+  final String msgId;
+  final String peerId; // ID собеседника или 'BROADCAST' для общего эфира
+  final String senderId;
+  final String senderName;
+  final String text;
+  final int timestamp;
+  final bool isMe;
+  bool isDelivered;
+
+  ChatMessage({
+    required this.msgId,
+    required this.peerId,
+    required this.senderId,
+    required this.senderName,
+    required this.text,
+    required this.timestamp,
+    required this.isMe,
+    this.isDelivered = false,
+  });
+
+  String get timeFormatted {
+    final dt = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': msgId,
+        'p': peerId,
+        's': senderId,
+        'sn': senderName,
+        'txt': text,
+        'ts': timestamp,
+        'me': isMe,
+        'ack': isDelivered,
+      };
+
+  factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
+        msgId: j['id'] as String,
+        peerId: j['p'] as String,
+        senderId: j['s'] as String,
+        senderName: j['sn'] as String,
+        text: j['txt'] as String,
+        timestamp: j['ts'] as int,
+        isMe: j['me'] as bool,
+        isDelivered: (j['ack'] as bool?) ?? false,
+      );
+}
+
 class ContactProfile {
   final String nodeId;
   final String dhPubHex;
   final String signPubHex;
   String nickname;
   bool isOnline;
+  bool isDirectPeer;
   String lastAddress;
+  int unreadCount;
 
   ContactProfile({
     required this.nodeId,
@@ -20,15 +71,33 @@ class ContactProfile {
     required this.signPubHex,
     required this.nickname,
     this.isOnline = false,
+    this.isDirectPeer = false,
     this.lastAddress = '',
+    this.unreadCount = 0,
   });
 
   String get displayTitle =>
-      nickname.trim().isNotEmpty ? '$nickname ($nodeId)' : 'Узел $nodeId';
+      nickname.trim().isNotEmpty ? nickname.trim() : 'Узел $nodeId';
+
+  Map<String, dynamic> toJson() => {
+        'id': nodeId,
+        'dh': dhPubHex,
+        'sg': signPubHex,
+        'nick': nickname,
+        'addr': lastAddress,
+      };
+
+  factory ContactProfile.fromJson(Map<String, dynamic> j) => ContactProfile(
+        nodeId: j['id'] as String,
+        dhPubHex: j['dh'] as String,
+        signPubHex: j['sg'] as String,
+        nickname: (j['nick'] as String?) ?? 'Узел ${j['id']}',
+        lastAddress: (j['addr'] as String?) ?? '',
+      );
 }
 
 class MeshPacket {
-  final String type; // 'DATA' или 'ACK'
+  final String type; // 'DATA', 'BROADCAST' или 'ACK'
   final String msgId;
   final String dstNodeId;
   final String srcNickname;
@@ -96,6 +165,7 @@ class MeshPacket {
 }
 
 class MeshEngine {
+  static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
   static const int maxBufferPackets = 300;
@@ -122,20 +192,24 @@ class MeshEngine {
   bool bleMeshActive = false;
   bool isScanningSubnet = false;
   bool vpnDetected = false;
+  bool gpsDisabledOnAndroid = false;
   bool notificationsEnabled = true;
+  String? activeOpenChatId;
+  int unreadBroadcastCount = 0;
   String lastStatusLog = 'Запуск ядра...';
   final List<String> debugLogs = [];
 
   final Map<Socket, String> _tcpPeers = {};
   final Set<String> _connectingHosts = {};
   final Map<String, String> _blePeers = {};
+  final Set<String> _seenBroadcastIds = {};
 
   final Map<String, MeshPacket> transitBuffer = {};
   final Map<String, MeshPacket> deliveredAcks = {};
   final Map<String, ContactProfile> knownContacts = {};
+  final Map<String, List<ChatMessage>> chatHistory = {};
 
-  final void Function(String senderId, String senderName, String text)
-      onMessageReceived;
+  final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
 
   MeshEngine({
@@ -145,6 +219,27 @@ class MeshEngine {
     if (Platform.isAndroid) {
       _nativeChannel.setMethodCallHandler(_handleNativeCallback);
     }
+  }
+
+  List<ChatMessage> getMessagesFor(String peerId) {
+    return chatHistory.putIfAbsent(peerId, () => []);
+  }
+
+  ChatMessage? getLastMessageFor(String peerId) {
+    final list = chatHistory[peerId];
+    if (list == null || list.isEmpty) return null;
+    return list.last;
+  }
+
+  void markChatAsRead(String? peerId) {
+    activeOpenChatId = peerId;
+    if (peerId == null) return;
+    if (peerId == broadcastChannelId) {
+      unreadBroadcastCount = 0;
+    } else {
+      knownContacts[peerId]?.unreadCount = 0;
+    }
+    onStateChanged();
   }
 
   void _addLog(String msg) {
@@ -166,6 +261,7 @@ class MeshEngine {
           final endpointId = call.arguments as String;
           _addLog('BLE подключен: $endpointId');
           await _sendBleLine(endpointId, _buildHelloJson());
+          await _sendBleLine(endpointId, _buildPeerSyncJson());
           break;
         case 'onNearbyDisconnected':
           final endpointId = call.arguments as String;
@@ -190,6 +286,7 @@ class MeshEngine {
   Future<void> init() async {
     try {
       await _loadOrCreateIdentity();
+      await _loadPersistedContactsAndChats();
     } catch (e) {
       _addLog('Ошибка ключей: $e');
     }
@@ -200,7 +297,6 @@ class MeshEngine {
       } catch (_) {}
     }
 
-    // Привязываем фиксированный порт 42070 (чтобы устройства находили друг друга даже без UDP Broadcast)
     for (final candidatePort in [defaultTcpPort, defaultTcpPort + 1, 0]) {
       if (_tcpServer != null) break;
       try {
@@ -223,13 +319,12 @@ class MeshEngine {
     await _startLanAutoDiscovery();
     _addLog('Wi-Fi / Hotspot готов (порт $listenPort)');
 
-    // Первый автопоиск сразу при старте
     unawaited(scanLocalSubnet());
 
-    // Фоновый автопоиск каждые 15 секунд, если пока нет подключенных пиров
+    // Регулярный фоновый автопоиск новых друзей каждые 15 секунд
     _autoScanTimer?.cancel();
     _autoScanTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (connectedPeersCount == 0 && !isScanningSubnet) {
+      if (!isScanningSubnet) {
         unawaited(scanLocalSubnet(silent: true));
       }
     });
@@ -277,6 +372,52 @@ class MeshEngine {
     }
   }
 
+  Future<void> _loadPersistedContactsAndChats() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final contactsRaw = prefs.getString('saved_contacts_v7');
+      if (contactsRaw != null && contactsRaw.isNotEmpty) {
+        final list = jsonDecode(contactsRaw) as List;
+        for (final item in list) {
+          final c =
+              ContactProfile.fromJson(Map<String, dynamic>.from(item as Map));
+          if (c.nodeId != nodeId) {
+            knownContacts[c.nodeId] = c;
+          }
+        }
+      }
+
+      final chatsRaw = prefs.getString('saved_chats_v7');
+      if (chatsRaw != null && chatsRaw.isNotEmpty) {
+        final map = jsonDecode(chatsRaw) as Map<String, dynamic>;
+        map.forEach((peerId, msgsJson) {
+          final list = (msgsJson as List)
+              .map((m) =>
+                  ChatMessage.fromJson(Map<String, dynamic>.from(m as Map)))
+              .toList();
+          chatHistory[peerId] = list;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveContactsAndChats() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final contactsList =
+          knownContacts.values.map((c) => c.toJson()).toList();
+      await prefs.setString('saved_contacts_v7', jsonEncode(contactsList));
+
+      final chatsMap = <String, dynamic>{};
+      chatHistory.forEach((peerId, list) {
+        final trimmed =
+            list.length > 100 ? list.sublist(list.length - 100) : list;
+        chatsMap[peerId] = trimmed.map((m) => m.toJson()).toList();
+      });
+      await prefs.setString('saved_chats_v7', jsonEncode(chatsMap));
+    } catch (_) {}
+  }
+
   Future<void> updateNickname(String newName) async {
     final clean = newName.trim();
     if (clean.isEmpty) return;
@@ -303,13 +444,24 @@ class MeshEngine {
         'sg': signPubHex,
       });
 
-  /// Умное получение реальных локальных IP с жесткой фильтрацией VPN / TUN / Wintun / Clash / Radmin адаптеров
+  /// Протокол PEER_SYNC: делимся известными контактами с подключенным другом (чтобы видеть друзей через рукопожатие!)
+  String _buildPeerSyncJson() {
+    final peers = knownContacts.values
+        .map((c) => {
+              'id': c.nodeId,
+              'nick': c.nickname,
+              'dh': c.dhPubHex,
+              'sg': c.signPubHex,
+            })
+        .toList();
+    return jsonEncode({'peer_sync': peers});
+  }
+
   Future<List<String>> getLocalIPv4Addresses() async {
     final preferredLan = <String>[];
     final fallbackLan = <String>[];
     bool detectedVpnInterface = false;
 
-    // 1. На Android запрашиваем прямой IP физического Wi-Fi чипа через WifiManager (работает даже поверх VPN!)
     if (Platform.isAndroid) {
       try {
         final res = await _nativeChannel
@@ -317,6 +469,8 @@ class MeshEngine {
         if (res != null) {
           final wifiIp = (res['wifiIp'] as String?) ?? '';
           final isVpn = (res['vpnActive'] as bool?) ?? false;
+          final gpsOn = (res['gpsEnabled'] as bool?) ?? true;
+          gpsDisabledOnAndroid = !gpsOn;
           if (isVpn) detectedVpnInterface = true;
           if (wifiIp.isNotEmpty && wifiIp != '0.0.0.0') {
             preferredLan.add(wifiIp);
@@ -332,7 +486,6 @@ class MeshEngine {
       );
       for (final iface in interfaces) {
         final lower = iface.name.toLowerCase();
-        // Отсекаем все известные VPN-туннели и виртуальные адаптеры
         if (lower.contains('tun') ||
             lower.contains('tap') ||
             lower.contains('ppp') ||
@@ -351,7 +504,7 @@ class MeshEngine {
             lower.contains('zerotier') ||
             lower.contains('radmin') ||
             lower.contains('hamachi') ||
-            lower.contains('NordLynx'.toLowerCase())) {
+            lower.contains('nordlynx')) {
           detectedVpnInterface = true;
           continue;
         }
@@ -366,7 +519,6 @@ class MeshEngine {
 
         for (final addr in iface.addresses) {
           final ip = addr.address;
-          // Игнорируем link-local, CGNAT/Tailscale (100.64.*) и фейковые подсети Clash/Sing-box (198.18.*)
           if (ip.startsWith('169.254.') ||
               ip.startsWith('198.18.') ||
               ip.startsWith('198.19.') ||
@@ -375,7 +527,6 @@ class MeshEngine {
             continue;
           }
 
-          // Приоритет отдаем классическим Wi-Fi / Hotspot подсетям 192.168.*
           if (ip.startsWith('192.168.')) {
             if (!preferredLan.contains(ip)) preferredLan.add(ip);
           } else {
@@ -444,11 +595,11 @@ class MeshEngine {
     for (final ip in candidateIps) {
       unawaited(connectToHost(ip, port, expectedNodeId: targetId));
     }
+    unawaited(_saveContactsAndChats());
     onStateChanged();
     return targetId;
   }
 
-  /// Активное сканирование локальной подсети (работает даже при включенном VPN и заблокированном UDP Broadcast)
   Future<void> scanLocalSubnet({bool silent = false}) async {
     if (isScanningSubnet) return;
     isScanningSubnet = true;
@@ -459,14 +610,13 @@ class MeshEngine {
       final prefixes = <String>{};
       for (final ip in myIps) {
         final parts = ip.split('.');
-        // Сканируем прежде всего реальные локальные подсети 192.168.x.* и 172.x.*
         if (parts.length == 4 && parts[0] != '127') {
           prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
         }
       }
-      // На случай если Android Hotspot использует 192.168.43.* или Windows Hotspot 192.168.137.*
       if (prefixes.isEmpty) {
-        prefixes.addAll(['192.168.1', '192.168.0', '192.168.43', '192.168.137']);
+        prefixes
+            .addAll(['192.168.1', '192.168.0', '192.168.43', '192.168.137']);
       }
 
       for (final prefix in prefixes) {
@@ -498,7 +648,7 @@ class MeshEngine {
         }
       }
       if (!silent) {
-        _addLog('Поиск завершен (найдено онлайн: $connectedPeersCount)');
+        _addLog('Поиск завершен (пиров онлайн: $connectedPeersCount)');
       }
     } catch (_) {
     } finally {
@@ -507,7 +657,6 @@ class MeshEngine {
     }
   }
 
-  /// Автонастройка Windows Firewall для профиля «Общественная сеть (Public)» без переключения самой сети в Частную!
   Future<String> configureWindowsPublicFirewall() async {
     if (!Platform.isWindows) return 'Только для Windows';
     try {
@@ -543,9 +692,6 @@ class MeshEngine {
               .invokeMethod<bool>('requestNotificationPermission') ??
           false;
       notificationsEnabled = ok;
-      if (ok) {
-        _addLog('Уведомления о новых СМС включены');
-      }
       return ok;
     } catch (_) {
       return false;
@@ -581,13 +727,16 @@ class MeshEngine {
     final isPeerConnected =
         _tcpPeers.containsValue(nodeId) || _blePeers.containsValue(nodeId);
     if (existing != null) {
-      if (nick != null && nick.trim().isNotEmpty) {
+      if (nick != null &&
+          nick.trim().isNotEmpty &&
+          !nick.startsWith('Узел ')) {
         existing.nickname = nick.trim();
       }
       if (address != null && address.isNotEmpty) {
         existing.lastAddress = address;
       }
       existing.isOnline = isPeerConnected;
+      existing.isDirectPeer = isPeerConnected;
     } else {
       knownContacts[nodeId] = ContactProfile(
         nodeId: nodeId,
@@ -597,6 +746,7 @@ class MeshEngine {
             ? nick.trim()
             : 'Узел $nodeId',
         isOnline: isPeerConnected,
+        isDirectPeer: isPeerConnected,
         lastAddress: address ?? '',
       );
     }
@@ -612,6 +762,13 @@ class MeshEngine {
     if (expectedNodeId != null && _tcpPeers.containsValue(expectedNodeId)) {
       return;
     }
+    // Проверяем, нет ли уже открытого сокета с этим IP
+    for (final s in _tcpPeers.keys) {
+      try {
+        if (s.remoteAddress.address == host) return;
+      } catch (_) {}
+    }
+
     final key = '$host:$port';
     if (_connectingHosts.contains(key)) return;
     _connectingHosts.add(key);
@@ -629,8 +786,13 @@ class MeshEngine {
   }
 
   void _setupTcpSocket(Socket socket) {
-    final remoteAddr = '${socket.remoteAddress.address}:${socket.remotePort}';
+    String remoteAddr = '';
+    try {
+      remoteAddr = '${socket.remoteAddress.address}:${socket.remotePort}';
+    } catch (_) {}
+
     _sendTcpLine(socket, _buildHelloJson());
+    _sendTcpLine(socket, _buildPeerSyncJson());
 
     utf8.decoder
         .bind(socket)
@@ -640,15 +802,13 @@ class MeshEngine {
             line,
             remoteAddr: remoteAddr,
             onHello: (peerId, peerNick) async {
-              for (final entry in _tcpPeers.entries.toList()) {
-                if (entry.value == peerId && entry.key != socket) {
-                  _cleanupSocket(socket);
-                  return;
-                }
-              }
+              // ФИКС ГОНКИ ВСТРЕЧНЫХ СОЕДИНЕНИЙ: НЕ убиваем новый сокет, чтобы оба телефона не разорвали связь!
               _tcpPeers[socket] = peerId;
               _refreshOnlineStatuses();
-              _addLog('Подключен по Wi-Fi: $peerNick ($peerId)');
+              _addLog('Подключен: $peerNick ($peerId)');
+
+              // Делимся списком известных узлов (Mesh Gossip)
+              _sendTcpLine(socket, _buildPeerSyncJson());
 
               _evictExpired();
               for (final ack in deliveredAcks.values) {
@@ -656,9 +816,6 @@ class MeshEngine {
               }
               for (final entry in transitBuffer.entries.toList()) {
                 _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
-                if (peerId == entry.value.dstNodeId) {
-                  transitBuffer.remove(entry.key);
-                }
               }
             },
             replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
@@ -693,12 +850,37 @@ class MeshEngine {
         );
         await onHello(peerId, peerNick);
         _refreshOnlineStatuses();
+        unawaited(_saveContactsAndChats());
         onStateChanged();
         return;
       }
 
+      if (map.containsKey('peer_sync')) {
+        final list = map['peer_sync'] as List;
+        bool addedAny = false;
+        for (final item in list) {
+          final m = Map<String, dynamic>.from(item as Map);
+          final pid = m['id'] as String;
+          if (pid != nodeId && !knownContacts.containsKey(pid)) {
+            _upsertContact(
+              nodeId: pid,
+              dhPubHex: m['dh'] as String,
+              signPubHex: m['sg'] as String,
+              nick: (m['nick'] as String?) ?? 'Узел $pid',
+              address: 'Через Mesh',
+            );
+            addedAny = true;
+          }
+        }
+        if (addedAny) {
+          unawaited(_saveContactsAndChats());
+          onStateChanged();
+        }
+        return;
+      }
+
       final pkt = MeshPacket.fromJson(map);
-      if (pkt.type == 'DATA') {
+      if (pkt.type == 'DATA' || pkt.type == 'BROADCAST') {
         await _handleDataPacket(
           pkt,
           replyDirect: replyDirect,
@@ -715,11 +897,54 @@ class MeshEngine {
     } catch (_) {}
   }
 
+  /// Отправка сообщения в личный чат ИЛИ в Общий эфир (BROADCAST)
   Future<void> sendMessage(String targetNodeId, String plainText) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final msgId = _randomHex(16);
+
+    if (targetNodeId == broadcastChannelId) {
+      final sigPayload =
+          utf8.encode('$msgId|$broadcastChannelId|${ base64Encode(utf8.encode(plainText)) }');
+      final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
+
+      final pkt = MeshPacket(
+        type: 'BROADCAST',
+        msgId: msgId,
+        dstNodeId: broadcastChannelId,
+        srcNickname: nickname,
+        srcSignPubHex: signPubHex,
+        srcDhPubHex: dhPubHex,
+        dstSignPubHex: '',
+        ephPubHex: '',
+        nonceHex: '',
+        ciphertextHex: base64Encode(utf8.encode(plainText)),
+        macHex: '',
+        signatureHex: _toHex(sig.bytes),
+        expiresAt: now + 3600 * 1000,
+        ttl: 5,
+      );
+
+      _seenBroadcastIds.add(msgId);
+      final myMsg = ChatMessage(
+        msgId: msgId,
+        peerId: broadcastChannelId,
+        senderId: nodeId,
+        senderName: nickname,
+        text: plainText,
+        timestamp: now,
+        isMe: true,
+        isDelivered: connectedPeersCount > 0,
+      );
+      getMessagesFor(broadcastChannelId).add(myMsg);
+      _floodAllTransports(pkt);
+      unawaited(_saveContactsAndChats());
+      onStateChanged();
+      return;
+    }
+
     final contact = knownContacts[targetNodeId];
     if (contact == null) return;
 
-    final msgId = _randomHex(16);
     final ephKeyPair = await _x25519.newKeyPair();
     final ephPub = await ephKeyPair.extractPublicKey();
 
@@ -759,12 +984,25 @@ class MeshEngine {
       ciphertextHex: _toHex(secretBox.cipherText),
       macHex: _toHex(secretBox.mac.bytes),
       signatureHex: _toHex(sig.bytes),
-      expiresAt: DateTime.now().millisecondsSinceEpoch + 3600 * 1000,
+      expiresAt: now + 3600 * 1000,
       ttl: 7,
     );
 
+    final myMsg = ChatMessage(
+      msgId: msgId,
+      peerId: targetNodeId,
+      senderId: nodeId,
+      senderName: nickname,
+      text: plainText,
+      timestamp: now,
+      isMe: true,
+      isDelivered: false,
+    );
+    getMessagesFor(targetNodeId).add(myMsg);
+
     transitBuffer[msgId] = pkt;
     _floodAllTransports(pkt);
+    unawaited(_saveContactsAndChats());
     onStateChanged();
   }
 
@@ -775,6 +1013,63 @@ class MeshEngine {
     String? excludeBleId,
   }) async {
     _evictExpired();
+
+    // Обработка широковещательного сообщения в Общий эфир
+    if (pkt.type == 'BROADCAST') {
+      if (_seenBroadcastIds.contains(pkt.msgId)) return;
+      final sigValid = await _ed25519.verify(
+        utf8.encode('${pkt.msgId}|$broadcastChannelId|${pkt.ciphertextHex}'),
+        signature: Signature(
+          _fromHex(pkt.signatureHex),
+          publicKey: SimplePublicKey(
+              _fromHex(pkt.srcSignPubHex), type: KeyPairType.ed25519),
+        ),
+      );
+      if (!sigValid) return;
+      _seenBroadcastIds.add(pkt.msgId);
+
+      final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
+      if (senderId == nodeId) return;
+
+      _upsertContact(
+        nodeId: senderId,
+        dhPubHex: pkt.srcDhPubHex,
+        signPubHex: pkt.srcSignPubHex,
+        nick: pkt.srcNickname,
+      );
+      final senderName = knownContacts[senderId]?.displayTitle ?? senderId;
+      final decodedText = utf8.decode(base64Decode(pkt.ciphertextHex));
+      final chatMsg = ChatMessage(
+        msgId: pkt.msgId,
+        peerId: broadcastChannelId,
+        senderId: senderId,
+        senderName: senderName,
+        text: decodedText,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        isMe: false,
+        isDelivered: true,
+      );
+      getMessagesFor(broadcastChannelId).add(chatMsg);
+      if (activeOpenChatId != broadcastChannelId) {
+        unreadBroadcastCount++;
+      }
+      onMessageReceived(chatMsg);
+      unawaited(
+          _triggerIncomingNotification('Общий эфир ($senderName)', decodedText));
+      unawaited(_saveContactsAndChats());
+
+      if (pkt.ttl > 1) {
+        pkt.ttl -= 1;
+        _floodAllTransports(
+          pkt,
+          excludeTcpSocket: excludeTcpSocket,
+          excludeBleId: excludeBleId,
+        );
+      }
+      onStateChanged();
+      return;
+    }
+
     if (deliveredAcks.containsKey(pkt.msgId)) {
       replyDirect(jsonEncode(deliveredAcks[pkt.msgId]!.toJson()));
       return;
@@ -815,10 +1110,27 @@ class MeshEngine {
         signPubHex: pkt.srcSignPubHex,
         nick: pkt.srcNickname,
       );
-      final senderName = knownContacts[senderId]?.nickname ?? senderId;
+      final contact = knownContacts[senderId]!;
       final decodedText = utf8.decode(clearBytes);
-      onMessageReceived(senderId, senderName, decodedText);
-      unawaited(_triggerIncomingNotification(senderName, decodedText));
+
+      final chatMsg = ChatMessage(
+        msgId: pkt.msgId,
+        peerId: senderId,
+        senderId: senderId,
+        senderName: contact.displayTitle,
+        text: decodedText,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        isMe: false,
+        isDelivered: true,
+      );
+      getMessagesFor(senderId).add(chatMsg);
+      if (activeOpenChatId != senderId) {
+        contact.unreadCount++;
+      }
+
+      onMessageReceived(chatMsg);
+      unawaited(_triggerIncomingNotification(contact.displayTitle, decodedText));
+      unawaited(_saveContactsAndChats());
 
       final ackSig = await _ed25519.sign(
         utf8.encode('ACK:${pkt.msgId}'),
@@ -879,12 +1191,22 @@ class MeshEngine {
       transitBuffer.remove(ack.msgId);
     }
 
+    // Отмечаем галочкой ✓✓ доставленное сообщение в истории чата
+    for (final list in chatHistory.values) {
+      for (final m in list) {
+        if (m.msgId == ack.msgId) {
+          m.isDelivered = true;
+        }
+      }
+    }
+
     deliveredAcks[ack.msgId] = ack;
     _floodAllTransports(
       ack,
       excludeTcpSocket: excludeTcpSocket,
       excludeBleId: excludeBleId,
     );
+    unawaited(_saveContactsAndChats());
     onStateChanged();
   }
 
@@ -894,21 +1216,20 @@ class MeshEngine {
     String? excludeBleId,
   }) {
     final serialized = jsonEncode(pkt.toJson());
+    final sentPeerIds = <String>{};
 
     for (final entry in _tcpPeers.entries.toList()) {
       if (entry.key == excludeTcpSocket) continue;
+      if (sentPeerIds.contains(entry.value)) continue;
+      sentPeerIds.add(entry.value);
       _sendTcpLine(entry.key, serialized);
-      if (pkt.type == 'DATA' && entry.value == pkt.dstNodeId) {
-        transitBuffer.remove(pkt.msgId);
-      }
     }
 
     for (final entry in _blePeers.entries.toList()) {
       if (entry.key == excludeBleId) continue;
+      if (sentPeerIds.contains(entry.value)) continue;
+      sentPeerIds.add(entry.value);
       unawaited(_sendBleLine(entry.key, serialized));
-      if (pkt.type == 'DATA' && entry.value == pkt.dstNodeId) {
-        transitBuffer.remove(pkt.msgId);
-      }
     }
   }
 
@@ -972,7 +1293,6 @@ class MeshEngine {
                   beacon, InternetAddress(subnetBroadcast), discoveryPort);
             } catch (_) {}
 
-            // При включенном VPN отправляем пакет напрямую с привязкой к физическому IP Wi-Fi адаптера
             try {
               final ifaceSocket =
                   await RawDatagramSocket.bind(InternetAddress(ip), 0);
@@ -1060,15 +1380,13 @@ class MeshEngine {
           _blePeers[endpointId] = peerId;
           _refreshOnlineStatuses();
           _addLog('Подключен по BLE: $peerNick ($peerId)');
+          await _sendBleLine(endpointId, _buildPeerSyncJson());
           _evictExpired();
           for (final ack in deliveredAcks.values) {
             await _sendBleLine(endpointId, jsonEncode(ack.toJson()));
           }
           for (final entry in transitBuffer.entries.toList()) {
             await _sendBleLine(endpointId, jsonEncode(entry.value.toJson()));
-            if (peerId == entry.value.dstNodeId) {
-              transitBuffer.remove(entry.key);
-            }
           }
         },
         replyDirect: (replyJson) =>
@@ -1082,6 +1400,7 @@ class MeshEngine {
     final activeIds = {..._tcpPeers.values, ..._blePeers.values};
     for (final c in knownContacts.values) {
       c.isOnline = activeIds.contains(c.nodeId);
+      c.isDirectPeer = activeIds.contains(c.nodeId);
     }
   }
 
@@ -1112,8 +1431,9 @@ class MeshEngine {
     onStateChanged();
   }
 
-  int get connectedPeersCount => _tcpPeers.length + _blePeers.length;
-  int get blePeersCount => _blePeers.length;
+  int get connectedPeersCount =>
+      {..._tcpPeers.values, ..._blePeers.values}.length;
+  int get blePeersCount => _blePeers.values.toSet().length;
 
   static String _toHex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
