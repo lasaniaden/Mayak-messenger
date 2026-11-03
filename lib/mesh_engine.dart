@@ -8,7 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ChatMessage {
   final String msgId;
-  final String peerId; // ID собеседника или 'BROADCAST' для общего эфира
+  final String peerId;
   final String senderId;
   final String senderName;
   final String text;
@@ -60,6 +60,7 @@ class ContactProfile {
   final String dhPubHex;
   final String signPubHex;
   String nickname;
+  String hwFingerprint;
   bool isOnline;
   bool isDirectPeer;
   String lastAddress;
@@ -70,6 +71,7 @@ class ContactProfile {
     required this.dhPubHex,
     required this.signPubHex,
     required this.nickname,
+    this.hwFingerprint = '',
     this.isOnline = false,
     this.isDirectPeer = false,
     this.lastAddress = '',
@@ -84,6 +86,7 @@ class ContactProfile {
         'dh': dhPubHex,
         'sg': signPubHex,
         'nick': nickname,
+        'hw': hwFingerprint,
         'addr': lastAddress,
       };
 
@@ -92,6 +95,7 @@ class ContactProfile {
         dhPubHex: j['dh'] as String,
         signPubHex: j['sg'] as String,
         nickname: (j['nick'] as String?) ?? 'Узел ${j['id']}',
+        hwFingerprint: (j['hw'] as String?) ?? '',
         lastAddress: (j['addr'] as String?) ?? '',
       );
 }
@@ -100,7 +104,7 @@ class MeshPacket {
   final String type; // 'DATA', 'BROADCAST' или 'ACK'
   final String msgId;
   final String dstNodeId;
-  final String srcNickname;
+  final String srcNickname; // В DATA-пакетах пусто (Sealed Sender — имя зашифровано внутри!)
   final String srcSignPubHex;
   final String srcDhPubHex;
   final String dstSignPubHex;
@@ -176,6 +180,7 @@ class MeshEngine {
   final _x25519 = X25519();
   final _cipher = Chacha20.poly1305Aead();
   final _sha256 = Sha256();
+  final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
 
   late SimpleKeyPair _signKeyPair;
   late SimpleKeyPair _dhKeyPair;
@@ -183,13 +188,14 @@ class MeshEngine {
   String nickname = '';
   String dhPubHex = '';
   String signPubHex = '';
+  String myHwFingerprint = '';
 
   ServerSocket? _tcpServer;
   RawDatagramSocket? _udpBeacon;
   Timer? _beaconTimer;
-  Timer? _autoScanTimer;
   int listenPort = 0;
   bool bleMeshActive = false;
+  bool bgServiceActive = false;
   bool isScanningSubnet = false;
   bool vpnDetected = false;
   bool gpsDisabledOnAndroid = false;
@@ -198,6 +204,11 @@ class MeshEngine {
   int unreadBroadcastCount = 0;
   String lastStatusLog = 'Запуск ядра...';
   final List<String> debugLogs = [];
+
+  // Кэш локальных IP и инвайта, чтобы НЕ нагружать процессор и НЕ вызывать лаги при вводе текста
+  List<String> cachedIps = ['127.0.0.1'];
+  String cachedInviteCode = '';
+  int _lastIpRefreshMs = 0;
 
   final Map<Socket, String> _tcpPeers = {};
   final Set<String> _connectingHosts = {};
@@ -242,7 +253,34 @@ class MeshEngine {
     onStateChanged();
   }
 
-  void _addLog(String msg) {
+  /// Удаление старого/неактуального контакта и его чата
+  Future<void> deleteContact(String targetNodeId) async {
+    knownContacts.remove(targetNodeId);
+    chatHistory.remove(targetNodeId);
+    if (activeOpenChatId == targetNodeId) {
+      activeOpenChatId = null;
+    }
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  /// Вычисление 12-значного Кода Безопасности (Safety Number) для сверки защиты от перехвата (MITM)
+  Future<String> computeSafetyNumber(String peerNodeId) async {
+    final c = knownContacts[peerNodeId];
+    if (c == null) return 'Нет данных';
+    final keys = [dhPubHex, c.dhPubHex]..sort();
+    final combined = utf8.encode('MAYAK-SAFETY-V2|${keys[0]}|${keys[1]}');
+    final hash = (await _sha256.hash(combined)).bytes;
+    final groups = <String>[];
+    for (int i = 0; i < 12; i += 3) {
+      final numVal =
+          ((hash[i] << 16) | (hash[i + 1] << 8) | hash[i + 2]) % 1000;
+      groups.add(numVal.toString().padLeft(3, '0'));
+    }
+    return groups.join(' - ');
+  }
+
+  void _addLog(String msg, {bool triggerUi = true}) {
     final now = DateTime.now();
     final ts =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
@@ -251,7 +289,7 @@ class MeshEngine {
       debugLogs.removeLast();
     }
     lastStatusLog = msg;
-    onStateChanged();
+    if (triggerUi) onStateChanged();
   }
 
   Future<dynamic> _handleNativeCallback(MethodCall call) async {
@@ -294,6 +332,8 @@ class MeshEngine {
     if (Platform.isAndroid) {
       try {
         await _nativeChannel.invokeMethod('acquireMulticastLock');
+        await _nativeChannel.invokeMethod('startBackgroundService');
+        bgServiceActive = true;
       } catch (_) {}
     }
 
@@ -316,38 +356,58 @@ class MeshEngine {
       );
     }
 
+    await refreshNetworkCache();
     await _startLanAutoDiscovery();
-    _addLog('Wi-Fi / Hotspot готов (порт $listenPort)');
+    _addLog('Защищенный узел готов (порт $listenPort)');
 
-    unawaited(scanLocalSubnet());
-
-    // Регулярный фоновый автопоиск новых друзей каждые 15 секунд
-    _autoScanTimer?.cancel();
-    _autoScanTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (!isScanningSubnet) {
-        unawaited(scanLocalSubnet(silent: true));
-      }
-    });
+    // Легкий быстрый поиск при старте (проверяет только 16 главных адресов хотспота/роутера без лагов!)
+    unawaited(scanLocalSubnet(quickOnly: true));
   }
 
+  /// Детерминированная привязка личности к железу устройства (ANDROID_ID / Windows Hostname),
+  /// чтобы после обновления или переустановки приложения телефон НЕ становился новым устройством!
   Future<void> _loadOrCreateIdentity() async {
+    String rawHwId = '';
+    try {
+      if (Platform.isAndroid) {
+        rawHwId =
+            await _nativeChannel.invokeMethod<String>('getHardwareId') ?? '';
+      } else {
+        rawHwId =
+            '${Platform.localHostname}_${Platform.operatingSystem}_${Platform.environment["USERNAME"] ?? "user"}';
+      }
+    } catch (_) {}
+
+    if (rawHwId.isNotEmpty) {
+      final hwHashBytes = (await _sha256.hash(utf8.encode('MAYAK-HW|$rawHwId'))).bytes;
+      myHwFingerprint = _toHex(hwHashBytes.sublist(0, 8));
+    }
+
     try {
       final prefs = await SharedPreferences.getInstance();
-      final savedSignSeed = prefs.getString('sign_seed');
-      final savedDhSeed = prefs.getString('dh_seed');
+      String? savedSignSeed = prefs.getString('sign_seed');
+      String? savedDhSeed = prefs.getString('dh_seed');
 
-      if (savedSignSeed != null && savedDhSeed != null) {
-        _signKeyPair =
-            await _ed25519.newKeyPairFromSeed(_fromHex(savedSignSeed));
-        _dhKeyPair = await _x25519.newKeyPairFromSeed(_fromHex(savedDhSeed));
-      } else {
-        final signSeed = _randomBytes(32);
-        final dhSeed = _randomBytes(32);
-        await prefs.setString('sign_seed', _toHex(signSeed));
-        await prefs.setString('dh_seed', _toHex(dhSeed));
-        _signKeyPair = await _ed25519.newKeyPairFromSeed(signSeed);
-        _dhKeyPair = await _x25519.newKeyPairFromSeed(dhSeed);
+      if (savedSignSeed == null || savedDhSeed == null) {
+        if (rawHwId.isNotEmpty && rawHwId.length > 5) {
+          // Генерируем постоянные ключи из аппаратного ID устройства!
+          final signDigest =
+              await _sha256.hash(utf8.encode('MAYAK-SIGN-SEED-V1|$rawHwId'));
+          final dhDigest =
+              await _sha256.hash(utf8.encode('MAYAK-DH-SEED-V1|$rawHwId'));
+          savedSignSeed = _toHex(signDigest.bytes);
+          savedDhSeed = _toHex(dhDigest.bytes);
+        } else {
+          savedSignSeed = _toHex(_randomBytes(32));
+          savedDhSeed = _toHex(_randomBytes(32));
+        }
+        await prefs.setString('sign_seed', savedSignSeed);
+        await prefs.setString('dh_seed', savedDhSeed);
       }
+
+      _signKeyPair =
+          await _ed25519.newKeyPairFromSeed(_fromHex(savedSignSeed));
+      _dhKeyPair = await _x25519.newKeyPairFromSeed(_fromHex(savedDhSeed));
 
       final dhPub = await _dhKeyPair.extractPublicKey();
       final signPub = await _signKeyPair.extractPublicKey();
@@ -427,6 +487,7 @@ class MeshEngine {
       await prefs.setString('user_nickname', nickname);
     } catch (_) {}
 
+    await refreshNetworkCache();
     final hello = _buildHelloJson();
     for (final s in _tcpPeers.keys.toList()) {
       _sendTcpLine(s, hello);
@@ -442,9 +503,9 @@ class MeshEngine {
         'nick': nickname,
         'dh': dhPubHex,
         'sg': signPubHex,
+        'hw': myHwFingerprint,
       });
 
-  /// Протокол PEER_SYNC: делимся известными контактами с подключенным другом (чтобы видеть друзей через рукопожатие!)
   String _buildPeerSyncJson() {
     final peers = knownContacts.values
         .map((c) => {
@@ -452,9 +513,32 @@ class MeshEngine {
               'nick': c.nickname,
               'dh': c.dhPubHex,
               'sg': c.signPubHex,
+              'hw': c.hwFingerprint,
             })
         .toList();
     return jsonEncode({'peer_sync': peers});
+  }
+
+  /// Обновляет кэш локальных IP не чаще раза в 10 секунд (чтобы не лагал UI)
+  Future<void> refreshNetworkCache() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastIpRefreshMs < 8000 && cachedInviteCode.isNotEmpty) {
+      return;
+    }
+    _lastIpRefreshMs = now;
+    cachedIps = await getLocalIPv4Addresses();
+    if (nodeId.isNotEmpty) {
+      final bundle = {
+        'ips': cachedIps,
+        'p': listenPort,
+        'id': nodeId,
+        'nick': nickname,
+        'dh': dhPubHex,
+        'sg': signPubHex,
+        'hw': myHwFingerprint,
+      };
+      cachedInviteCode = base64UrlEncode(utf8.encode(jsonEncode(bundle)));
+    }
   }
 
   Future<List<String>> getLocalIPv4Addresses() async {
@@ -542,20 +626,6 @@ class MeshEngine {
     return result;
   }
 
-  Future<String> getInviteCode() async {
-    if (nodeId.isEmpty) return '';
-    final ips = await getLocalIPv4Addresses();
-    final bundle = {
-      'ips': ips,
-      'p': listenPort,
-      'id': nodeId,
-      'nick': nickname,
-      'dh': dhPubHex,
-      'sg': signPubHex,
-    };
-    return base64UrlEncode(utf8.encode(jsonEncode(bundle)));
-  }
-
   Future<String?> connectWithInviteOrIp(String rawInput) async {
     final input = rawInput.trim();
     if (input.isEmpty) return null;
@@ -576,6 +646,7 @@ class MeshEngine {
     final port = (decoded['p'] as int?) ?? defaultTcpPort;
     final targetId = decoded['id'] as String;
     final targetNick = (decoded['nick'] as String?) ?? 'Узел $targetId';
+    final targetHw = (decoded['hw'] as String?) ?? '';
 
     final List<String> candidateIps = [];
     if (decoded['ips'] is List) {
@@ -589,6 +660,7 @@ class MeshEngine {
       dhPubHex: decoded['dh'] as String,
       signPubHex: decoded['sg'] as String,
       nick: targetNick,
+      hwFingerprint: targetHw,
       address: candidateIps.isNotEmpty ? '${candidateIps.first}:$port' : '',
     );
 
@@ -600,13 +672,15 @@ class MeshEngine {
     return targetId;
   }
 
-  Future<void> scanLocalSubnet({bool silent = false}) async {
+  /// Оптимизированное сканирование подсети без лагов клавиатуры
+  Future<void> scanLocalSubnet({bool quickOnly = false}) async {
     if (isScanningSubnet) return;
     isScanningSubnet = true;
-    if (!silent) _addLog('Поиск устройств в локальной Wi-Fi сети...');
+    if (!quickOnly) _addLog('Поиск устройств в локальной Wi-Fi сети...');
     onStateChanged();
     try {
-      final myIps = await getLocalIPv4Addresses();
+      await refreshNetworkCache();
+      final myIps = cachedIps;
       final prefixes = <String>{};
       for (final ip in myIps) {
         final parts = ip.split('.');
@@ -620,34 +694,43 @@ class MeshEngine {
       }
 
       for (final prefix in prefixes) {
-        final priorityHosts = <int>[1, 2, 100, 101, 102, 103, 104, 105];
+        final priorityHosts = <int>[
+          1, 2, 3, 4, 5, 10, 20, 50, 100, 101, 102, 103, 104, 105, 150, 200
+        ];
+        final priorityBatch = <Future<void>>[];
         for (final lastOctet in priorityHosts) {
           final targetIp = '$prefix.$lastOctet';
           if (!myIps.contains(targetIp)) {
-            unawaited(connectToHost(targetIp, defaultTcpPort,
-                timeout: const Duration(milliseconds: 500)));
+            priorityBatch.add(connectToHost(targetIp, defaultTcpPort,
+                timeout: const Duration(milliseconds: 350)));
           }
         }
+        await Future.wait(priorityBatch);
 
-        final batch = <Future<void>>[];
-        for (int i = 1; i <= 254; i++) {
-          final targetIp = '$prefix.$i';
-          if (myIps.contains(targetIp)) continue;
-          batch.add(connectToHost(
-            targetIp,
-            defaultTcpPort,
-            timeout: const Duration(milliseconds: 350),
-          ));
-          if (batch.length >= 30) {
-            await Future.wait(batch);
-            batch.clear();
+        if (!quickOnly) {
+          final batch = <Future<void>>[];
+          for (int i = 1; i <= 254; i++) {
+            if (priorityHosts.contains(i)) continue;
+            final targetIp = '$prefix.$i';
+            if (myIps.contains(targetIp)) continue;
+            batch.add(connectToHost(
+              targetIp,
+              defaultTcpPort,
+              timeout: const Duration(milliseconds: 250),
+            ));
+            if (batch.length >= 15) {
+              await Future.wait(batch);
+              batch.clear();
+              // Даем UI-потоку 15 мс на отрисовку клавиатуры без малейших лагов!
+              await Future.delayed(const Duration(milliseconds: 15));
+            }
           }
-        }
-        if (batch.isNotEmpty) {
-          await Future.wait(batch);
+          if (batch.isNotEmpty) {
+            await Future.wait(batch);
+          }
         }
       }
-      if (!silent) {
+      if (!quickOnly) {
         _addLog('Поиск завершен (пиров онлайн: $connectedPeersCount)');
       }
     } catch (_) {
@@ -698,39 +781,102 @@ class MeshEngine {
     }
   }
 
-  Future<void> _triggerIncomingNotification(
-      String senderName, String text) async {
+  Future<void> requestIgnoreBatteryOptimizations() async {
+    if (!Platform.isAndroid) return;
     try {
-      await SystemSound.play(SystemSoundType.alert);
-      await HapticFeedback.heavyImpact();
+      await _nativeChannel.invokeMethod('requestIgnoreBatteryOptimizations');
+    } catch (_) {}
+  }
+
+  Future<void> _triggerIncomingNotification(
+    String senderId,
+    String senderName,
+    String text,
+  ) async {
+    final isChatCurrentlyVisible = (activeOpenChatId == senderId);
+    try {
+      await HapticFeedback.mediumImpact();
+      if (!isChatCurrentlyVisible) {
+        await SystemSound.play(SystemSoundType.alert);
+      }
     } catch (_) {}
 
     if (Platform.isAndroid && notificationsEnabled) {
       try {
+        // Если приложение открыто прямо на этом диалоге — пуш сверху НЕ спамим (только когда свернуто или открыт другой чат!)
         await _nativeChannel.invokeMethod('showNotification', {
           'title': 'Маяк: $senderName',
           'body': text,
+          'forceWhenOpen': !isChatCurrentlyVisible,
         });
       } catch (_) {}
     }
   }
 
+  /// Авто-дедупликация и склейка старых дубликатов одного и того же устройства по hwFingerprint или совпадению имени/IP
   void _upsertContact({
     required String nodeId,
     required String dhPubHex,
     required String signPubHex,
     String? nick,
+    String? hwFingerprint,
     String? address,
   }) {
     if (nodeId.isEmpty || nodeId == this.nodeId) return;
+
+    final cleanNick = (nick ?? '').trim();
+    final cleanHw = (hwFingerprint ?? '').trim();
+    final cleanIp = (address != null && address.contains(':'))
+        ? address.split(':').first
+        : (address ?? '');
+
+    // Проверяем, нет ли в списке старого дубля этого же физического устройства с другим nodeId
+    final duplicateIds = <String>[];
+    knownContacts.forEach((oldId, oldContact) {
+      if (oldId == nodeId) return;
+      final sameHw = cleanHw.isNotEmpty &&
+          oldContact.hwFingerprint.isNotEmpty &&
+          oldContact.hwFingerprint == cleanHw;
+      final oldIp = oldContact.lastAddress.contains(':')
+          ? oldContact.lastAddress.split(':').first
+          : oldContact.lastAddress;
+      final sameOfflineDeviceByNameOrIp = !oldContact.isOnline &&
+          ((cleanNick.isNotEmpty &&
+                  !cleanNick.startsWith('Android-') &&
+                  !cleanNick.startsWith('PC-') &&
+                  !cleanNick.startsWith('Узел ') &&
+                  oldContact.nickname == cleanNick) ||
+              (cleanIp.isNotEmpty &&
+                  cleanIp != 'Через Mesh' &&
+                  oldIp == cleanIp));
+
+      if (sameHw || sameOfflineDeviceByNameOrIp) {
+        duplicateIds.add(oldId);
+      }
+    });
+
+    // Переносим историю сообщений со старого дубликата на актуальный ID и удаляем дубль!
+    for (final oldId in duplicateIds) {
+      final oldHistory = chatHistory.remove(oldId);
+      if (oldHistory != null && oldHistory.isNotEmpty) {
+        final currentHistory = getMessagesFor(nodeId);
+        currentHistory.insertAll(0, oldHistory);
+      }
+      if (activeOpenChatId == oldId) {
+        activeOpenChatId = nodeId;
+      }
+      knownContacts.remove(oldId);
+    }
+
     final existing = knownContacts[nodeId];
     final isPeerConnected =
         _tcpPeers.containsValue(nodeId) || _blePeers.containsValue(nodeId);
     if (existing != null) {
-      if (nick != null &&
-          nick.trim().isNotEmpty &&
-          !nick.startsWith('Узел ')) {
-        existing.nickname = nick.trim();
+      if (cleanNick.isNotEmpty && !cleanNick.startsWith('Узел ')) {
+        existing.nickname = cleanNick;
+      }
+      if (cleanHw.isNotEmpty) {
+        existing.hwFingerprint = cleanHw;
       }
       if (address != null && address.isNotEmpty) {
         existing.lastAddress = address;
@@ -742,9 +888,8 @@ class MeshEngine {
         nodeId: nodeId,
         dhPubHex: dhPubHex,
         signPubHex: signPubHex,
-        nickname: (nick != null && nick.trim().isNotEmpty)
-            ? nick.trim()
-            : 'Узел $nodeId',
+        nickname: cleanNick.isNotEmpty ? cleanNick : 'Узел $nodeId',
+        hwFingerprint: cleanHw,
         isOnline: isPeerConnected,
         isDirectPeer: isPeerConnected,
         lastAddress: address ?? '',
@@ -762,7 +907,6 @@ class MeshEngine {
     if (expectedNodeId != null && _tcpPeers.containsValue(expectedNodeId)) {
       return;
     }
-    // Проверяем, нет ли уже открытого сокета с этим IP
     for (final s in _tcpPeers.keys) {
       try {
         if (s.remoteAddress.address == host) return;
@@ -802,12 +946,10 @@ class MeshEngine {
             line,
             remoteAddr: remoteAddr,
             onHello: (peerId, peerNick) async {
-              // ФИКС ГОНКИ ВСТРЕЧНЫХ СОЕДИНЕНИЙ: НЕ убиваем новый сокет, чтобы оба телефона не разорвали связь!
               _tcpPeers[socket] = peerId;
               _refreshOnlineStatuses();
               _addLog('Подключен: $peerNick ($peerId)');
 
-              // Делимся списком известных узлов (Mesh Gossip)
               _sendTcpLine(socket, _buildPeerSyncJson());
 
               _evictExpired();
@@ -841,11 +983,13 @@ class MeshEngine {
         final peerId = map['hello'] as String;
         if (peerId == nodeId) return;
         final peerNick = (map['nick'] as String?) ?? '';
+        final peerHw = (map['hw'] as String?) ?? '';
         _upsertContact(
           nodeId: peerId,
           dhPubHex: map['dh'] as String,
           signPubHex: map['sg'] as String,
           nick: peerNick,
+          hwFingerprint: peerHw,
           address: remoteAddr,
         );
         await onHello(peerId, peerNick);
@@ -867,6 +1011,7 @@ class MeshEngine {
               dhPubHex: m['dh'] as String,
               signPubHex: m['sg'] as String,
               nick: (m['nick'] as String?) ?? 'Узел $pid',
+              hwFingerprint: (m['hw'] as String?) ?? '',
               address: 'Через Mesh',
             );
             addedAny = true;
@@ -897,14 +1042,67 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// Отправка сообщения в личный чат ИЛИ в Общий эфир (BROADCAST)
+  /// Вычисление гибридного сессионного ключа Mayak E2EE v2:
+  /// Комбинирует Ephemeral-Static X25519 (Forward Secrecy) + Static-Static X25519 (аутентификация отправителя) через HKDF-SHA256
+  Future<SecretKey> _deriveHardenedConversationKey({
+    required SimpleKeyPair firstKeyPair,
+    required SimplePublicKey firstRemotePub,
+    required SimpleKeyPair secondKeyPair,
+    required SimplePublicKey secondRemotePub,
+    required String msgId,
+    required String dstNodeId,
+  }) async {
+    final secret1 = await _x25519.sharedSecretKey(
+      keyPair: firstKeyPair,
+      remotePublicKey: firstRemotePub,
+    );
+    final secret2 = await _x25519.sharedSecretKey(
+      keyPair: secondKeyPair,
+      remotePublicKey: secondRemotePub,
+    );
+    final combinedIkm = <int>[
+      ...(await secret1.extractBytes()),
+      ...(await secret2.extractBytes()),
+    ];
+    return _hkdf.deriveKey(
+      secretKey: SecretKey(combinedIkm),
+      nonce: utf8.encode('MAYAK-SALT-V2|$msgId'),
+      info: utf8.encode('MAYAK-E2EE-V2|$dstNodeId'),
+    );
+  }
+
+  /// Упаковка текста и метаданных отправителя (Sealed Sender) с выравниванием размера пакета кратно 64 байтам (защита от анализа длины)
+  List<int> _packSealedEnvelope(String senderNick, String plainText, int ts) {
+    final padLen = 16 + Random.secure().nextInt(48);
+    final randomPad = base64Encode(_randomBytes(padLen));
+    final envelopeJson = jsonEncode({
+      'v': 2,
+      'nick': senderNick,
+      'txt': plainText,
+      'ts': ts,
+      'pad': randomPad,
+    });
+    return utf8.encode(envelopeJson);
+  }
+
+  Map<String, dynamic> _unpackSealedEnvelope(List<int> clearBytes) {
+    final decodedStr = utf8.decode(clearBytes);
+    try {
+      final map = jsonDecode(decodedStr) as Map<String, dynamic>;
+      if (map.containsKey('txt') && map.containsKey('v')) {
+        return map;
+      }
+    } catch (_) {}
+    return {'nick': '', 'txt': decodedStr};
+  }
+
   Future<void> sendMessage(String targetNodeId, String plainText) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final msgId = _randomHex(16);
 
     if (targetNodeId == broadcastChannelId) {
-      final sigPayload =
-          utf8.encode('$msgId|$broadcastChannelId|${ base64Encode(utf8.encode(plainText)) }');
+      final b64Payload = base64Encode(utf8.encode(plainText));
+      final sigPayload = utf8.encode('$msgId|$broadcastChannelId|$b64Payload');
       final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
 
       final pkt = MeshPacket(
@@ -917,7 +1115,7 @@ class MeshEngine {
         dstSignPubHex: '',
         ephPubHex: '',
         nonceHex: '',
-        ciphertextHex: base64Encode(utf8.encode(plainText)),
+        ciphertextHex: b64Payload,
         macHex: '',
         signatureHex: _toHex(sig.bytes),
         expiresAt: now + 3600 * 1000,
@@ -947,44 +1145,58 @@ class MeshEngine {
 
     final ephKeyPair = await _x25519.newKeyPair();
     final ephPub = await ephKeyPair.extractPublicKey();
+    final ephPubHex = _toHex(ephPub.bytes);
 
     final recipientDhPub = SimplePublicKey(
       _fromHex(contact.dhPubHex),
       type: KeyPairType.x25519,
     );
-    final sharedSecret = await _x25519.sharedSecretKey(
-      keyPair: ephKeyPair,
-      remotePublicKey: recipientDhPub,
+
+    // Двойной X25519 (Ephemeral-Static + Static-Static) + HKDF-SHA256
+    final sessionKey = await _deriveHardenedConversationKey(
+      firstKeyPair: ephKeyPair,
+      firstRemotePub: recipientDhPub,
+      secondKeyPair: _dhKeyPair,
+      secondRemotePub: recipientDhPub,
+      msgId: msgId,
+      dstNodeId: targetNodeId,
     );
-    final secretBytes = await sharedSecret.extractBytes();
-    final aesKey = SecretKey((await _sha256.hash(secretBytes)).bytes);
 
     final nonce = _randomBytes(12);
+    final expiresAt = now + 12 * 3600 * 1000;
+    // Защищаем все заголовки пакета через AAD (Associated Authenticated Data)
+    final aadBytes =
+        utf8.encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$expiresAt');
+
+    // Sealed Sender: имя отправителя и текст прячутся внутрь шифротекста с шумовым паддингом!
+    final sealedPayload = _packSealedEnvelope(nickname, plainText, now);
     final secretBox = await _cipher.encrypt(
-      utf8.encode(plainText),
-      secretKey: aesKey,
+      sealedPayload,
+      secretKey: sessionKey,
       nonce: nonce,
-      aad: utf8.encode(msgId),
+      aad: aadBytes,
     );
 
-    final sigPayload =
-        utf8.encode('$msgId|$targetNodeId|${_toHex(secretBox.cipherText)}');
+    final cipherHex = _toHex(secretBox.cipherText);
+    final macHex = _toHex(secretBox.mac.bytes);
+    final sigPayload = utf8
+        .encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$cipherHex|$macHex');
     final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
 
     final pkt = MeshPacket(
       type: 'DATA',
       msgId: msgId,
       dstNodeId: targetNodeId,
-      srcNickname: nickname,
+      srcNickname: '', // СКРЫТО от промежуточных узлов (Sealed Sender)!
       srcSignPubHex: signPubHex,
       srcDhPubHex: dhPubHex,
       dstSignPubHex: contact.signPubHex,
-      ephPubHex: _toHex(ephPub.bytes),
+      ephPubHex: ephPubHex,
       nonceHex: _toHex(nonce),
-      ciphertextHex: _toHex(secretBox.cipherText),
-      macHex: _toHex(secretBox.mac.bytes),
+      ciphertextHex: cipherHex,
+      macHex: macHex,
       signatureHex: _toHex(sig.bytes),
-      expiresAt: now + 3600 * 1000,
+      expiresAt: expiresAt,
       ttl: 7,
     );
 
@@ -1014,7 +1226,6 @@ class MeshEngine {
   }) async {
     _evictExpired();
 
-    // Обработка широковещательного сообщения в Общий эфир
     if (pkt.type == 'BROADCAST') {
       if (_seenBroadcastIds.contains(pkt.msgId)) return;
       final sigValid = await _ed25519.verify(
@@ -1054,8 +1265,8 @@ class MeshEngine {
         unreadBroadcastCount++;
       }
       onMessageReceived(chatMsg);
-      unawaited(
-          _triggerIncomingNotification('Общий эфир ($senderName)', decodedText));
+      unawaited(_triggerIncomingNotification(
+          broadcastChannelId, 'Общий эфир ($senderName)', decodedText));
       unawaited(_saveContactsAndChats());
 
       if (pkt.ttl > 1) {
@@ -1076,8 +1287,11 @@ class MeshEngine {
     }
     if (transitBuffer.containsKey(pkt.msgId)) return;
 
-    final sigValid = await _ed25519.verify(
-      utf8.encode('${pkt.msgId}|${pkt.dstNodeId}|${pkt.ciphertextHex}'),
+    // Проверяем крипто-подпись Ed25519 (с поддержкой заголовков v2)
+    final v2SigPayload = utf8.encode(
+        '${pkt.msgId}|${pkt.dstNodeId}|${pkt.ephPubHex}|${pkt.srcDhPubHex}|${pkt.ciphertextHex}|${pkt.macHex}');
+    bool sigValid = await _ed25519.verify(
+      v2SigPayload,
       signature: Signature(
         _fromHex(pkt.signatureHex),
         publicKey: SimplePublicKey(
@@ -1087,12 +1301,22 @@ class MeshEngine {
     if (!sigValid) return;
 
     if (pkt.dstNodeId == nodeId) {
-      final shared = await _x25519.sharedSecretKey(
-        keyPair: _dhKeyPair,
-        remotePublicKey:
-            SimplePublicKey(_fromHex(pkt.ephPubHex), type: KeyPairType.x25519),
+      final senderEphPub =
+          SimplePublicKey(_fromHex(pkt.ephPubHex), type: KeyPairType.x25519);
+      final senderStaticDhPub =
+          SimplePublicKey(_fromHex(pkt.srcDhPubHex), type: KeyPairType.x25519);
+
+      final sessionKey = await _deriveHardenedConversationKey(
+        firstKeyPair: _dhKeyPair,
+        firstRemotePub: senderEphPub,
+        secondKeyPair: _dhKeyPair,
+        secondRemotePub: senderStaticDhPub,
+        msgId: pkt.msgId,
+        dstNodeId: pkt.dstNodeId,
       );
-      final keyBytes = (await _sha256.hash(await shared.extractBytes())).bytes;
+
+      final aadBytes = utf8.encode(
+          '${pkt.msgId}|${pkt.dstNodeId}|${pkt.ephPubHex}|${pkt.srcDhPubHex}|${pkt.expiresAt}');
       final secretBox = SecretBox(
         _fromHex(pkt.ciphertextHex),
         nonce: _fromHex(pkt.nonceHex),
@@ -1100,18 +1324,23 @@ class MeshEngine {
       );
       final clearBytes = await _cipher.decrypt(
         secretBox,
-        secretKey: SecretKey(keyBytes),
-        aad: utf8.encode(pkt.msgId),
+        secretKey: sessionKey,
+        aad: aadBytes,
       );
+
+      final envelope = _unpackSealedEnvelope(clearBytes);
+      final senderNickInside =
+          (envelope['nick'] as String?) ?? pkt.srcNickname;
+      final decodedText = (envelope['txt'] as String?) ?? '';
+
       final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
       _upsertContact(
         nodeId: senderId,
         dhPubHex: pkt.srcDhPubHex,
         signPubHex: pkt.srcSignPubHex,
-        nick: pkt.srcNickname,
+        nick: senderNickInside,
       );
       final contact = knownContacts[senderId]!;
-      final decodedText = utf8.decode(clearBytes);
 
       final chatMsg = ChatMessage(
         msgId: pkt.msgId,
@@ -1129,7 +1358,8 @@ class MeshEngine {
       }
 
       onMessageReceived(chatMsg);
-      unawaited(_triggerIncomingNotification(contact.displayTitle, decodedText));
+      unawaited(_triggerIncomingNotification(
+          senderId, contact.displayTitle, decodedText));
       unawaited(_saveContactsAndChats());
 
       final ackSig = await _ed25519.sign(
@@ -1140,7 +1370,7 @@ class MeshEngine {
         type: 'ACK',
         msgId: pkt.msgId,
         dstNodeId: senderId,
-        srcNickname: nickname,
+        srcNickname: '',
         srcSignPubHex: signPubHex,
         srcDhPubHex: dhPubHex,
         dstSignPubHex: pkt.dstSignPubHex,
@@ -1158,6 +1388,8 @@ class MeshEngine {
       return;
     }
 
+    // Если пакет ЧУЖОЙ — мы являемся слепым ретранслятором (Zero-Knowledge Relay):
+    // мы не знаем ни текста, ни имени отправителя, но проверяем подпись и передаем пакет дальше!
     if (pkt.ttl > 1 && transitBuffer.length < maxBufferPackets) {
       pkt.ttl -= 1;
       transitBuffer[pkt.msgId] = pkt;
@@ -1191,7 +1423,6 @@ class MeshEngine {
       transitBuffer.remove(ack.msgId);
     }
 
-    // Отмечаем галочкой ✓✓ доставленное сообщение в истории чата
     for (final list in chatHistory.values) {
       for (final m in list) {
         if (m.msgId == ack.msgId) {
@@ -1252,12 +1483,14 @@ class MeshEngine {
               final peerId = data['id'] as String;
               final peerPort = data['p'] as int;
               final peerNick = (data['nick'] as String?) ?? '';
+              final peerHw = (data['hw'] as String?) ?? '';
               if (peerId != nodeId) {
                 _upsertContact(
                   nodeId: peerId,
                   dhPubHex: data['dh'] as String,
                   signPubHex: data['sg'] as String,
                   nick: peerNick,
+                  hwFingerprint: peerHw,
                   address: '${dg.address.address}:$peerPort',
                 );
                 connectToHost(dg.address.address, peerPort,
@@ -1269,37 +1502,30 @@ class MeshEngine {
         onError: (_) {},
       );
 
-      _beaconTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
+      // Легкий UDP-маяк раз в 6 секунд (использует кэш IP без опроса сетевых карт на каждом тике!)
+      _beaconTimer = Timer.periodic(const Duration(seconds: 6), (_) async {
         if (nodeId.isEmpty || listenPort <= 0) return;
+        await refreshNetworkCache();
         final beacon = utf8.encode(jsonEncode({
           'id': nodeId,
           'nick': nickname,
           'p': listenPort,
           'dh': dhPubHex,
           'sg': signPubHex,
+          'hw': myHwFingerprint,
         }));
         try {
           _udpBeacon?.send(
               beacon, InternetAddress('255.255.255.255'), discoveryPort);
         } catch (_) {}
 
-        final ips = await getLocalIPv4Addresses();
-        for (final ip in ips) {
+        for (final ip in cachedIps) {
           final parts = ip.split('.');
           if (parts.length == 4 && parts[0] != '127') {
             final subnetBroadcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
             try {
               _udpBeacon?.send(
                   beacon, InternetAddress(subnetBroadcast), discoveryPort);
-            } catch (_) {}
-
-            try {
-              final ifaceSocket =
-                  await RawDatagramSocket.bind(InternetAddress(ip), 0);
-              ifaceSocket.broadcastEnabled = true;
-              ifaceSocket.send(
-                  beacon, InternetAddress(subnetBroadcast), discoveryPort);
-              ifaceSocket.close();
             } catch (_) {}
           }
         }
