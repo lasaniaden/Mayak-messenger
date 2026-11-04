@@ -105,7 +105,7 @@ class _HomeScreenState extends State<HomeScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_chatScrollCtrl.hasClients) {
         _chatScrollCtrl.animateTo(
-          _chatScrollCtrl.position.maxScrollExtent + 80,
+          _chatScrollCtrl.position.maxScrollExtent + 120,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
@@ -120,6 +120,64 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     setState(() {});
     _scrollToBottom();
+  }
+
+  Future<void> _pickAndSendAttachment({required bool onlyImages}) async {
+    final target = _activeChatId;
+    if (target == null || target == MeshEngine.broadcastChannelId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Пересылка зашифрованных файлов доступна в личных чатах'),
+        ),
+      );
+      return;
+    }
+    final picked = await _engine.pickFileForChat(onlyImages: onlyImages);
+    if (picked == null) return;
+    final path = picked['path'] as String?;
+    final name = picked['name'] as String?;
+    if (path == null || name == null) return;
+
+    await _engine.sendFileMessage(target, filePath: path, fileName: name);
+    if (!mounted) return;
+    setState(() {});
+    _scrollToBottom();
+  }
+
+  void _openFullScreenImage(String imagePath, String title) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black87,
+            title: Text(title),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.download),
+                tooltip: 'Сохранить в Загрузки',
+                onPressed: () async {
+                  final msg = await _engine.saveReceivedFileToDownloads(
+                      imagePath, title);
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(msg)),
+                  );
+                },
+              ),
+            ],
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: Image.file(File(imagePath)),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _showSafetyNumberDialog(ContactProfile contact) async {
@@ -166,9 +224,9 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 12),
             const Text(
-              '• Шифрование: Double X25519 + HKDF-SHA256 + ChaCha20-Poly1305\n'
-              '• Подпись пакетов: Ed25519\n'
-              '• Защита метаданных: Sealed Sender (промежуточные узлы не видят ваше имя и длину текста)',
+              '• Шифрование текста и файлов: Double X25519 + HKDF-SHA256 + ChaCha20-Poly1305\n'
+              '• Подпись каждого пакета и чанка: Ed25519\n'
+              '• Защита метаданных: Sealed Sender (промежуточные узлы не видят ваше имя и содержимое)',
               style: TextStyle(fontSize: 11.5, color: Colors.white60),
             ),
           ],
@@ -189,7 +247,7 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (ctx) => AlertDialog(
         title: Text('Удалить «${contact.displayTitle}»?'),
         content: Text(
-          'Старый узел (${contact.nodeId}) и переписка с ним будут удалены из списка.',
+          'Узел (${contact.nodeId}) и переписка с ним будут удалены из списка.',
           style: const TextStyle(fontSize: 13),
         ),
         actions: [
@@ -269,7 +327,7 @@ class _HomeScreenState extends State<HomeScreen> {
             controller: scrollCtrl,
             children: [
               const Text(
-                'Мастер автонастройки и Защита «Маяк v0.8.0»',
+                'Управление узлом и Защита «Маяк v0.9.0»',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 10),
@@ -311,44 +369,38 @@ class _HomeScreenState extends State<HomeScreen> {
                       label: const Text(
                           'Открыть доступ в Общественной сети (Firewall)'),
                     ),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                        backgroundColor: Colors.redAccent),
+                    onPressed: () => _engine.stopAllAndExitApp(),
+                    icon: const Icon(Icons.power_settings_new, size: 18),
+                    label: const Text('Полностью выключить Маяк и выйти'),
+                  ),
                 ],
               ),
               const Divider(height: 24),
               const Text(
-                '1. Уведомления при закрытом/свернутом экране:',
+                '1. Пересылка зашифрованных фото и файлов (Новое в v0.9.0):',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
               const SizedBox(height: 4),
               const Text(
-                '• В v0.8.0 встроен фоновый сервис Android («Маяк P2P на дежурстве»), который не дает системе усыпить сокеты при блокировке экрана.\n'
-                '• Нажми кнопку «Разрешить работу в фоне без сна» выше, чтобы оболочка телефона (Xiaomi/Samsung/Realme) не убивала фоновый прием СМС.\n'
-                '• Пуш-уведомления теперь приходят именно тогда, когда программа свернута или открыт другой чат.',
+                '• Нажми на иконку фото или скрепки слева от поля ввода сообщения в личном чате.\n'
+                '• Файл автоматически разрезается на блоки по 24 КБ, каждый блок шифруется сквозным ключом Double X25519 + ChaCha20-Poly1305 и проверяется по контрольной сумме SHA-256.\n'
+                '• Фотографии отображаются прямо внутри пузыря сообщения (нажми на фото для увеличения или сохранения в Загрузки).',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
               const SizedBox(height: 14),
               const Text(
-                '2. Как устроена криптозащита при передаче через чужие телефоны:',
+                '2. Вечная очередь исходящих и честный фоновый режим:',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
               const SizedBox(height: 4),
               const Text(
-                '• Протокол Mayak E2EE v2 использует двойной обмен ключами X25519 (Static + Ephemeral) + HKDF-SHA256 + ChaCha20-Poly1305.\n'
-                '• Режим Sealed Sender: твой позывной и длина текста зашифрованы внутри пакета и выровнены случайным шумом (Padding). Чужой телефон-ретранслятор видит только случайные байты и не знает даже имени отправителя.\n'
-                '• В каждом личном чате можно нажать на иконку щита сверху и сверить 12-значный Код безопасности.',
-                style: TextStyle(fontSize: 13, color: Colors.white70),
-              ),
-              const SizedBox(height: 14),
-              const Text(
-                '3. Как убрать старый дубликат телефона из списка:',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, color: Colors.tealAccent),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                '• Теперь ID узла привязан к аппаратному ANDROID_ID телефона и больше не меняется при переустановке.\n'
-                '• Чтобы удалить старый неактивный контакт с прошлых тестов — просто зажми его пальцем (или нажми иконку корзины в чате).',
+                '• Если ты написал сообщения в оффлайне (горят часики ⏳) и перезагрузил телефон — сообщения сохранены на диске в зашифрованном виде и сами отправятся при появлении связи.\n'
+                '• Чтобы полностью остановить фоновое дежурство — нажми кнопку «Выключить и выйти» прямо на уведомлении в шторке Android или красную кнопку выше.',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
             ],
@@ -374,7 +426,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 'Аппаратный отпечаток: ${_engine.myHwFingerprint}\n'
                 'Физические IP: ${_engine.cachedIps.join(", ")}\n'
                 'TCP-порт: ${_engine.listenPort}\n'
-                'Фоновая служба: ${_engine.bgServiceActive ? "Активна" : "Стандарт"}\n'
+                'Очередь отправки (Outbox): ${_engine.myPersistentOutbox.length}\n'
                 'Статус: ${_engine.lastStatusLog}',
                 style: const TextStyle(fontSize: 12, color: Colors.white70),
               ),
@@ -873,12 +925,115 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildMessageContent(ChatMessage m) {
+    final hasFile = m.fileName != null && m.fileName!.isNotEmpty;
+    if (!hasFile) {
+      return SelectableText(
+        m.text,
+        style: const TextStyle(fontSize: 14.5, color: Colors.white),
+      );
+    }
+
+    final fileReady = m.filePath != null && File(m.filePath!).existsSync();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (m.isImageFile && fileReady)
+          GestureDetector(
+            onTap: () => _openFullScreenImage(m.filePath!, m.fileName!),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                  maxWidth: 280,
+                  maxHeight: 240,
+                ),
+                child: Image.file(
+                  File(m.filePath!),
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                m.isImageFile ? Icons.image : Icons.insert_drive_file,
+                color: Colors.tealAccent,
+                size: 24,
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      m.fileName!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                    ),
+                    Text(
+                      m.transferProgress < 1.0
+                          ? '${m.fileSizeFormatted} • ${(m.transferProgress * 100).toInt()}%'
+                          : m.fileSizeFormatted,
+                      style:
+                          const TextStyle(fontSize: 11, color: Colors.white70),
+                    ),
+                  ],
+                ),
+              ),
+              if (fileReady) ...[
+                const SizedBox(width: 6),
+                IconButton(
+                  icon: const Icon(Icons.download,
+                      size: 20, color: Colors.tealAccent),
+                  tooltip: 'Сохранить в Загрузки/Mayak',
+                  onPressed: () async {
+                    final res = await _engine.saveReceivedFileToDownloads(
+                      m.filePath!,
+                      m.fileName!,
+                    );
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(res)),
+                    );
+                  },
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (m.transferProgress < 1.0)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: LinearProgressIndicator(
+              value: m.transferProgress,
+              backgroundColor: Colors.white12,
+              color: Colors.tealAccent,
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _buildConversationPane({required bool showBackButton}) {
     final chatId = _activeChatId;
     if (chatId == null) {
       return const Center(
         child: Text(
-          'Выберите чат слева или подключите устройство,\nчтобы начать защищенную переписку.',
+          'Выберите чат слева или подключите устройство,\nчтобы начать защищенную переписку и обмен файлами.',
           textAlign: TextAlign.center,
           style: TextStyle(color: Colors.white38, fontSize: 14),
         ),
@@ -973,7 +1128,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Text(
                       isBroadcast
                           ? 'Здесь отображаются открытые сообщения для всех участников вокруг вас.'
-                          : 'Защищенный E2EE v2 диалог с «$title».\nПромежуточные узлы не видят ваше имя, длину и содержимое сообщений.',
+                          : 'Защищенный E2EE v2 диалог с «$title».\nМожно отправлять текст, фотографии и файлы до 25 МБ без интернета.',
                       textAlign: TextAlign.center,
                       style:
                           const TextStyle(color: Colors.white38, fontSize: 13),
@@ -1028,11 +1183,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                   ),
                                 ),
-                              SelectableText(
-                                m.text,
-                                style: const TextStyle(
-                                    fontSize: 14.5, color: Colors.white),
-                              ),
+                              _buildMessageContent(m),
                               const SizedBox(height: 3),
                               Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -1065,12 +1216,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   },
                 ),
         ),
-        // Изолированный виджет поля ввода: НЕ перерисовывается от сетевых событий и работает без малейших лагов!
         ChatInputBar(
           hintText: isBroadcast
               ? 'Сообщение всем вокруг...'
-              : 'Зашифрованное сообщение для $title...',
+              : 'Сообщение или файл для $title...',
+          allowAttachments: !isBroadcast,
           onSend: _sendTextMessage,
+          onPickImage: () => _pickAndSendAttachment(onlyImages: true),
+          onPickFile: () => _pickAndSendAttachment(onlyImages: false),
         ),
       ],
     );
@@ -1152,7 +1305,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 IconButton(
                   icon:
                       const Icon(Icons.help_outline, color: Colors.amberAccent),
-                  tooltip: 'Автонастройка и Защита',
+                  tooltip: 'Автонастройка и Выход',
                   onPressed: _showTutorialAndAutoSetupModal,
                 ),
                 IconButton(
@@ -1185,15 +1338,21 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-/// Изолированная панель ввода текста (предотвращает любые задержки клавиатуры при сетевой активности)
+/// Изолированная панель ввода с кнопками прикрепления фото и файлов
 class ChatInputBar extends StatefulWidget {
   final String hintText;
+  final bool allowAttachments;
   final Future<void> Function(String text) onSend;
+  final VoidCallback onPickImage;
+  final VoidCallback onPickFile;
 
   const ChatInputBar({
     super.key,
     required this.hintText,
+    required this.allowAttachments,
     required this.onSend,
+    required this.onPickImage,
+    required this.onPickFile,
   });
 
   @override
@@ -1222,10 +1381,22 @@ class _ChatInputBarState extends State<ChatInputBar> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
       color: const Color(0xFF18222C),
       child: Row(
         children: [
+          if (widget.allowAttachments) ...[
+            IconButton(
+              icon: const Icon(Icons.photo_outlined, color: Colors.tealAccent),
+              tooltip: 'Отправить фото',
+              onPressed: widget.onPickImage,
+            ),
+            IconButton(
+              icon: const Icon(Icons.attach_file, color: Colors.white70),
+              tooltip: 'Отправить любой файл',
+              onPressed: widget.onPickFile,
+            ),
+          ],
           Expanded(
             child: TextField(
               controller: _ctrl,
