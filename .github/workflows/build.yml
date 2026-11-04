@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Native Bridge + Foreground Service v0.8.0
+      - name: Recreate Clean Android Platform & Inject Native Bridge + File Picker + Stop Button v0.9.0
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
@@ -103,8 +103,8 @@ jobs:
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 8
-                  versionName = "0.8.0"
+                  versionCode = 9
+                  versionName = "0.9.0"
               }
 
               packaging {
@@ -157,8 +157,8 @@ jobs:
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 8
-                  versionName "0.8.0"
+                  versionCode 9
+                  versionName "0.9.0"
               }
 
               packagingOptions {
@@ -187,7 +187,7 @@ jobs:
           }
           """)
 
-          # 5. Записываем AndroidManifest.xml с поддержкой Фонового Сервиса (MayakBackgroundService), WakeLock и отключением оптимизации батареи
+          # 5. Записываем AndroidManifest.xml
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "w") as f:
               f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -262,7 +262,7 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем MainActivity.kt + MayakBackgroundService (фоновое дежурство + аппаратный ANDROID_ID + пуши в фоне)
+          # 6. Записываем MainActivity.kt + MayakBackgroundService (с кнопкой полного выхода в шторке и нативным выбором файлов/фото)
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -270,14 +270,17 @@ jobs:
               f.write("""package com.mayak.mesh.p2p_mesh
 
           import android.Manifest
+          import android.app.Activity
           import android.app.NotificationChannel
           import android.app.NotificationManager
           import android.app.PendingIntent
           import android.app.Service
+          import android.content.ContentValues
           import android.content.Context
           import android.content.Intent
           import android.content.pm.PackageManager
           import android.content.pm.ServiceInfo
+          import android.database.Cursor
           import android.location.LocationManager
           import android.net.ConnectivityManager
           import android.net.NetworkCapabilities
@@ -285,10 +288,13 @@ jobs:
           import android.net.wifi.WifiManager
           import android.os.Build
           import android.os.Bundle
+          import android.os.Environment
           import android.os.Handler
           import android.os.IBinder
           import android.os.Looper
           import android.os.PowerManager
+          import android.provider.MediaStore
+          import android.provider.OpenableColumns
           import android.provider.Settings
           import androidx.core.app.ActivityCompat
           import androidx.core.app.NotificationCompat
@@ -308,15 +314,24 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.io.File
+          import java.io.FileOutputStream
           import java.util.Locale
+          import kotlin.system.exitProcess
 
-          // Фоновая служба Android, удерживающая CPU WakeLock и Wi-Fi в активном состоянии при свернутом приложении и заблокированном экране
+          // Фоновая служба с честной кнопкой «Выключить и выйти» прямо в уведомлении шторки
           class MayakBackgroundService : Service() {
+              companion object {
+                  const val ACTION_STOP_SERVICE = "com.mayak.mesh.STOP_SERVICE"
+                  var instance: MayakBackgroundService? = null
+              }
+
               private var wakeLock: PowerManager.WakeLock? = null
               private var wifiLock: WifiManager.WifiLock? = null
 
               override fun onCreate() {
                   super.onCreate()
+                  instance = this
                   try {
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                           val chan = NotificationChannel(
@@ -331,7 +346,7 @@ jobs:
                           nm?.createNotificationChannel(chan)
                       }
 
-                      val intent = Intent(this, MainActivity::class.java).apply {
+                      val openIntent = Intent(this, MainActivity::class.java).apply {
                           flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                       }
                       val pFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -339,15 +354,22 @@ jobs:
                       } else {
                           PendingIntent.FLAG_UPDATE_CURRENT
                       }
-                      val pendingIntent = PendingIntent.getActivity(this, 0, intent, pFlags)
+                      val pendingOpen = PendingIntent.getActivity(this, 0, openIntent, pFlags)
+
+                      // Интент для кнопки «Выключить и выйти» прямо в шторке
+                      val stopIntent = Intent(this, MayakBackgroundService::class.java).apply {
+                          action = ACTION_STOP_SERVICE
+                      }
+                      val pendingStop = PendingIntent.getService(this, 1, stopIntent, pFlags)
 
                       val notif = NotificationCompat.Builder(this, "mayak_bg_service")
                           .setSmallIcon(android.R.drawable.ic_dialog_info)
                           .setContentTitle("Маяк P2P на дежурстве")
-                          .setContentText("Фоновый прием сообщений и ретрансляция активны")
+                          .setContentText("Ожидание сообщений (0% нагрузки CPU)")
                           .setOngoing(true)
                           .setPriority(NotificationCompat.PRIORITY_LOW)
-                          .setContentIntent(pendingIntent)
+                          .setContentIntent(pendingOpen)
+                          .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Выключить и выйти", pendingStop)
                           .build()
 
                       if (Build.VERSION.SDK_INT >= 34) {
@@ -371,10 +393,33 @@ jobs:
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == ACTION_STOP_SERVICE) {
+                      stopAndExitCompletely()
+                      return START_NOT_STICKY
+                  }
                   return START_STICKY
               }
 
+              fun stopAndExitCompletely() {
+                  try {
+                      if (wakeLock?.isHeld == true) wakeLock?.release()
+                      if (wifiLock?.isHeld == true) wifiLock?.release()
+                  } catch (_: Throwable) {}
+                  try {
+                      Nearby.getConnectionsClient(applicationContext).stopAllEndpoints()
+                      Nearby.getConnectionsClient(applicationContext).stopAdvertising()
+                      Nearby.getConnectionsClient(applicationContext).stopDiscovery()
+                  } catch (_: Throwable) {}
+                  try {
+                      MainActivity.currentInstance?.finishAffinity()
+                  } catch (_: Throwable) {}
+                  stopForeground(true)
+                  stopSelf()
+                  exitProcess(0)
+              }
+
               override fun onDestroy() {
+                  instance = null
                   try {
                       if (wakeLock?.isHeld == true) wakeLock?.release()
                       if (wifiLock?.isHeld == true) wifiLock?.release()
@@ -386,11 +431,16 @@ jobs:
           }
 
           class MainActivity : FlutterActivity() {
+              companion object {
+                  var currentInstance: MainActivity? = null
+              }
+
               private val CHANNEL = "mayak/native"
               private val NOTIF_CHANNEL_ID = "mayak_messages_channel_v2"
               private var methodChannel: MethodChannel? = null
               private var multicastLock: WifiManager.MulticastLock? = null
               private var pendingPermResult: MethodChannel.Result? = null
+              private var pendingFilePickResult: MethodChannel.Result? = null
               private var localNodeId: String = ""
               private var serviceId: String = "com.p2pmesh.intercom"
               private var notifIdCounter = 1001
@@ -400,6 +450,7 @@ jobs:
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  currentInstance = this
                   createNotificationChannel()
                   val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
                   Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -438,7 +489,7 @@ jobs:
                               "Входящие сообщения Маяк",
                               NotificationManager.IMPORTANCE_HIGH
                           ).apply {
-                              description = "Звуковые пуш-уведомления о новых сообщениях"
+                              description = "Звуковые пуш-уведомления о новых сообщениях и файлах"
                               enableVibration(true)
                           }
                           val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -463,6 +514,28 @@ jobs:
                               "startBackgroundService" -> {
                                   startBgServiceSafe()
                                   result.success(true)
+                              }
+                              "stopBackgroundServiceAndExit" -> {
+                                  result.success(true)
+                                  MayakBackgroundService.instance?.stopAndExitCompletely() ?: run {
+                                      finishAffinity()
+                                      exitProcess(0)
+                                  }
+                              }
+                              "pickFile" -> {
+                                  val onlyImages = call.argument<Boolean>("onlyImages") ?: false
+                                  pendingFilePickResult = result
+                                  val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                                      type = if (onlyImages) "image/*" else "*/*"
+                                      addCategory(Intent.CATEGORY_OPENABLE)
+                                  }
+                                  startActivityForResult(Intent.createChooser(intent, "Выберите файл или фото"), 7004)
+                              }
+                              "saveFileToDownloads" -> {
+                                  val srcPath = call.argument<String>("path") ?: ""
+                                  val fileName = call.argument<String>("name") ?: "mayak_file"
+                                  val savedWhere = saveToPublicDownloads(srcPath, fileName)
+                                  result.success(savedWhere)
                               }
                               "requestIgnoreBatteryOptimizations" -> {
                                   requestBatteryExemption()
@@ -491,7 +564,6 @@ jobs:
                                   val title = call.argument<String>("title") ?: "Новое сообщение"
                                   val body = call.argument<String>("body") ?: ""
                                   val forceWhenOpen = call.argument<Boolean>("forceWhenOpen") ?: false
-                                  // Показываем системный пуш ТОЛЬКО когда приложение свернуто/заблокировано или открыт другой чат!
                                   if (!isAppInForeground || forceWhenOpen) {
                                       showSystemNotification(title, body)
                                   }
@@ -537,6 +609,78 @@ jobs:
                       } catch (t: Throwable) {
                           result.success("ERROR: ${t.message}")
                       }
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 7004) {
+                      val res = pendingFilePickResult
+                      pendingFilePickResult = null
+                      if (res == null) return
+                      if (resultCode != Activity.RESULT_OK || data?.data == null) {
+                          res.success(null)
+                          return
+                      }
+                      try {
+                          val uri = data.data!!
+                          var displayName = "file_${System.currentTimeMillis()}"
+                          val cursor: Cursor? = contentResolver.query(uri, null, null, null, null)
+                          cursor?.use {
+                              if (it.moveToFirst()) {
+                                  val idx = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                                  if (idx >= 0) {
+                                      displayName = it.getString(idx) ?: displayName
+                                  }
+                              }
+                          }
+                          val safeName = displayName.replace(Regex("[^a-zA-Z0-9._а-яА-ЯёЁ-]"), "_")
+                          val outDir = File(cacheDir, "picked_files").apply { mkdirs() }
+                          val outFile = File(outDir, "${System.currentTimeMillis()}_$safeName")
+                          contentResolver.openInputStream(uri)?.use { input ->
+                              FileOutputStream(outFile).use { output ->
+                                  input.copyTo(output)
+                              }
+                          }
+                          res.success(
+                              mapOf(
+                                  "path" to outFile.absolutePath,
+                                  "name" to displayName,
+                                  "size" to outFile.length()
+                              )
+                          )
+                      } catch (t: Throwable) {
+                          res.success(null)
+                      }
+                  }
+              }
+
+              private fun saveToPublicDownloads(srcPath: String, fileName: String): String {
+                  return try {
+                      val srcFile = File(srcPath)
+                      if (!srcFile.exists()) return "Файл не найден"
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          val values = ContentValues().apply {
+                              put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                              put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Mayak")
+                          }
+                          val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                          if (uri != null) {
+                              contentResolver.openOutputStream(uri)?.use { out ->
+                                  srcFile.inputStream().use { input -> input.copyTo(out) }
+                              }
+                              "Сохранено в Загрузки/Mayak/$fileName"
+                          } else {
+                              "Ошибка сохранения"
+                          }
+                      } else {
+                          val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Mayak").apply { mkdirs() }
+                          val dst = File(dir, fileName)
+                          srcFile.copyTo(dst, true)
+                          "Сохранено: ${dst.absolutePath}"
+                      }
+                  } catch (t: Throwable) {
+                      "Ошибка: ${t.message}"
                   }
               }
 
@@ -850,6 +994,7 @@ jobs:
               }
 
               override fun onDestroy() {
+                  if (currentInstance == this) currentInstance = null
                   try {
                       multicastLock?.release()
                   } catch (_: Throwable) {}
