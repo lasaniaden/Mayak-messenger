@@ -15,6 +15,10 @@ class ChatMessage {
   final int timestamp;
   final bool isMe;
   bool isDelivered;
+  final String? filePath;
+  final String? fileName;
+  final int? fileSize;
+  double transferProgress; // 0.0 .. 1.0
 
   ChatMessage({
     required this.msgId,
@@ -25,11 +29,32 @@ class ChatMessage {
     required this.timestamp,
     required this.isMe,
     this.isDelivered = false,
+    this.filePath,
+    this.fileName,
+    this.fileSize,
+    this.transferProgress = 1.0,
   });
+
+  bool get isImageFile {
+    final name = (fileName ?? filePath ?? '').toLowerCase();
+    return name.endsWith('.jpg') ||
+        name.endsWith('.jpeg') ||
+        name.endsWith('.png') ||
+        name.endsWith('.webp') ||
+        name.endsWith('.gif') ||
+        name.endsWith('.bmp');
+  }
 
   String get timeFormatted {
     final dt = DateTime.fromMillisecondsSinceEpoch(timestamp);
     return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String get fileSizeFormatted {
+    final sz = fileSize ?? 0;
+    if (sz < 1024) return '$sz Б';
+    if (sz < 1024 * 1024) return '${(sz / 1024).toStringAsFixed(1)} КБ';
+    return '${(sz / (1024 * 1024)).toStringAsFixed(2)} МБ';
   }
 
   Map<String, dynamic> toJson() => {
@@ -41,6 +66,10 @@ class ChatMessage {
         'ts': timestamp,
         'me': isMe,
         'ack': isDelivered,
+        'fp': filePath,
+        'fn': fileName,
+        'fs': fileSize,
+        'pr': transferProgress,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -52,7 +81,28 @@ class ChatMessage {
         timestamp: j['ts'] as int,
         isMe: j['me'] as bool,
         isDelivered: (j['ack'] as bool?) ?? false,
+        filePath: j['fp'] as String?,
+        fileName: j['fn'] as String?,
+        fileSize: j['fs'] as int?,
+        transferProgress: ((j['pr'] as num?) ?? 1.0).toDouble(),
       );
+}
+
+class IncomingFileAssembly {
+  final String fileId;
+  final String fileName;
+  final int totalSize;
+  final int totalChunks;
+  final String sha256Hex;
+  final Map<int, List<int>> chunks = {};
+
+  IncomingFileAssembly({
+    required this.fileId,
+    required this.fileName,
+    required this.totalSize,
+    required this.totalChunks,
+    required this.sha256Hex,
+  });
 }
 
 class ContactProfile {
@@ -104,7 +154,7 @@ class MeshPacket {
   final String type; // 'DATA', 'BROADCAST' или 'ACK'
   final String msgId;
   final String dstNodeId;
-  final String srcNickname; // В DATA-пакетах пусто (Sealed Sender — имя зашифровано внутри!)
+  final String srcNickname;
   final String srcSignPubHex;
   final String srcDhPubHex;
   final String dstSignPubHex;
@@ -172,7 +222,8 @@ class MeshEngine {
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
-  static const int maxBufferPackets = 300;
+  static const int maxBufferPackets = 400;
+  static const int fileChunkSize = 24 * 1024; // 24 КБ на чанк
   static const String serviceId = 'com.p2pmesh.intercom';
   static const MethodChannel _nativeChannel = MethodChannel('mayak/native');
 
@@ -205,7 +256,6 @@ class MeshEngine {
   String lastStatusLog = 'Запуск ядра...';
   final List<String> debugLogs = [];
 
-  // Кэш локальных IP и инвайта, чтобы НЕ нагружать процессор и НЕ вызывать лаги при вводе текста
   List<String> cachedIps = ['127.0.0.1'];
   String cachedInviteCode = '';
   int _lastIpRefreshMs = 0;
@@ -214,8 +264,11 @@ class MeshEngine {
   final Set<String> _connectingHosts = {};
   final Map<String, String> _blePeers = {};
   final Set<String> _seenBroadcastIds = {};
+  final Map<String, IncomingFileAssembly> _incomingFiles = {};
 
   final Map<String, MeshPacket> transitBuffer = {};
+  // Вечная очередь своих собственных исходящих пакетов (сохраняется на диск!)
+  final Map<String, MeshPacket> myPersistentOutbox = {};
   final Map<String, MeshPacket> deliveredAcks = {};
   final Map<String, ContactProfile> knownContacts = {};
   final Map<String, List<ChatMessage>> chatHistory = {};
@@ -253,7 +306,6 @@ class MeshEngine {
     onStateChanged();
   }
 
-  /// Удаление старого/неактуального контакта и его чата
   Future<void> deleteContact(String targetNodeId) async {
     knownContacts.remove(targetNodeId);
     chatHistory.remove(targetNodeId);
@@ -264,7 +316,20 @@ class MeshEngine {
     onStateChanged();
   }
 
-  /// Вычисление 12-значного Кода Безопасности (Safety Number) для сверки защиты от перехвата (MITM)
+  /// Честный полный выход из программы и остановка фоновой службы Android в ноль
+  Future<void> stopAllAndExitApp() async {
+    await _saveContactsAndChats();
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('stopBackgroundServiceAndExit');
+      } catch (_) {
+        exit(0);
+      }
+    } else {
+      exit(0);
+    }
+  }
+
   Future<String> computeSafetyNumber(String peerNodeId) async {
     final c = knownContacts[peerNodeId];
     if (c == null) return 'Нет данных';
@@ -360,12 +425,9 @@ class MeshEngine {
     await _startLanAutoDiscovery();
     _addLog('Защищенный узел готов (порт $listenPort)');
 
-    // Легкий быстрый поиск при старте (проверяет только 16 главных адресов хотспота/роутера без лагов!)
     unawaited(scanLocalSubnet(quickOnly: true));
   }
 
-  /// Детерминированная привязка личности к железу устройства (ANDROID_ID / Windows Hostname),
-  /// чтобы после обновления или переустановки приложения телефон НЕ становился новым устройством!
   Future<void> _loadOrCreateIdentity() async {
     String rawHwId = '';
     try {
@@ -379,7 +441,8 @@ class MeshEngine {
     } catch (_) {}
 
     if (rawHwId.isNotEmpty) {
-      final hwHashBytes = (await _sha256.hash(utf8.encode('MAYAK-HW|$rawHwId'))).bytes;
+      final hwHashBytes =
+          (await _sha256.hash(utf8.encode('MAYAK-HW|$rawHwId'))).bytes;
       myHwFingerprint = _toHex(hwHashBytes.sublist(0, 8));
     }
 
@@ -390,7 +453,6 @@ class MeshEngine {
 
       if (savedSignSeed == null || savedDhSeed == null) {
         if (rawHwId.isNotEmpty && rawHwId.length > 5) {
-          // Генерируем постоянные ключи из аппаратного ID устройства!
           final signDigest =
               await _sha256.hash(utf8.encode('MAYAK-SIGN-SEED-V1|$rawHwId'));
           final dhDigest =
@@ -458,6 +520,21 @@ class MeshEngine {
           chatHistory[peerId] = list;
         });
       }
+
+      // Восстанавливаем вечную очередь своих собственных недоставленных сообщений (Outbox) после перезагрузки!
+      final outboxRaw = prefs.getString('saved_outbox_v9');
+      if (outboxRaw != null && outboxRaw.isNotEmpty) {
+        final list = jsonDecode(outboxRaw) as List;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        for (final item in list) {
+          final pkt =
+              MeshPacket.fromJson(Map<String, dynamic>.from(item as Map));
+          if (pkt.expiresAt > now) {
+            myPersistentOutbox[pkt.msgId] = pkt;
+            transitBuffer[pkt.msgId] = pkt;
+          }
+        }
+      }
     } catch (_) {}
   }
 
@@ -475,6 +552,10 @@ class MeshEngine {
         chatsMap[peerId] = trimmed.map((m) => m.toJson()).toList();
       });
       await prefs.setString('saved_chats_v7', jsonEncode(chatsMap));
+
+      final outboxList =
+          myPersistentOutbox.values.map((p) => p.toJson()).toList();
+      await prefs.setString('saved_outbox_v9', jsonEncode(outboxList));
     } catch (_) {}
   }
 
@@ -519,7 +600,6 @@ class MeshEngine {
     return jsonEncode({'peer_sync': peers});
   }
 
-  /// Обновляет кэш локальных IP не чаще раза в 10 секунд (чтобы не лагал UI)
   Future<void> refreshNetworkCache() async {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastIpRefreshMs < 8000 && cachedInviteCode.isNotEmpty) {
@@ -672,7 +752,6 @@ class MeshEngine {
     return targetId;
   }
 
-  /// Оптимизированное сканирование подсети без лагов клавиатуры
   Future<void> scanLocalSubnet({bool quickOnly = false}) async {
     if (isScanningSubnet) return;
     isScanningSubnet = true;
@@ -721,7 +800,6 @@ class MeshEngine {
             if (batch.length >= 15) {
               await Future.wait(batch);
               batch.clear();
-              // Даем UI-потоку 15 мс на отрисовку клавиатуры без малейших лагов!
               await Future.delayed(const Duration(milliseconds: 15));
             }
           }
@@ -788,6 +866,162 @@ class MeshEngine {
     } catch (_) {}
   }
 
+  /// Выбор фото или любого файла на Android и Windows (без внешних падающих плагинов!)
+  Future<Map<String, dynamic>?> pickFileForChat({bool onlyImages = false}) async {
+    try {
+      if (Platform.isAndroid) {
+        final res = await _nativeChannel.invokeMapMethod<String, dynamic>(
+          'pickFile',
+          {'onlyImages': onlyImages},
+        );
+        return res;
+      } else if (Platform.isWindows) {
+        final filter = onlyImages
+            ? 'Images (*.jpg;*.jpeg;*.png;*.webp;*.gif)|*.jpg;*.jpeg;*.png;*.webp;*.gif|All files (*.*)|*.*'
+            : 'All files (*.*)|*.*';
+        final psScript =
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "\$dlg = New-Object System.Windows.Forms.OpenFileDialog; "
+            "\$dlg.Filter = '$filter'; "
+            "if (\$dlg.ShowDialog() -eq 'OK') { Write-Output \$dlg.FileName }";
+        final proc = await Process.run('powershell', [
+          '-NoProfile',
+          '-STA',
+          '-Command',
+          psScript,
+        ]);
+        final selectedPath = proc.stdout.toString().trim();
+        if (selectedPath.isEmpty) return null;
+        final file = File(selectedPath);
+        if (!await file.exists()) return null;
+        final name = selectedPath.split(RegExp(r'[\\/]')).last;
+        return {
+          'path': selectedPath,
+          'name': name,
+          'size': await file.length(),
+        };
+      }
+    } catch (e) {
+      _addLog('Ошибка выбора файла: $e');
+    }
+    return null;
+  }
+
+  /// Сохранение полученного файла в папку «Загрузки/Mayak»
+  Future<String> saveReceivedFileToDownloads(
+      String srcPath, String fileName) async {
+    try {
+      if (Platform.isAndroid) {
+        final res = await _nativeChannel.invokeMethod<String>(
+          'saveFileToDownloads',
+          {'path': srcPath, 'name': fileName},
+        );
+        return res ?? 'Сохранено';
+      } else {
+        final home = Platform.environment['USERPROFILE'] ??
+            Platform.environment['HOME'] ??
+            '.';
+        final dlDir = Directory('$home/Downloads/Mayak');
+        if (!await dlDir.exists()) {
+          await dlDir.create(recursive: true);
+        }
+        final dstPath = '${dlDir.path}/$fileName';
+        await File(srcPath).copy(dstPath);
+        return 'Сохранено в: $dstPath';
+      }
+    } catch (e) {
+      return 'Ошибка сохранения: $e';
+    }
+  }
+
+  /// Отправка выбранного фото или файла в личный чат с нарезкой на чанки по 24 КБ и сквозным шифрованием E2EE v2
+  Future<void> sendFileMessage(
+    String targetNodeId, {
+    required String filePath,
+    required String fileName,
+  }) async {
+    final contact = knownContacts[targetNodeId];
+    if (contact == null) return;
+
+    final file = File(filePath);
+    if (!await file.exists()) return;
+    final bytes = await file.readAsBytes();
+    final totalSize = bytes.length;
+    if (totalSize == 0) return;
+
+    if (totalSize > 25 * 1024 * 1024) {
+      _addLog('Максимальный размер файла для Mesh-передачи: 25 МБ');
+      return;
+    }
+
+    final fileId = _randomHex(12);
+    final fileHash = _toHex((await _sha256.hash(bytes)).bytes);
+    final totalChunks = (totalSize / fileChunkSize).ceil();
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    final myMsg = ChatMessage(
+      msgId: fileId,
+      peerId: targetNodeId,
+      senderId: nodeId,
+      senderName: nickname,
+      text: '📎 Файл: $fileName',
+      timestamp: now,
+      isMe: true,
+      isDelivered: false,
+      filePath: filePath,
+      fileName: fileName,
+      fileSize: totalSize,
+      transferProgress: 0.05,
+    );
+    getMessagesFor(targetNodeId).add(myMsg);
+    onStateChanged();
+
+    for (int idx = 0; idx < totalChunks; idx++) {
+      final start = idx * fileChunkSize;
+      final end = min(start + fileChunkSize, totalSize);
+      final chunkBytes = bytes.sublist(start, end);
+
+      final chunkEnvelopeJson = jsonEncode({
+        'v': 2,
+        'kind': 'FILE_CHUNK',
+        'fid': fileId,
+        'fn': fileName,
+        'fs': totalSize,
+        'sha': fileHash,
+        'idx': idx,
+        'tot': totalChunks,
+        'nick': nickname,
+        'b64': base64Encode(chunkBytes),
+      });
+
+      final chunkMsgId = (idx == totalChunks - 1) ? fileId : '${fileId}_$idx';
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: targetNodeId,
+        contact: contact,
+        msgId: chunkMsgId,
+        sealedPayloadBytes: utf8.encode(chunkEnvelopeJson),
+        persistInOutbox: totalSize <= 512 * 1024,
+      );
+
+      myMsg.transferProgress = (idx + 1) / totalChunks;
+      onStateChanged();
+      // Небольшая пауза между чанками, чтобы не забивать сокет и UI
+      await Future.delayed(const Duration(milliseconds: 18));
+    }
+
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<Directory> _getReceivedFilesDir() async {
+    final base = Directory.systemTemp;
+    final dir = Directory('${base.path}/mayak_received_files');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
   Future<void> _triggerIncomingNotification(
     String senderId,
     String senderName,
@@ -803,7 +1037,6 @@ class MeshEngine {
 
     if (Platform.isAndroid && notificationsEnabled) {
       try {
-        // Если приложение открыто прямо на этом диалоге — пуш сверху НЕ спамим (только когда свернуто или открыт другой чат!)
         await _nativeChannel.invokeMethod('showNotification', {
           'title': 'Маяк: $senderName',
           'body': text,
@@ -813,7 +1046,6 @@ class MeshEngine {
     }
   }
 
-  /// Авто-дедупликация и склейка старых дубликатов одного и того же устройства по hwFingerprint или совпадению имени/IP
   void _upsertContact({
     required String nodeId,
     required String dhPubHex,
@@ -830,7 +1062,6 @@ class MeshEngine {
         ? address.split(':').first
         : (address ?? '');
 
-    // Проверяем, нет ли в списке старого дубля этого же физического устройства с другим nodeId
     final duplicateIds = <String>[];
     knownContacts.forEach((oldId, oldContact) {
       if (oldId == nodeId) return;
@@ -855,7 +1086,6 @@ class MeshEngine {
       }
     });
 
-    // Переносим историю сообщений со старого дубликата на актуальный ID и удаляем дубль!
     for (final oldId in duplicateIds) {
       final oldHistory = chatHistory.remove(oldId);
       if (oldHistory != null && oldHistory.isNotEmpty) {
@@ -1042,8 +1272,6 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// Вычисление гибридного сессионного ключа Mayak E2EE v2:
-  /// Комбинирует Ephemeral-Static X25519 (Forward Secrecy) + Static-Static X25519 (аутентификация отправителя) через HKDF-SHA256
   Future<SecretKey> _deriveHardenedConversationKey({
     required SimpleKeyPair firstKeyPair,
     required SimplePublicKey firstRemotePub,
@@ -1071,12 +1299,12 @@ class MeshEngine {
     );
   }
 
-  /// Упаковка текста и метаданных отправителя (Sealed Sender) с выравниванием размера пакета кратно 64 байтам (защита от анализа длины)
   List<int> _packSealedEnvelope(String senderNick, String plainText, int ts) {
     final padLen = 16 + Random.secure().nextInt(48);
     final randomPad = base64Encode(_randomBytes(padLen));
     final envelopeJson = jsonEncode({
       'v': 2,
+      'kind': 'TEXT',
       'nick': senderNick,
       'txt': plainText,
       'ts': ts,
@@ -1089,11 +1317,79 @@ class MeshEngine {
     final decodedStr = utf8.decode(clearBytes);
     try {
       final map = jsonDecode(decodedStr) as Map<String, dynamic>;
-      if (map.containsKey('txt') && map.containsKey('v')) {
+      if (map.containsKey('v')) {
         return map;
       }
     } catch (_) {}
-    return {'nick': '', 'txt': decodedStr};
+    return {'kind': 'TEXT', 'nick': '', 'txt': decodedStr};
+  }
+
+  Future<void> _encryptAndQueueSealedDataPacket({
+    required String targetNodeId,
+    required ContactProfile contact,
+    required String msgId,
+    required List<int> sealedPayloadBytes,
+    bool persistInOutbox = true,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final ephKeyPair = await _x25519.newKeyPair();
+    final ephPub = await ephKeyPair.extractPublicKey();
+    final ephPubHex = _toHex(ephPub.bytes);
+
+    final recipientDhPub = SimplePublicKey(
+      _fromHex(contact.dhPubHex),
+      type: KeyPairType.x25519,
+    );
+
+    final sessionKey = await _deriveHardenedConversationKey(
+      firstKeyPair: ephKeyPair,
+      firstRemotePub: recipientDhPub,
+      secondKeyPair: _dhKeyPair,
+      secondRemotePub: recipientDhPub,
+      msgId: msgId,
+      dstNodeId: targetNodeId,
+    );
+
+    final nonce = _randomBytes(12);
+    final expiresAt = now + 24 * 3600 * 1000;
+    final aadBytes =
+        utf8.encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$expiresAt');
+
+    final secretBox = await _cipher.encrypt(
+      sealedPayloadBytes,
+      secretKey: sessionKey,
+      nonce: nonce,
+      aad: aadBytes,
+    );
+
+    final cipherHex = _toHex(secretBox.cipherText);
+    final macHex = _toHex(secretBox.mac.bytes);
+    final sigPayload = utf8
+        .encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$cipherHex|$macHex');
+    final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
+
+    final pkt = MeshPacket(
+      type: 'DATA',
+      msgId: msgId,
+      dstNodeId: targetNodeId,
+      srcNickname: '',
+      srcSignPubHex: signPubHex,
+      srcDhPubHex: dhPubHex,
+      dstSignPubHex: contact.signPubHex,
+      ephPubHex: ephPubHex,
+      nonceHex: _toHex(nonce),
+      ciphertextHex: cipherHex,
+      macHex: macHex,
+      signatureHex: _toHex(sig.bytes),
+      expiresAt: expiresAt,
+      ttl: 7,
+    );
+
+    transitBuffer[msgId] = pkt;
+    if (persistInOutbox) {
+      myPersistentOutbox[msgId] = pkt;
+    }
+    _floodAllTransports(pkt);
   }
 
   Future<void> sendMessage(String targetNodeId, String plainText) async {
@@ -1143,63 +1439,6 @@ class MeshEngine {
     final contact = knownContacts[targetNodeId];
     if (contact == null) return;
 
-    final ephKeyPair = await _x25519.newKeyPair();
-    final ephPub = await ephKeyPair.extractPublicKey();
-    final ephPubHex = _toHex(ephPub.bytes);
-
-    final recipientDhPub = SimplePublicKey(
-      _fromHex(contact.dhPubHex),
-      type: KeyPairType.x25519,
-    );
-
-    // Двойной X25519 (Ephemeral-Static + Static-Static) + HKDF-SHA256
-    final sessionKey = await _deriveHardenedConversationKey(
-      firstKeyPair: ephKeyPair,
-      firstRemotePub: recipientDhPub,
-      secondKeyPair: _dhKeyPair,
-      secondRemotePub: recipientDhPub,
-      msgId: msgId,
-      dstNodeId: targetNodeId,
-    );
-
-    final nonce = _randomBytes(12);
-    final expiresAt = now + 12 * 3600 * 1000;
-    // Защищаем все заголовки пакета через AAD (Associated Authenticated Data)
-    final aadBytes =
-        utf8.encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$expiresAt');
-
-    // Sealed Sender: имя отправителя и текст прячутся внутрь шифротекста с шумовым паддингом!
-    final sealedPayload = _packSealedEnvelope(nickname, plainText, now);
-    final secretBox = await _cipher.encrypt(
-      sealedPayload,
-      secretKey: sessionKey,
-      nonce: nonce,
-      aad: aadBytes,
-    );
-
-    final cipherHex = _toHex(secretBox.cipherText);
-    final macHex = _toHex(secretBox.mac.bytes);
-    final sigPayload = utf8
-        .encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$cipherHex|$macHex');
-    final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
-
-    final pkt = MeshPacket(
-      type: 'DATA',
-      msgId: msgId,
-      dstNodeId: targetNodeId,
-      srcNickname: '', // СКРЫТО от промежуточных узлов (Sealed Sender)!
-      srcSignPubHex: signPubHex,
-      srcDhPubHex: dhPubHex,
-      dstSignPubHex: contact.signPubHex,
-      ephPubHex: ephPubHex,
-      nonceHex: _toHex(nonce),
-      ciphertextHex: cipherHex,
-      macHex: macHex,
-      signatureHex: _toHex(sig.bytes),
-      expiresAt: expiresAt,
-      ttl: 7,
-    );
-
     final myMsg = ChatMessage(
       msgId: msgId,
       peerId: targetNodeId,
@@ -1212,8 +1451,15 @@ class MeshEngine {
     );
     getMessagesFor(targetNodeId).add(myMsg);
 
-    transitBuffer[msgId] = pkt;
-    _floodAllTransports(pkt);
+    final sealedPayload = _packSealedEnvelope(nickname, plainText, now);
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: targetNodeId,
+      contact: contact,
+      msgId: msgId,
+      sealedPayloadBytes: sealedPayload,
+      persistInOutbox: true,
+    );
+
     unawaited(_saveContactsAndChats());
     onStateChanged();
   }
@@ -1287,10 +1533,9 @@ class MeshEngine {
     }
     if (transitBuffer.containsKey(pkt.msgId)) return;
 
-    // Проверяем крипто-подпись Ed25519 (с поддержкой заголовков v2)
     final v2SigPayload = utf8.encode(
         '${pkt.msgId}|${pkt.dstNodeId}|${pkt.ephPubHex}|${pkt.srcDhPubHex}|${pkt.ciphertextHex}|${pkt.macHex}');
-    bool sigValid = await _ed25519.verify(
+    final sigValid = await _ed25519.verify(
       v2SigPayload,
       signature: Signature(
         _fromHex(pkt.signatureHex),
@@ -1329,11 +1574,11 @@ class MeshEngine {
       );
 
       final envelope = _unpackSealedEnvelope(clearBytes);
+      final kind = (envelope['kind'] as String?) ?? 'TEXT';
       final senderNickInside =
           (envelope['nick'] as String?) ?? pkt.srcNickname;
-      final decodedText = (envelope['txt'] as String?) ?? '';
-
       final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
+
       _upsertContact(
         nodeId: senderId,
         dhPubHex: pkt.srcDhPubHex,
@@ -1342,26 +1587,31 @@ class MeshEngine {
       );
       final contact = knownContacts[senderId]!;
 
-      final chatMsg = ChatMessage(
-        msgId: pkt.msgId,
-        peerId: senderId,
-        senderId: senderId,
-        senderName: contact.displayTitle,
-        text: decodedText,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-        isMe: false,
-        isDelivered: true,
-      );
-      getMessagesFor(senderId).add(chatMsg);
-      if (activeOpenChatId != senderId) {
-        contact.unreadCount++;
+      if (kind == 'FILE_CHUNK') {
+        await _handleIncomingFileChunk(senderId, contact, envelope);
+      } else {
+        final decodedText = (envelope['txt'] as String?) ?? '';
+        final chatMsg = ChatMessage(
+          msgId: pkt.msgId,
+          peerId: senderId,
+          senderId: senderId,
+          senderName: contact.displayTitle,
+          text: decodedText,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+          isMe: false,
+          isDelivered: true,
+        );
+        getMessagesFor(senderId).add(chatMsg);
+        if (activeOpenChatId != senderId) {
+          contact.unreadCount++;
+        }
+        onMessageReceived(chatMsg);
+        unawaited(_triggerIncomingNotification(
+            senderId, contact.displayTitle, decodedText));
+        unawaited(_saveContactsAndChats());
       }
 
-      onMessageReceived(chatMsg);
-      unawaited(_triggerIncomingNotification(
-          senderId, contact.displayTitle, decodedText));
-      unawaited(_saveContactsAndChats());
-
+      // Отправляем подписанный ACK
       final ackSig = await _ed25519.sign(
         utf8.encode('ACK:${pkt.msgId}'),
         keyPair: _signKeyPair,
@@ -1388,8 +1638,6 @@ class MeshEngine {
       return;
     }
 
-    // Если пакет ЧУЖОЙ — мы являемся слепым ретранслятором (Zero-Knowledge Relay):
-    // мы не знаем ни текста, ни имени отправителя, но проверяем подпись и передаем пакет дальше!
     if (pkt.ttl > 1 && transitBuffer.length < maxBufferPackets) {
       pkt.ttl -= 1;
       transitBuffer[pkt.msgId] = pkt;
@@ -1400,6 +1648,97 @@ class MeshEngine {
       );
       onStateChanged();
     }
+  }
+
+  Future<void> _handleIncomingFileChunk(
+    String senderId,
+    ContactProfile contact,
+    Map<String, dynamic> env,
+  ) async {
+    final fileId = env['fid'] as String;
+    final fileName = (env['fn'] as String?) ?? 'file.bin';
+    final totalSize = (env['fs'] as int?) ?? 0;
+    final shaHex = (env['sha'] as String?) ?? '';
+    final idx = (env['idx'] as int?) ?? 0;
+    final tot = (env['tot'] as int?) ?? 1;
+    final chunkBytes = base64Decode((env['b64'] as String?) ?? '');
+
+    final assembly = _incomingFiles.putIfAbsent(
+      fileId,
+      () => IncomingFileAssembly(
+        fileId: fileId,
+        fileName: fileName,
+        totalSize: totalSize,
+        totalChunks: tot,
+        sha256Hex: shaHex,
+      ),
+    );
+    assembly.chunks[idx] = chunkBytes;
+
+    final msgs = getMessagesFor(senderId);
+    ChatMessage? existingMsg;
+    for (final m in msgs) {
+      if (m.msgId == fileId) {
+        existingMsg = m;
+        break;
+      }
+    }
+
+    if (existingMsg == null) {
+      existingMsg = ChatMessage(
+        msgId: fileId,
+        peerId: senderId,
+        senderId: senderId,
+        senderName: contact.displayTitle,
+        text: '📎 Прием файла: $fileName...',
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        isMe: false,
+        isDelivered: false,
+        fileName: fileName,
+        fileSize: totalSize,
+        transferProgress: assembly.chunks.length / tot,
+      );
+      msgs.add(existingMsg);
+    } else {
+      existingMsg.transferProgress = assembly.chunks.length / tot;
+    }
+
+    if (assembly.chunks.length >= tot) {
+      final combined = <int>[];
+      for (int i = 0; i < tot; i++) {
+        final part = assembly.chunks[i];
+        if (part == null) return;
+        combined.addAll(part);
+      }
+      _incomingFiles.remove(fileId);
+
+      final actualHash = _toHex((await _sha256.hash(combined)).bytes);
+      if (shaHex.isNotEmpty && actualHash != shaHex) {
+        existingMsg.text = '⚠️ Ошибка контрольной суммы файла $fileName';
+        onStateChanged();
+        return;
+      }
+
+      final dir = await _getReceivedFilesDir();
+      final safeName =
+          fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._а-яА-ЯёЁ-]'), '_');
+      final savedFile = File('${dir.path}/${fileId}_$safeName');
+      await savedFile.writeAsBytes(combined, flush: true);
+
+      existingMsg.filePath = savedFile.path;
+      existingMsg.text = '📎 Файл: $fileName';
+      existingMsg.isDelivered = true;
+      existingMsg.transferProgress = 1.0;
+
+      if (activeOpenChatId != senderId) {
+        contact.unreadCount++;
+      }
+      onMessageReceived(existingMsg);
+      unawaited(_triggerIncomingNotification(
+          senderId, contact.displayTitle, '📎 Прислан файл: $fileName'));
+      unawaited(_saveContactsAndChats());
+    }
+    onStateChanged();
   }
 
   Future<void> _handleAckPacket(
@@ -1421,12 +1760,14 @@ class MeshEngine {
       );
       if (!valid) return;
       transitBuffer.remove(ack.msgId);
+      myPersistentOutbox.remove(ack.msgId);
     }
 
     for (final list in chatHistory.values) {
       for (final m in list) {
         if (m.msgId == ack.msgId) {
           m.isDelivered = true;
+          m.transferProgress = 1.0;
         }
       }
     }
@@ -1502,7 +1843,6 @@ class MeshEngine {
         onError: (_) {},
       );
 
-      // Легкий UDP-маяк раз в 6 секунд (использует кэш IP без опроса сетевых карт на каждом тике!)
       _beaconTimer = Timer.periodic(const Duration(seconds: 6), (_) async {
         if (nodeId.isEmpty || listenPort <= 0) return;
         await refreshNetworkCache();
@@ -1527,6 +1867,24 @@ class MeshEngine {
               _udpBeacon?.send(
                   beacon, InternetAddress(subnetBroadcast), discoveryPort);
             } catch (_) {}
+          }
+        }
+
+        // Авто-реконнект по сохраненным домашним IP известных друзей (при возвращении домой)
+        for (final c in knownContacts.values) {
+          if (!c.isOnline &&
+              c.lastAddress.isNotEmpty &&
+              c.lastAddress.contains(':')) {
+            final addrParts = c.lastAddress.split(':');
+            if (addrParts.length == 2 && !addrParts[0].startsWith('BLE')) {
+              final port = int.tryParse(addrParts[1]) ?? defaultTcpPort;
+              unawaited(connectToHost(
+                addrParts[0],
+                port,
+                expectedNodeId: c.nodeId,
+                timeout: const Duration(milliseconds: 500),
+              ));
+            }
           }
         }
       });
@@ -1638,6 +1996,7 @@ class MeshEngine {
   void _evictExpired() {
     final now = DateTime.now().millisecondsSinceEpoch;
     transitBuffer.removeWhere((_, pkt) => pkt.expiresAt <= now);
+    myPersistentOutbox.removeWhere((_, pkt) => pkt.expiresAt <= now);
   }
 
   void _sendTcpLine(Socket s, String line) {
