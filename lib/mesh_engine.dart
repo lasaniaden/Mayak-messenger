@@ -11,13 +11,13 @@ class ChatMessage {
   final String peerId;
   final String senderId;
   final String senderName;
-  final String text;
+  String text;
   final int timestamp;
   final bool isMe;
   bool isDelivered;
-  final String? filePath;
-  final String? fileName;
-  final int? fileSize;
+  String? filePath;
+  String? fileName;
+  int? fileSize;
   double transferProgress; // 0.0 .. 1.0
 
   ChatMessage({
