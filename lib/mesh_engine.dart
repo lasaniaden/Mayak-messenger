@@ -1,11 +1,81 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+// Нативный мост к Windows Multimedia API (winmm.dll) для записи голосовых и проигрывания аудио с перемоткой прямо внутри программы на ПК!
+typedef _MciSendStringNative = Int32 Function(
+  Pointer<Uint16> command,
+  Pointer<Uint16> buffer,
+  Uint32 bufferSize,
+  IntPtr callback,
+);
+typedef _MciSendStringDart = int Function(
+  Pointer<Uint16> command,
+  Pointer<Uint16> buffer,
+  int bufferSize,
+  int callback,
+);
+typedef _CoTaskMemAllocNative = Pointer<Void> Function(IntPtr cb);
+typedef _CoTaskMemAllocDart = Pointer<Void> Function(int cb);
+typedef _CoTaskMemFreeNative = Void Function(Pointer<Void> pv);
+typedef _CoTaskMemFreeDart = void Function(Pointer<Void> pv);
+
+class WindowsMciAudioBridge {
+  static _MciSendStringDart? _mciSend;
+  static _CoTaskMemAllocDart? _alloc;
+  static _CoTaskMemFreeDart? _free;
+  static bool _initialized = false;
+
+  static void _init() {
+    if (_initialized || !Platform.isWindows) return;
+    _initialized = true;
+    try {
+      final winmm = DynamicLibrary.open('winmm.dll');
+      final ole32 = DynamicLibrary.open('ole32.dll');
+      _mciSend = winmm
+          .lookupFunction<_MciSendStringNative, _MciSendStringDart>(
+              'mciSendStringW');
+      _alloc = ole32.lookupFunction<_CoTaskMemAllocNative, _CoTaskMemAllocDart>(
+          'CoTaskMemAlloc');
+      _free = ole32.lookupFunction<_CoTaskMemFreeNative, _CoTaskMemFreeDart>(
+          'CoTaskMemFree');
+    } catch (_) {}
+  }
+
+  static String cmd(String command) {
+    _init();
+    if (_mciSend == null || _alloc == null || _free == null) return '';
+    final cmdUnits = command.codeUnits;
+    final cmdPtr = _alloc!((cmdUnits.length + 1) * 2).cast<Uint16>();
+    final bufPtr = _alloc!(512 * 2).cast<Uint16>();
+    try {
+      for (int i = 0; i < cmdUnits.length; i++) {
+        cmdPtr[i] = cmdUnits[i];
+      }
+      cmdPtr[cmdUnits.length] = 0;
+      for (int i = 0; i < 512; i++) {
+        bufPtr[i] = 0;
+      }
+      _mciSend!(cmdPtr, bufPtr, 510, 0);
+      final outUnits = <int>[];
+      for (int i = 0; i < 510; i++) {
+        final c = bufPtr[i];
+        if (c == 0) break;
+        outUnits.add(c);
+      }
+      return String.fromCharCodes(outUnits).trim();
+    } finally {
+      _free!(cmdPtr.cast());
+      _free!(bufPtr.cast());
+    }
+  }
+}
 
 class ChatMessage {
   final String msgId;
@@ -20,7 +90,7 @@ class ChatMessage {
   String? fileName;
   int? fileSize;
   double transferProgress; // 0.0 .. 1.0
-  Map<String, String> reactions; // senderNodeId -> emoji
+  Map<String, String> reactions;
 
   ChatMessage({
     required this.msgId,
@@ -128,6 +198,7 @@ class PendingFileJob {
   final String targetNodeId;
   final String filePath;
   final String fileName;
+  int nextChunkIndex;
   bool isSending;
 
   PendingFileJob({
@@ -135,6 +206,7 @@ class PendingFileJob {
     required this.targetNodeId,
     required this.filePath,
     required this.fileName,
+    this.nextChunkIndex = 0,
     this.isSending = false,
   });
 
@@ -143,6 +215,7 @@ class PendingFileJob {
         'dst': targetNodeId,
         'fp': filePath,
         'fn': fileName,
+        'nxt': nextChunkIndex,
       };
 
   factory PendingFileJob.fromJson(Map<String, dynamic> j) => PendingFileJob(
@@ -150,24 +223,26 @@ class PendingFileJob {
         targetNodeId: j['dst'] as String,
         filePath: j['fp'] as String,
         fileName: j['fn'] as String,
+        nextChunkIndex: (j['nxt'] as int?) ?? 0,
       );
 }
 
-class IncomingFileAssembly {
+/// Потоковый сборщик больших файлов (до 1 ГБ) прямо на диск без хранения чанков в ОЗУ!
+class IncomingFileStreamAssembly {
   final String fileId;
   final String fileName;
   final int totalSize;
   final int totalChunks;
-  final String sha256Hex;
+  final String partFilePath;
   final int createdAtMs;
-  final Map<int, List<int>> chunks = {};
+  final Set<int> receivedChunkIndices = {};
 
-  IncomingFileAssembly({
+  IncomingFileStreamAssembly({
     required this.fileId,
     required this.fileName,
     required this.totalSize,
     required this.totalChunks,
-    required this.sha256Hex,
+    required this.partFilePath,
     required this.createdAtMs,
   });
 }
@@ -220,7 +295,7 @@ class ContactProfile {
 }
 
 class MeshPacket {
-  final String type; // 'DATA', 'BROADCAST' или 'ACK'
+  final String type;
   final String msgId;
   final String dstNodeId;
   final String srcNickname;
@@ -310,9 +385,9 @@ class MeshEngine {
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
   static const int maxBufferPackets = 400;
-  static const int maxLineLengthBytes = 140 * 1024;
-  static const int maxConcurrentIncomingFiles = 6;
-  static const int fileChunkSize = 14 * 1024;
+  static const int maxLineLengthBytes = 220 * 1024;
+  static const int maxConcurrentIncomingFiles = 8;
+  static const int fileChunkSize = 32 * 1024; // 32 КБ потоковый блок на диск (для файлов до 1 ГБ!)
   static const String serviceId = 'com.p2pmesh.intercom';
   static const MethodChannel _nativeChannel = MethodChannel('mayak/native');
 
@@ -333,6 +408,7 @@ class MeshEngine {
   ServerSocket? _tcpServer;
   RawDatagramSocket? _udpBeacon;
   Timer? _beaconTimer;
+  Timer? _audioProgressTimer;
   int listenPort = 0;
   bool bleMeshActive = false;
   bool bgServiceActive = false;
@@ -340,8 +416,15 @@ class MeshEngine {
   bool vpnDetected = false;
   bool gpsDisabledOnAndroid = false;
   bool notificationsEnabled = true;
+
+  // Запись голосовых и встроенный аудиоплеер с перемоткой
   bool isRecordingVoice = false;
+  int _winVoiceStartMs = 0;
   String? currentlyPlayingAudioPath;
+  bool isAudioPlaying = false;
+  int audioPositionMs = 0;
+  int audioDurationMs = 1;
+
   String? activeOpenChatId;
   int unreadBroadcastCount = 0;
   String lastStatusLog = 'Запуск ядра...';
@@ -358,14 +441,12 @@ class MeshEngine {
 
   final Queue<String> _seenPacketQueue = Queue<String>();
   final Set<String> _seenPacketSet = {};
-
-  // Постоянный список удаленных контактов (чтобы они НЕ воскресали после перезапуска проги!)
   final Set<String> deletedContactIds = {};
 
   final Map<String, List<int>> _staticSharedSecretCache = {};
-  final Map<String, IncomingFileAssembly> _incomingFiles = {};
-  // Очередь недоотправленных файлов (автоматически докачивает файлы при смене сети!)
+  final Map<String, IncomingFileStreamAssembly> _incomingFiles = {};
   final Map<String, PendingFileJob> pendingFileJobs = {};
+  final Map<String, Completer<void>> _fileWindowAckWaiters = {};
   final Map<String, int> _pendingPingTimestamps = {};
   final Map<String, Completer<int>> _pingCompleters = {};
 
@@ -389,11 +470,13 @@ class MeshEngine {
     }
   }
 
+  MethodChannel get nativeChannel => _nativeChannel;
+
   bool _markPacketSeen(String id) {
     if (_seenPacketSet.contains(id)) return false;
     _seenPacketSet.add(id);
     _seenPacketQueue.addLast(id);
-    while (_seenPacketQueue.length > 2500) {
+    while (_seenPacketQueue.length > 4000) {
       final oldest = _seenPacketQueue.removeFirst();
       _seenPacketSet.remove(oldest);
     }
@@ -421,14 +504,12 @@ class MeshEngine {
     onStateChanged();
   }
 
-  /// Очистка только переписки (сам контакт остается в списке)
   Future<void> clearChatHistoryOnly(String targetNodeId) async {
     chatHistory[targetNodeId] = [];
     await _saveContactsAndChats();
     onStateChanged();
   }
 
-  /// Полное удаление контакта и чата (с занесением в deletedContactIds, чтобы он НЕ появлялся снова после перезапуска!)
   Future<void> deleteContact(String targetNodeId) async {
     deletedContactIds.add(targetNodeId);
     knownContacts.remove(targetNodeId);
@@ -445,6 +526,7 @@ class MeshEngine {
   }
 
   Future<void> stopAllAndExitApp() async {
+    await stopAudioPlayback();
     await _saveContactsAndChats();
     if (Platform.isAndroid) {
       try {
@@ -601,6 +683,9 @@ class MeshEngine {
           break;
         case 'onAudioCompleted':
           currentlyPlayingAudioPath = null;
+          isAudioPlaying = false;
+          audioPositionMs = 0;
+          _audioProgressTimer?.cancel();
           onStateChanged();
           break;
         case 'onNativeLog':
@@ -648,7 +733,7 @@ class MeshEngine {
 
     await refreshNetworkCache(force: true);
     await _startLanAutoDiscovery();
-    _addLog('Защищенный узел v1.1 готов (порт $listenPort)');
+    _addLog('Защищенный узел v1.2 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -719,13 +804,53 @@ class MeshEngine {
     }
   }
 
+  Future<File> _getExternalBackupFile() async {
+    if (Platform.isAndroid) {
+      final dir = Directory('/storage/emulated/0/Download/Mayak');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+      return File('${dir.path}/.mayak_backup_v12.json');
+    } else {
+      final home = Platform.environment['USERPROFILE'] ??
+          Platform.environment['HOME'] ??
+          '.';
+      final dir = Directory('$home/Downloads/Mayak');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+      return File('${dir.path}/.mayak_backup_v12.json');
+    }
+  }
+
   Future<void> _loadPersistedContactsAndChats() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final deletedRaw = prefs.getStringList('deleted_contacts_v11') ?? [];
       deletedContactIds.addAll(deletedRaw);
 
-      final contactsRaw = prefs.getString('saved_contacts_v7');
+      String? contactsRaw = prefs.getString('saved_contacts_v7');
+      String? chatsRaw = prefs.getString('saved_chats_v7');
+
+      // Если после переустановки SharedPreferences пуст — автоматически восстанавливаем чаты из резервной копии на диске!
+      if ((contactsRaw == null || contactsRaw.isEmpty) &&
+          (chatsRaw == null || chatsRaw.isEmpty)) {
+        try {
+          final bkpFile = await _getExternalBackupFile();
+          if (await bkpFile.exists()) {
+            final bkpMap = jsonDecode(await bkpFile.readAsString())
+                as Map<String, dynamic>;
+            contactsRaw = bkpMap['contacts'] as String?;
+            chatsRaw = bkpMap['chats'] as String?;
+            if (bkpMap['nick'] is String &&
+                (bkpMap['nick'] as String).isNotEmpty) {
+              nickname = bkpMap['nick'] as String;
+              await prefs.setString('user_nickname', nickname);
+            }
+          }
+        } catch (_) {}
+      }
+
       if (contactsRaw != null && contactsRaw.isNotEmpty) {
         final list = jsonDecode(contactsRaw) as List;
         for (final item in list) {
@@ -737,7 +862,6 @@ class MeshEngine {
         }
       }
 
-      final chatsRaw = prefs.getString('saved_chats_v7');
       if (chatsRaw != null && chatsRaw.isNotEmpty) {
         final map = jsonDecode(chatsRaw) as Map<String, dynamic>;
         map.forEach((peerId, msgsJson) {
@@ -786,9 +910,9 @@ class MeshEngine {
       await prefs.setStringList(
           'deleted_contacts_v11', deletedContactIds.toList());
 
-      final contactsList =
-          knownContacts.values.map((c) => c.toJson()).toList();
-      await prefs.setString('saved_contacts_v7', jsonEncode(contactsList));
+      final contactsJson =
+          jsonEncode(knownContacts.values.map((c) => c.toJson()).toList());
+      await prefs.setString('saved_contacts_v7', contactsJson);
 
       final chatsMap = <String, dynamic>{};
       chatHistory.forEach((peerId, list) {
@@ -796,7 +920,8 @@ class MeshEngine {
             list.length > 100 ? list.sublist(list.length - 100) : list;
         chatsMap[peerId] = trimmed.map((m) => m.toJson()).toList();
       });
-      await prefs.setString('saved_chats_v7', jsonEncode(chatsMap));
+      final chatsJson = jsonEncode(chatsMap);
+      await prefs.setString('saved_chats_v7', chatsJson);
 
       final outboxList =
           myPersistentOutbox.values.map((p) => p.toJson()).toList();
@@ -805,6 +930,16 @@ class MeshEngine {
       final filesList =
           pendingFileJobs.values.map((j) => j.toJson()).toList();
       await prefs.setString('saved_pending_files_v11', jsonEncode(filesList));
+
+      // Синхронно дублируем бэкап чатов во внешнюю папку Downloads/Mayak/.mayak_backup_v12.json
+      try {
+        final bkpFile = await _getExternalBackupFile();
+        await bkpFile.writeAsString(jsonEncode({
+          'nick': nickname,
+          'contacts': contactsJson,
+          'chats': chatsJson,
+        }));
+      } catch (_) {}
     } catch (_) {}
   }
 
@@ -849,7 +984,6 @@ class MeshEngine {
     return jsonEncode({'peer_sync': peers});
   }
 
-  /// Детектирует смену сети (например, переход на другую точку доступа) и мгновенно переподключает узлы!
   Future<void> refreshNetworkCache({bool force = false}) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (!force && now - _lastIpRefreshMs < 4000 && cachedInviteCode.isNotEmpty) {
@@ -860,8 +994,8 @@ class MeshEngine {
     final primaryIp = newIps.isNotEmpty ? newIps.first : '127.0.0.1';
 
     if (_previousPrimaryIp.isNotEmpty && _previousPrimaryIp != primaryIp) {
-      _addLog('Смена сети ($_previousPrimaryIp -> $primaryIp), обновление связей...');
-      // Закрываем зависшие сокеты старой подсети, чтобы они не мешали новому подключению
+      _addLog(
+          'Смена сети ($_previousPrimaryIp -> $primaryIp), обновление связей...');
       for (final s in _tcpPeers.keys.toList()) {
         _cleanupSocket(s);
       }
@@ -1004,7 +1138,6 @@ class MeshEngine {
       return null;
     }
 
-    // Если пользователь сам вручную подключает ранее удаленный контакт — снимаем блокировку удаления!
     deletedContactIds.remove(targetId);
 
     final List<String> candidateIps = [];
@@ -1133,7 +1266,7 @@ class MeshEngine {
       final ok = await _nativeChannel
               .invokeMethod<bool>('requestNotificationPermission') ??
           false;
-      notificationsEnabled = true; // На POCO/Xiaomi всегда держим звуковой оповещатель активным!
+      notificationsEnabled = true;
       return ok;
     } catch (_) {
       return false;
@@ -1147,7 +1280,7 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// Выбор медиа (Фото + Видео), Аудио/Музыки или Любого файла
+  /// ФИКС ОТПРАВКИ ФАЙЛОВ НА WINDOWS: принудительная кодировка UTF-8 для русских путей и окно поверх всех!
   Future<Map<String, dynamic>?> pickFileForChat({String mode = 'all'}) async {
     try {
       if (Platform.isAndroid) {
@@ -1162,20 +1295,26 @@ class MeshEngine {
             : (mode == 'audio'
                 ? 'Audio (*.mp3;*.m4a;*.wav;*.ogg;*.flac;*.aac)|*.mp3;*.m4a;*.wav;*.ogg;*.flac;*.aac|All files (*.*)|*.*'
                 : 'All files (*.*)|*.*');
-        final psScript = "Add-Type -AssemblyName System.Windows.Forms; "
+        final psScript =
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "\$f = New-Object System.Windows.Forms.Form; \$f.TopMost = \$true; "
             "\$dlg = New-Object System.Windows.Forms.OpenFileDialog; "
             "\$dlg.Filter = '$filter'; "
-            "if (\$dlg.ShowDialog() -eq 'OK') { Write-Output \$dlg.FileName }";
-        final proc = await Process.run('powershell', [
-          '-NoProfile',
-          '-STA',
-          '-Command',
-          psScript,
-        ]);
+            "if (\$dlg.ShowDialog(\$f) -eq 'OK') { [Console]::Out.WriteLine(\$dlg.FileName) }";
+        final proc = await Process.run(
+          'powershell',
+          ['-NoProfile', '-STA', '-Command', psScript],
+          stdoutEncoding: utf8,
+          stderrEncoding: utf8,
+        );
         final selectedPath = proc.stdout.toString().trim();
         if (selectedPath.isEmpty) return null;
         final file = File(selectedPath);
-        if (!await file.exists()) return null;
+        if (!await file.exists()) {
+          _addLog('Файл не найден по пути: $selectedPath');
+          return null;
+        }
         final name = selectedPath.split(RegExp(r'[\\/]')).last;
         return {
           'path': selectedPath,
@@ -1189,7 +1328,7 @@ class MeshEngine {
     return null;
   }
 
-  /// Запись голосового сообщения с микрофона
+  /// Запись голосового сообщения (работает и на Android, и на Windows ПК!)
   Future<bool> startVoiceRecording() async {
     if (Platform.isAndroid) {
       try {
@@ -1199,6 +1338,18 @@ class MeshEngine {
         isRecordingVoice = ok;
         onStateChanged();
         return ok;
+      } catch (_) {
+        return false;
+      }
+    } else if (Platform.isWindows) {
+      try {
+        WindowsMciAudioBridge.cmd('close mayak_rec');
+        WindowsMciAudioBridge.cmd('open new type waveaudio alias mayak_rec');
+        WindowsMciAudioBridge.cmd('record mayak_rec');
+        _winVoiceStartMs = DateTime.now().millisecondsSinceEpoch;
+        isRecordingVoice = true;
+        onStateChanged();
+        return true;
       } catch (_) {
         return false;
       }
@@ -1217,35 +1368,140 @@ class MeshEngine {
       } catch (_) {
         return null;
       }
+    } else if (Platform.isWindows) {
+      try {
+        final dir = await _getReceivedFilesDir();
+        final durSec =
+            ((DateTime.now().millisecondsSinceEpoch - _winVoiceStartMs) / 1000)
+                .round()
+                .clamp(1, 3600);
+        final outPath =
+            '${dir.path}\\voice_${DateTime.now().millisecondsSinceEpoch}.wav';
+        WindowsMciAudioBridge.cmd('stop mayak_rec');
+        WindowsMciAudioBridge.cmd('save mayak_rec "$outPath"');
+        WindowsMciAudioBridge.cmd('close mayak_rec');
+        final f = File(outPath);
+        if (await f.exists() && await f.length() > 0) {
+          return {
+            'path': outPath,
+            'name': 'Голосовое_${durSec}сек.wav',
+            'size': await f.length(),
+            'durationSec': durSec,
+          };
+        }
+      } catch (_) {}
     }
     return null;
   }
 
-  /// Проигрывание голосового сообщения или музыки прямо в чате
+  /// Встроенный аудиоплеер с перемоткой (работает прямо внутри чата и на Android, и на Windows!)
   Future<void> togglePlayAudioFile(String filePath) async {
-    if (currentlyPlayingAudioPath == filePath) {
-      if (Platform.isAndroid) {
-        await _nativeChannel.invokeMethod('stopAudioFile');
-      }
-      currentlyPlayingAudioPath = null;
-      onStateChanged();
-      return;
-    }
-
     if (Platform.isAndroid) {
-      final ok = await _nativeChannel
-              .invokeMethod<bool>('playAudioFile', {'path': filePath}) ??
-          false;
-      if (ok) {
+      final info = await _nativeChannel
+          .invokeMapMethod<String, dynamic>('playAudioFile', {'path': filePath});
+      if (info != null) {
         currentlyPlayingAudioPath = filePath;
+        isAudioPlaying = (info['isPlaying'] as bool?) ?? false;
+        audioPositionMs = (info['positionMs'] as int?) ?? 0;
+        audioDurationMs = max((info['durationMs'] as int?) ?? 1, 1);
+        _startAudioProgressPolling();
         onStateChanged();
       }
     } else if (Platform.isWindows) {
-      await openFileExternal(filePath);
+      if (currentlyPlayingAudioPath == filePath) {
+        if (isAudioPlaying) {
+          WindowsMciAudioBridge.cmd('pause mayak_audio');
+          isAudioPlaying = false;
+        } else {
+          WindowsMciAudioBridge.cmd('resume mayak_audio');
+          isAudioPlaying = true;
+        }
+        onStateChanged();
+        return;
+      }
+      WindowsMciAudioBridge.cmd('close mayak_audio');
+      final cleanPath = filePath.replaceAll('/', '\\');
+      WindowsMciAudioBridge.cmd(
+          'open "$cleanPath" type mpegvideo alias mayak_audio');
+      final lenStr = WindowsMciAudioBridge.cmd('status mayak_audio length');
+      audioDurationMs = max(int.tryParse(lenStr) ?? 1000, 1);
+      audioPositionMs = 0;
+      WindowsMciAudioBridge.cmd('play mayak_audio');
+      currentlyPlayingAudioPath = filePath;
+      isAudioPlaying = true;
+      _startAudioProgressPolling();
+      onStateChanged();
     }
   }
 
-  /// Открытие видео, музыки или документа системным плеером
+  Future<void> seekAudioFile(int newPositionMs) async {
+    final targetMs = newPositionMs.clamp(0, audioDurationMs);
+    audioPositionMs = targetMs;
+    onStateChanged();
+    if (Platform.isAndroid) {
+      await _nativeChannel
+          .invokeMethod('seekAudioFile', {'positionMs': targetMs});
+    } else if (Platform.isWindows && currentlyPlayingAudioPath != null) {
+      WindowsMciAudioBridge.cmd('seek mayak_audio to $targetMs');
+      if (isAudioPlaying) {
+        WindowsMciAudioBridge.cmd('play mayak_audio');
+      }
+    }
+  }
+
+  Future<void> stopAudioPlayback() async {
+    _audioProgressTimer?.cancel();
+    currentlyPlayingAudioPath = null;
+    isAudioPlaying = false;
+    audioPositionMs = 0;
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('stopAudioFile');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsMciAudioBridge.cmd('close mayak_audio');
+    }
+    onStateChanged();
+  }
+
+  void _startAudioProgressPolling() {
+    _audioProgressTimer?.cancel();
+    _audioProgressTimer =
+        Timer.periodic(const Duration(milliseconds: 300), (_) async {
+      if (currentlyPlayingAudioPath == null) {
+        _audioProgressTimer?.cancel();
+        return;
+      }
+      if (Platform.isAndroid) {
+        final st = await _nativeChannel
+            .invokeMapMethod<String, dynamic>('getAudioStatus');
+        if (st == null) {
+          currentlyPlayingAudioPath = null;
+          isAudioPlaying = false;
+          _audioProgressTimer?.cancel();
+        } else {
+          isAudioPlaying = (st['isPlaying'] as bool?) ?? false;
+          audioPositionMs = (st['positionMs'] as int?) ?? 0;
+          audioDurationMs = max((st['durationMs'] as int?) ?? 1, 1);
+        }
+        onStateChanged();
+      } else if (Platform.isWindows) {
+        final posStr = WindowsMciAudioBridge.cmd('status mayak_audio position');
+        final modeStr = WindowsMciAudioBridge.cmd('status mayak_audio mode');
+        final pos = int.tryParse(posStr) ?? audioPositionMs;
+        audioPositionMs = pos;
+        if (modeStr.contains('stopped') && pos >= audioDurationMs - 200) {
+          WindowsMciAudioBridge.cmd('close mayak_audio');
+          currentlyPlayingAudioPath = null;
+          isAudioPlaying = false;
+          audioPositionMs = 0;
+          _audioProgressTimer?.cancel();
+        }
+        onStateChanged();
+      }
+    });
+  }
+
   Future<void> openFileExternal(String filePath) async {
     try {
       if (Platform.isAndroid) {
@@ -1284,7 +1540,6 @@ class MeshEngine {
     }
   }
 
-  /// Отправка реакции (👍 ❤️ 🔥 😂 😮 👏 💯) на любое сообщение
   Future<void> sendReaction(
     String peerId,
     String targetMsgId,
@@ -1358,7 +1613,8 @@ class MeshEngine {
     );
   }
 
-  /// Отправка фото, видео, голосовых и музыки (до 150 МБ) с авто-докачкой при смене сети!
+  /// ПОТОКОВАЯ ПЕРЕДАЧА БОЛЬШИХ ФАЙЛОВ И ВИДЕО ДО 1 ГБ (1024 МБ) БЕЗ ЗАГРУЗКИ В ОЗУ!
+  /// Читает файл с диска кусочками по 32 КБ через RandomAccessFile и ждет подтверждения окна каждые 16 чанков!
   Future<void> sendFileMessage(
     String targetNodeId, {
     required String filePath,
@@ -1370,139 +1626,157 @@ class MeshEngine {
 
     final file = File(filePath);
     if (!await file.exists()) {
-      _addLog('Не удалось прочитать выбранный файл');
+      _addLog('Не удалось прочитать выбранный файл: $filePath');
       return;
     }
-    final bytes = await file.readAsBytes();
-    final totalSize = bytes.length;
+    final totalSize = await file.length();
     if (totalSize == 0) return;
 
-    if (totalSize > 150 * 1024 * 1024) {
-      _addLog('Максимальный размер видео/файла: 150 МБ');
+    if (totalSize > 1024 * 1024 * 1024) {
+      _addLog('Максимальный размер файла: 1 ГБ (1024 МБ)');
       return;
     }
 
-    String cleanFileName = _sanitizeFileName(fileName);
-    if (!cleanFileName.contains('.')) {
-      final detectedExt = _detectMediaExtensionFromBytes(bytes);
-      if (detectedExt != null) {
-        cleanFileName = '$cleanFileName.$detectedExt';
-      }
-    }
-
-    final fileId = existingFileId ?? _randomHex(12);
-    final now = DateTime.now().millisecondsSinceEpoch;
-
-    ChatMessage? myMsg;
-    for (final m in getMessagesFor(targetNodeId)) {
-      if (m.msgId == fileId) {
-        myMsg = m;
-        break;
-      }
-    }
-    if (myMsg == null) {
-      myMsg = ChatMessage(
-        msgId: fileId,
-        peerId: targetNodeId,
-        senderId: nodeId,
-        senderName: nickname,
-        text: '📎 $cleanFileName',
-        timestamp: now,
-        isMe: true,
-        isDelivered: false,
-        filePath: filePath,
-        fileName: cleanFileName,
-        fileSize: totalSize,
-        transferProgress: 0.02,
-      );
-      getMessagesFor(targetNodeId).add(myMsg);
-    }
-
-    // Регистрируем задание в очереди авто-докачки (на случай смены Wi-Fi сети или разрыва связи!)
-    final job = pendingFileJobs.putIfAbsent(
-      fileId,
-      () => PendingFileJob(
-        fileId: fileId,
-        targetNodeId: targetNodeId,
-        filePath: filePath,
-        fileName: cleanFileName,
-      ),
-    );
-    if (job.isSending) return;
-    job.isSending = true;
-    await _saveContactsAndChats();
-    onStateChanged();
-
+    final raf = await file.open(mode: FileMode.read);
     try {
-      final fileHash = _toHex((await _sha256.hash(bytes)).bytes);
-      final totalChunks = (totalSize / fileChunkSize).ceil();
-      final fileEphKeyPair = await _x25519.newKeyPair();
-      final fileEphPub = await fileEphKeyPair.extractPublicKey();
-      final fileEphPubHex = _toHex(fileEphPub.bytes);
+      final headerBytes = await raf.read(min(16, totalSize));
+      String cleanFileName = _sanitizeFileName(fileName);
+      if (!cleanFileName.contains('.')) {
+        final detectedExt = _detectMediaExtensionFromBytes(headerBytes);
+        if (detectedExt != null) {
+          cleanFileName = '$cleanFileName.$detectedExt';
+        }
+      }
 
-      for (int idx = 0; idx < totalChunks; idx++) {
-        // Если контакт пропал во время передачи большого видео — ставим на паузу до переподключения в новой сети!
-        if (!_tcpPeers.containsValue(targetNodeId) &&
-            !_blePeers.containsValue(targetNodeId) &&
-            totalChunks > 15) {
-          _addLog('Ожидание сети для докачки $cleanFileName...');
+      final fileId = existingFileId ?? _randomHex(12);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final totalChunks = (totalSize / fileChunkSize).ceil();
+
+      ChatMessage? myMsg;
+      for (final m in getMessagesFor(targetNodeId)) {
+        if (m.msgId == fileId) {
+          myMsg = m;
           break;
         }
-
-        final start = idx * fileChunkSize;
-        final end = min(start + fileChunkSize, totalSize);
-        final chunkBytes = bytes.sublist(start, end);
-
-        final chunkEnvelopeJson = jsonEncode({
-          'v': 2,
-          'kind': 'FILE_CHUNK',
-          'fid': fileId,
-          'fn': cleanFileName,
-          'fs': totalSize,
-          'sha': fileHash,
-          'idx': idx,
-          'tot': totalChunks,
-          'nick': nickname,
-          'b64': base64Encode(chunkBytes),
-        });
-
-        final isLastChunk = (idx == totalChunks - 1);
-        final chunkMsgId = isLastChunk ? fileId : '${fileId}_$idx';
-
-        await _encryptAndQueueSealedDataPacket(
-          targetNodeId: targetNodeId,
-          contact: contact,
-          msgId: chunkMsgId,
-          sealedPayloadBytes: utf8.encode(chunkEnvelopeJson),
-          precomputedEphKeyPair: fileEphKeyPair,
-          precomputedEphPubHex: fileEphPubHex,
-          keepInTransitBuffer: isLastChunk || totalChunks <= 8,
-          persistInOutbox: false,
+      }
+      if (myMsg == null) {
+        myMsg = ChatMessage(
+          msgId: fileId,
+          peerId: targetNodeId,
+          senderId: nodeId,
+          senderName: nickname,
+          text: '📎 $cleanFileName',
+          timestamp: now,
+          isMe: true,
+          isDelivered: false,
+          filePath: filePath,
+          fileName: cleanFileName,
+          fileSize: totalSize,
+          transferProgress: 0.01,
         );
+        getMessagesFor(targetNodeId).add(myMsg);
+      }
 
-        myMsg.transferProgress = (idx + 1) / totalChunks;
-        if (idx % 5 == 0 || isLastChunk) {
-          onStateChanged();
+      final job = pendingFileJobs.putIfAbsent(
+        fileId,
+        () => PendingFileJob(
+          fileId: fileId,
+          targetNodeId: targetNodeId,
+          filePath: filePath,
+          fileName: cleanFileName,
+        ),
+      );
+      if (job.isSending) return;
+      job.isSending = true;
+      await _saveContactsAndChats();
+      onStateChanged();
+
+      try {
+        final fileEphKeyPair = await _x25519.newKeyPair();
+        final fileEphPub = await fileEphKeyPair.extractPublicKey();
+        final fileEphPubHex = _toHex(fileEphPub.bytes);
+
+        for (int idx = job.nextChunkIndex; idx < totalChunks; idx++) {
+          if (!_tcpPeers.containsValue(targetNodeId) &&
+              !_blePeers.containsValue(targetNodeId) &&
+              totalChunks > 8) {
+            _addLog('Пауза передачи $cleanFileName (ожидание подключения)...');
+            break;
+          }
+
+          await raf.setPosition(idx * fileChunkSize);
+          final chunkLen = min(fileChunkSize, totalSize - idx * fileChunkSize);
+          final chunkBytes = await raf.read(chunkLen);
+
+          final isLastChunk = (idx == totalChunks - 1);
+          final needWindowAck = ((idx + 1) % 16 == 0) && !isLastChunk;
+          Completer<void>? winWaiter;
+          if (needWindowAck) {
+            winWaiter = Completer<void>();
+            _fileWindowAckWaiters['${fileId}_$idx'] = winWaiter;
+          }
+
+          final chunkEnvelopeJson = jsonEncode({
+            'v': 2,
+            'kind': 'FILE_CHUNK',
+            'fid': fileId,
+            'fn': cleanFileName,
+            'fs': totalSize,
+            'idx': idx,
+            'tot': totalChunks,
+            'wack': needWindowAck,
+            'nick': nickname,
+            'b64': base64Encode(chunkBytes),
+          });
+
+          final chunkMsgId = isLastChunk ? fileId : '${fileId}_$idx';
+
+          await _encryptAndQueueSealedDataPacket(
+            targetNodeId: targetNodeId,
+            contact: contact,
+            msgId: chunkMsgId,
+            sealedPayloadBytes: utf8.encode(chunkEnvelopeJson),
+            precomputedEphKeyPair: fileEphKeyPair,
+            precomputedEphPubHex: fileEphPubHex,
+            keepInTransitBuffer: isLastChunk || totalChunks <= 6,
+            persistInOutbox: false,
+          );
+
+          job.nextChunkIndex = idx + 1;
+          myMsg.transferProgress = (idx + 1) / totalChunks;
+          if (idx % 4 == 0 || isLastChunk) {
+            onStateChanged();
+          }
+
+          if (winWaiter != null) {
+            // Ждем подтверждения приема окна (512 КБ) от получателя, чтобы сокет никогда не захлебывался на файлах до 1 ГБ!
+            await winWaiter.future.timeout(
+              const Duration(milliseconds: 1200),
+              onTimeout: () {},
+            );
+            _fileWindowAckWaiters.remove('${fileId}_$idx');
+          } else {
+            await Future.delayed(const Duration(milliseconds: 6));
+          }
         }
-        // Даем сокету прокачать буфер (особенно важно для тяжелых видеофайлов!)
-        await Future.delayed(Duration(milliseconds: totalChunks > 80 ? 18 : 10));
+      } finally {
+        job.isSending = false;
       }
     } finally {
-      job.isSending = false;
+      await raf.close();
     }
 
     await _saveContactsAndChats();
     onStateChanged();
   }
 
-  /// Авто-докачка всех незавершенных файлов при переподключении друга в новой сети!
   Future<void> _resumePendingFilesForPeer(String peerId) async {
     final jobs = pendingFileJobs.values
         .where((j) => j.targetNodeId == peerId && !j.isSending)
         .toList();
     for (final job in jobs) {
       if (File(job.filePath).existsSync()) {
-        _addLog('Авто-докачка файла ${job.fileName} в новой сети...');
+        _addLog('Авто-докачка файла ${job.fileName}...');
         unawaited(sendFileMessage(
           peerId,
           filePath: job.filePath,
@@ -1532,20 +1806,16 @@ class MeshEngine {
         b[11] == 0x50) {
       return 'webp';
     }
-    // MP4 / MOV ('ftyp' на смещении 4)
     if (b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70) {
       return 'mp4';
     }
-    // MKV / WebM (0x1A 0x45 0xDF 0xA3)
     if (b[0] == 0x1A && b[1] == 0x45 && b[2] == 0xDF && b[3] == 0xA3) {
       return 'mkv';
     }
-    // MP3 ('ID3' или 0xFF 0xFB)
     if ((b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33) ||
         (b[0] == 0xFF && (b[1] & 0xE0) == 0xE0)) {
       return 'mp3';
     }
-    // OGG ('OggS')
     if (b[0] == 0x4F && b[1] == 0x67 && b[2] == 0x67 && b[3] == 0x53) {
       return 'ogg';
     }
@@ -1565,7 +1835,26 @@ class MeshEngine {
         : cleaned;
   }
 
+  /// Постоянная папка для принятых файлов (не очищается системой!)
   Future<Directory> _getReceivedFilesDir() async {
+    if (Platform.isAndroid) {
+      try {
+        final path = await _nativeChannel
+            .invokeMethod<String>('getPersistentStorageDir');
+        if (path != null && path.isNotEmpty) {
+          final d = Directory(path);
+          if (!await d.exists()) await d.create(recursive: true);
+          return d;
+        }
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      final home = Platform.environment['USERPROFILE'] ??
+          Platform.environment['HOME'] ??
+          '.';
+      final d = Directory('$home/Downloads/Mayak/Received');
+      if (!await d.exists()) await d.create(recursive: true);
+      return d;
+    }
     final base = Directory.systemTemp;
     final dir = Directory('${base.path}/mayak_received_files');
     if (!await dir.exists()) {
@@ -1692,7 +1981,6 @@ class MeshEngine {
     }
   }
 
-  /// ФИКС СМЕНЫ СЕТИ: если узел пришел с НОВОГО IP-адреса, мы НЕ блокируем подключение из-за старого зависшего сокета!
   Future<void> connectToHost(
     String host,
     int port, {
@@ -1745,7 +2033,6 @@ class MeshEngine {
                   line,
                   remoteAddr: remoteAddr,
                   onHello: (peerId, peerNick) async {
-                    // Закрываем старые мертвые сокеты этого же пира с прошлых подсетей
                     for (final entry in _tcpPeers.entries.toList()) {
                       if (entry.value == peerId && entry.key != socket) {
                         try {
@@ -1772,7 +2059,6 @@ class MeshEngine {
                     for (final entry in transitBuffer.entries.toList()) {
                       _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
                     }
-                    // Авто-докачка файлов при смене сети!
                     unawaited(_resumePendingFilesForPeer(peerId));
                   },
                   replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
@@ -1795,6 +2081,15 @@ class MeshEngine {
   }) async {
     try {
       final map = jsonDecode(line) as Map<String, dynamic>;
+
+      if (map.containsKey('file_win_ack')) {
+        final key = map['file_win_ack'] as String;
+        final waiter = _fileWindowAckWaiters.remove(key);
+        if (waiter != null && !waiter.isCompleted) {
+          waiter.complete();
+        }
+        return;
+      }
 
       if (map.containsKey('ping_req')) {
         replyDirect(jsonEncode({
@@ -2240,7 +2535,6 @@ class MeshEngine {
       final senderNickInside =
           (envelope['nick'] as String?) ?? pkt.srcNickname;
 
-      // Если человек реально прислал нам личное сообщение, разблокируем его из удаленных!
       deletedContactIds.remove(senderId);
       _upsertContact(
         nodeId: senderId,
@@ -2256,6 +2550,11 @@ class MeshEngine {
       if (kind == 'FILE_CHUNK') {
         final idx = (envelope['idx'] as int?) ?? 0;
         final tot = (envelope['tot'] as int?) ?? 1;
+        final wack = (envelope['wack'] as bool?) ?? false;
+        if (wack) {
+          final fid = (envelope['fid'] as String?) ?? '';
+          replyDirect(jsonEncode({'file_win_ack': '${fid}_$idx'}));
+        }
         shouldSendAck = (idx == tot - 1) || (tot <= 4);
         await _handleIncomingFileChunk(senderId, contact, envelope);
       } else if (kind == 'REACTION') {
@@ -2336,6 +2635,7 @@ class MeshEngine {
     }
   }
 
+  /// Потоковая запись чанков напрямую в файл на диске через RandomAccessFile (0 нагрузки на ОЗУ при файлах до 1 ГБ!)
   Future<void> _handleIncomingFileChunk(
     String senderId,
     ContactProfile contact,
@@ -2345,32 +2645,45 @@ class MeshEngine {
     final rawName = (env['fn'] as String?) ?? 'file.bin';
     final fileName = _sanitizeFileName(rawName);
     final totalSize = (env['fs'] as int?) ?? 0;
-    final shaHex = (env['sha'] as String?) ?? '';
     final idx = (env['idx'] as int?) ?? 0;
     final tot = (env['tot'] as int?) ?? 1;
     final chunkBytes = base64Decode((env['b64'] as String?) ?? '');
 
-    if (tot <= 0 || tot > 12000 || totalSize > 155 * 1024 * 1024) return;
+    if (tot <= 0 || tot > 40000 || totalSize > 1050 * 1024 * 1024) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    _incomingFiles.removeWhere((_, a) => now - a.createdAtMs > 900000);
+    _incomingFiles.removeWhere((_, a) => now - a.createdAtMs > 3600000);
     if (!_incomingFiles.containsKey(fileId) &&
         _incomingFiles.length >= maxConcurrentIncomingFiles) {
       return;
     }
 
+    final dir = await _getReceivedFilesDir();
+    final partPath = '${dir.path}/${fileId}_$fileName.part';
+
     final assembly = _incomingFiles.putIfAbsent(
       fileId,
-      () => IncomingFileAssembly(
+      () => IncomingFileStreamAssembly(
         fileId: fileId,
         fileName: fileName,
         totalSize: totalSize,
         totalChunks: tot,
-        sha256Hex: shaHex,
+        partFilePath: partPath,
         createdAtMs: now,
       ),
     );
-    assembly.chunks[idx] = chunkBytes;
+
+    if (!assembly.receivedChunkIndices.contains(idx)) {
+      final partFile = File(partPath);
+      final raf = await partFile.open(mode: FileMode.append);
+      try {
+        await raf.setPosition(idx * fileChunkSize);
+        await raf.writeFrom(chunkBytes);
+      } finally {
+        await raf.close();
+      }
+      assembly.receivedChunkIndices.add(idx);
+    }
 
     final msgs = getMessagesFor(senderId);
     ChatMessage? existingMsg;
@@ -2393,40 +2706,33 @@ class MeshEngine {
         isDelivered: false,
         fileName: fileName,
         fileSize: totalSize,
-        transferProgress: assembly.chunks.length / tot,
+        transferProgress: assembly.receivedChunkIndices.length / tot,
       );
       msgs.add(existingMsg);
     } else {
-      existingMsg.transferProgress = assembly.chunks.length / tot;
+      existingMsg.transferProgress =
+          assembly.receivedChunkIndices.length / tot;
     }
 
-    if (assembly.chunks.length >= tot) {
-      final combined = <int>[];
-      for (int i = 0; i < tot; i++) {
-        final part = assembly.chunks[i];
-        if (part == null) return;
-        combined.addAll(part);
-      }
+    if (assembly.receivedChunkIndices.length >= tot) {
       _incomingFiles.remove(fileId);
-
-      final actualHash = _toHex((await _sha256.hash(combined)).bytes);
-      if (shaHex.isNotEmpty && actualHash != shaHex) {
-        existingMsg.text = '⚠️ Ошибка контрольной суммы $fileName';
-        onStateChanged();
-        return;
-      }
-
+      final partFile = File(partPath);
       String finalFileName = fileName;
       if (!finalFileName.contains('.')) {
-        final ext = _detectMediaExtensionFromBytes(combined);
+        final raf = await partFile.open(mode: FileMode.read);
+        final head = await raf.read(min(16, totalSize));
+        await raf.close();
+        final ext = _detectMediaExtensionFromBytes(head);
         if (ext != null) {
           finalFileName = '$finalFileName.$ext';
         }
       }
 
-      final dir = await _getReceivedFilesDir();
-      final savedFile = File('${dir.path}/${fileId}_$finalFileName');
-      await savedFile.writeAsBytes(combined, flush: true);
+      final finalPath = '${dir.path}/${fileId}_$finalFileName';
+      if (await File(finalPath).exists()) {
+        await File(finalPath).delete();
+      }
+      final savedFile = await partFile.rename(finalPath);
 
       existingMsg.fileName = finalFileName;
       existingMsg.filePath = savedFile.path;
@@ -2439,7 +2745,7 @@ class MeshEngine {
       }
       onMessageReceived(existingMsg);
       unawaited(_triggerIncomingNotification(
-          senderId, contact.displayTitle, '📎 Получен медиафайл: $finalFileName'));
+          senderId, contact.displayTitle, '📎 Получен файл: $finalFileName'));
       unawaited(_saveContactsAndChats());
     }
     onStateChanged();
@@ -2467,7 +2773,6 @@ class MeshEngine {
       myPersistentOutbox.remove(ack.msgId);
     }
 
-    // Если получен ACK за доставленный файл — убираем его из очереди авто-докачки!
     pendingFileJobs.remove(ack.msgId);
 
     for (final list in chatHistory.values) {
@@ -2732,6 +3037,13 @@ class MeshEngine {
   int get connectedPeersCount =>
       {..._tcpPeers.values, ..._blePeers.values}.length;
   int get blePeersCount => _blePeers.values.toSet().length;
+
+  static String formatDurationMs(int ms) {
+    final totalSec = (ms / 1000).floor().clamp(0, 86400);
+    final m = (totalSec ~/ 60).toString().padLeft(2, '0');
+    final s = (totalSec % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
 
   static String _toHex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
