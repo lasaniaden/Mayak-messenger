@@ -25,12 +25,17 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Native Bridge v1.1.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + In-App Video/Audio Bridge v1.2.0
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
           python3 -c '
-          import glob, os, re
+          import base64, glob, os, re
+
+          # 0. Восстанавливаем ПОСТОЯННЫЙ ключ подписи mayak_release.jks, чтобы APK всегда обновлялся поверх старой версии без конфликта пакетов!
+          ks_b64 = "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"
+          with open("android/app/mayak_release.jks", "wb") as kf:
+              kf.write(base64.b64decode(ks_b64))
 
           # 1. Настраиваем gradle.properties
           gp_path = "android/gradle.properties"
@@ -74,7 +79,7 @@ jobs:
               with open(gw, "w") as f:
                   f.write(gwc)
 
-          # 4. Переписываем android/app/build.gradle(.kts)
+          # 4. Переписываем android/app/build.gradle(.kts) с фиксированной подписью mayak_release.jks
           kts_path = "android/app/build.gradle.kts"
           groovy_path = "android/app/build.gradle"
 
@@ -99,12 +104,21 @@ jobs:
                   jvmTarget = "17"
               }
 
+              signingConfigs {
+                  create("mayakFixed") {
+                      storeFile = file("mayak_release.jks")
+                      storePassword = "mayak2026"
+                      keyAlias = "mayak_key"
+                      keyPassword = "mayak2026"
+                  }
+              }
+
               defaultConfig {
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 11
-                  versionName = "1.1.0"
+                  versionCode = 12
+                  versionName = "1.2.0"
               }
 
               packaging {
@@ -114,8 +128,11 @@ jobs:
               }
 
               buildTypes {
+                  getByName("debug") {
+                      signingConfig = signingConfigs.getByName("mayakFixed")
+                  }
                   getByName("release") {
-                      signingConfig = signingConfigs.getByName("debug")
+                      signingConfig = signingConfigs.getByName("mayakFixed")
                       isMinifyEnabled = false
                       isShrinkResources = false
                   }
@@ -153,12 +170,21 @@ jobs:
                   jvmTarget = "17"
               }
 
+              signingConfigs {
+                  mayakFixed {
+                      storeFile file("mayak_release.jks")
+                      storePassword "mayak2026"
+                      keyAlias "mayak_key"
+                      keyPassword "mayak2026"
+                  }
+              }
+
               defaultConfig {
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 11
-                  versionName "1.1.0"
+                  versionCode 12
+                  versionName "1.2.0"
               }
 
               packagingOptions {
@@ -168,8 +194,11 @@ jobs:
               }
 
               buildTypes {
+                  debug {
+                      signingConfig signingConfigs.mayakFixed
+                  }
                   release {
-                      signingConfig signingConfigs.debug
+                      signingConfig signingConfigs.mayakFixed
                       minifyEnabled false
                       shrinkResources false
                   }
@@ -187,10 +216,7 @@ jobs:
           }
           """)
 
-          # 5. Записываем AndroidManifest.xml:
-          #    - УБРАНО CHANGE_WIFI_STATE (теперь телефон НЕ включает сам Wi-Fi при работе без интернета!)
-          #    - Добавлен RECORD_AUDIO для записи голосовых сообщений
-          #    - Добавлен FileProvider для открытия полученных видео и музыки
+          # 5. Записываем AndroidManifest.xml
           res_xml_dir = "android/app/src/main/res/xml"
           os.makedirs(res_xml_dir, exist_ok=True)
           with open(os.path.join(res_xml_dir, "file_paths.xml"), "w") as f:
@@ -287,7 +313,7 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем MainActivity.kt (с пробивом уведомлений для POCO/Xiaomi, записью голосовых, плеером музыки и открытием видео)
+          # 6. Записываем MainActivity.kt (Встроенный видеоплеер через TextureRegistry + Аудиоплеер с перемоткой seekTo + Авто-бэкап чатов)
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -328,6 +354,7 @@ jobs:
           import android.provider.MediaStore
           import android.provider.OpenableColumns
           import android.provider.Settings
+          import android.view.Surface
           import android.webkit.MimeTypeMap
           import androidx.core.app.ActivityCompat
           import androidx.core.app.NotificationCompat
@@ -348,6 +375,7 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import io.flutter.view.TextureRegistry
           import java.io.File
           import java.io.FileOutputStream
           import java.util.Locale
@@ -416,7 +444,6 @@ jobs:
                           acquire()
                       }
 
-                      // Берем WifiLock ТОЛЬКО если Wi-Fi реально включен пользователем (не включаем Wi-Fi сами!)
                       val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
                       if (wm != null && wm.isWifiEnabled) {
                           wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Mayak::BgWifiLock")?.apply {
@@ -473,6 +500,7 @@ jobs:
               private val CHANNEL = "mayak/native"
               private val NOTIF_CHANNEL_ID = "mayak_poco_high_alert_v3"
               private var methodChannel: MethodChannel? = null
+              private var flutterEngineRef: FlutterEngine? = null
               private var multicastLock: WifiManager.MulticastLock? = null
               private var pendingPermResult: MethodChannel.Result? = null
               private var pendingFilePickResult: MethodChannel.Result? = null
@@ -480,10 +508,19 @@ jobs:
               private var serviceId: String = "com.p2pmesh.intercom"
               private var notifIdCounter = 1001
               private var isAppInForeground = true
+
+              // Аудио и запись голоса
               private var mediaRecorder: MediaRecorder? = null
               private var currentVoiceFilePath: String? = null
               private var voiceStartMs: Long = 0L
-              private var mediaPlayer: MediaPlayer? = null
+              private var audioPlayer: MediaPlayer? = null
+              private var currentAudioPath: String? = null
+
+              // Встроенный нативный видеоплеер через текстуру Flutter
+              private var videoTextureEntry: TextureRegistry.SurfaceTextureEntry? = null
+              private var videoSurface: Surface? = null
+              private var videoPlayer: MediaPlayer? = null
+
               private val connectedBleEndpoints = mutableSetOf<String>()
               private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -548,6 +585,7 @@ jobs:
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
+                  flutterEngineRef = flutterEngine
                   val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
                   methodChannel = channel
 
@@ -558,6 +596,10 @@ jobs:
                                   val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: ""
                                   val model = "${Build.MANUFACTURER}_${Build.MODEL}"
                                   result.success("${androidId}_$model")
+                              }
+                              "getPersistentStorageDir" -> {
+                                  val dir = File(filesDir, "mayak_received").apply { mkdirs() }
+                                  result.success(dir.absolutePath)
                               }
                               "startBackgroundService" -> {
                                   startBgServiceSafe()
@@ -611,11 +653,52 @@ jobs:
                               }
                               "playAudioFile" -> {
                                   val path = call.argument<String>("path") ?: ""
-                                  val ok = playAudioInternal(path)
-                                  result.success(ok)
+                                  val info = playAudioInternal(path)
+                                  result.success(info)
+                              }
+                              "pauseAudioFile" -> {
+                                  try { audioPlayer?.pause() } catch (_: Throwable) {}
+                                  result.success(true)
+                              }
+                              "resumeAudioFile" -> {
+                                  try { audioPlayer?.start() } catch (_: Throwable) {}
+                                  result.success(true)
+                              }
+                              "seekAudioFile" -> {
+                                  val posMs = call.argument<Int>("positionMs") ?: 0
+                                  try { audioPlayer?.seekTo(posMs) } catch (_: Throwable) {}
+                                  result.success(true)
+                              }
+                              "getAudioStatus" -> {
+                                  val mp = audioPlayer
+                                  if (mp != null) {
+                                      result.success(mapOf(
+                                          "isPlaying" to mp.isPlaying,
+                                          "positionMs" to mp.currentPosition,
+                                          "durationMs" to mp.duration.coerceAtLeast(1),
+                                          "path" to (currentAudioPath ?: "")
+                                      ))
+                                  } else {
+                                      result.success(null)
+                                  }
                               }
                               "stopAudioFile" -> {
                                   stopAudioInternal()
+                                  result.success(true)
+                              }
+                              "initInAppVideo" -> {
+                                  val path = call.argument<String>("path") ?: ""
+                                  val info = initInAppVideoInternal(path)
+                                  result.success(info)
+                              }
+                              "controlInAppVideo" -> {
+                                  val act = call.argument<String>("action") ?: ""
+                                  val posMs = call.argument<Int>("positionMs") ?: 0
+                                  val status = controlInAppVideoInternal(act, posMs)
+                                  result.success(status)
+                              }
+                              "disposeInAppVideo" -> {
+                                  disposeInAppVideoInternal()
                                   result.success(true)
                               }
                               "saveFileToDownloads" -> {
@@ -699,10 +782,70 @@ jobs:
                   }
               }
 
+              // Встроенный видеоплеер через текстуру Flutter (играет видео прямо внутри приложения без сторонних плееров!)
+              private fun initInAppVideoInternal(path: String): Map<String, Any>? {
+                  return try {
+                      disposeInAppVideoInternal()
+                      val engine = flutterEngineRef ?: return null
+                      val entry = engine.renderer.createSurfaceTexture()
+                      val surface = Surface(entry.surfaceTexture())
+                      val mp = MediaPlayer()
+                      mp.setDataSource(path)
+                      mp.setSurface(surface)
+                      mp.prepare()
+                      val w = mp.videoWidth.coerceAtLeast(320)
+                      val h = mp.videoHeight.coerceAtLeast(240)
+                      entry.surfaceTexture().setDefaultBufferSize(w, h)
+                      mp.start()
+
+                      videoTextureEntry = entry
+                      videoSurface = surface
+                      videoPlayer = mp
+
+                      mapOf(
+                          "textureId" to entry.id(),
+                          "width" to w,
+                          "height" to h,
+                          "durationMs" to mp.duration.coerceAtLeast(1)
+                      )
+                  } catch (_: Throwable) {
+                      disposeInAppVideoInternal()
+                      null
+                  }
+              }
+
+              private fun controlInAppVideoInternal(action: String, posMs: Int): Map<String, Any>? {
+                  val mp = videoPlayer ?: return null
+                  return try {
+                      when (action) {
+                          "play" -> if (!mp.isPlaying) mp.start()
+                          "pause" -> if (mp.isPlaying) mp.pause()
+                          "seek" -> mp.seekTo(posMs.coerceIn(0, mp.duration.coerceAtLeast(1)))
+                      }
+                      mapOf(
+                          "isPlaying" to mp.isPlaying,
+                          "positionMs" to mp.currentPosition,
+                          "durationMs" to mp.duration.coerceAtLeast(1)
+                      )
+                  } catch (_: Throwable) {
+                      null
+                  }
+              }
+
+              private fun disposeInAppVideoInternal() {
+                  try { videoPlayer?.stop() } catch (_: Throwable) {}
+                  try { videoPlayer?.release() } catch (_: Throwable) {}
+                  videoPlayer = null
+                  try { videoSurface?.release() } catch (_: Throwable) {}
+                  videoSurface = null
+                  try { videoTextureEntry?.release() } catch (_: Throwable) {}
+                  videoTextureEntry = null
+              }
+
               private fun startVoiceRecordingInternal(): Boolean {
                   return try {
                       stopVoiceRecordingInternal()
-                      val outDir = File(cacheDir, "voice_notes").apply { mkdirs() }
+                      val outDir = File(filesDir, "voice_notes").apply { mkdirs() }
                       val outFile = File(outDir, "voice_${System.currentTimeMillis()}.m4a")
                       val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                           MediaRecorder(this)
@@ -751,33 +894,48 @@ jobs:
                   }
               }
 
-              private fun playAudioInternal(path: String): Boolean {
+              private fun playAudioInternal(path: String): Map<String, Any>? {
                   return try {
+                      if (currentAudioPath == path && audioPlayer != null) {
+                          val mp = audioPlayer!!
+                          if (mp.isPlaying) {
+                              mp.pause()
+                          } else {
+                              mp.start()
+                          }
+                          return mapOf(
+                              "isPlaying" to mp.isPlaying,
+                              "positionMs" to mp.currentPosition,
+                              "durationMs" to mp.duration.coerceAtLeast(1)
+                          )
+                      }
                       stopAudioInternal()
                       val mp = MediaPlayer()
                       mp.setDataSource(path)
                       mp.prepare()
                       mp.start()
+                      currentAudioPath = path
                       mp.setOnCompletionListener {
                           mainHandler.post {
                               methodChannel?.invokeMethod("onAudioCompleted", path)
                           }
                       }
-                      mediaPlayer = mp
-                      true
+                      audioPlayer = mp
+                      mapOf(
+                          "isPlaying" to true,
+                          "positionMs" to 0,
+                          "durationMs" to mp.duration.coerceAtLeast(1)
+                      )
                   } catch (_: Throwable) {
-                      false
+                      null
                   }
               }
 
               private fun stopAudioInternal() {
-                  try {
-                      mediaPlayer?.stop()
-                  } catch (_: Throwable) {}
-                  try {
-                      mediaPlayer?.release()
-                  } catch (_: Throwable) {}
-                  mediaPlayer = null
+                  try { audioPlayer?.stop() } catch (_: Throwable) {}
+                  try { audioPlayer?.release() } catch (_: Throwable) {}
+                  audioPlayer = null
+                  currentAudioPath = null
               }
 
               private fun openFileWithSystemViewer(path: String): Boolean {
@@ -847,7 +1005,7 @@ jobs:
                           }
 
                           val safeName = displayName.replace(Regex("[^a-zA-Z0-9._а-яА-ЯёЁ-]"), "_")
-                          val outDir = File(cacheDir, "picked_files").apply { mkdirs() }
+                          val outDir = File(filesDir, "picked_files").apply { mkdirs() }
                           val outFile = File(outDir, "${System.currentTimeMillis()}_$safeName")
                           contentResolver.openInputStream(uri)?.use { input ->
                               FileOutputStream(outFile).use { output ->
@@ -981,9 +1139,7 @@ jobs:
                   )
               }
 
-              // ПРОБИВНЫЕ УВЕДОМЛЕНИЯ ДЛЯ POCO / XIAOMI (работают со звуком, вибрацией и пробуждением экрана даже при ограничениях оболочки MIUI/HyperOS)
               private fun showSystemNotificationWithPocoBypass(title: String, body: String) {
-                  // 1. Принудительно подаем сигнал и вибрацию напрямую и будим экран на 3 секунды
                   try {
                       val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
                       @Suppress("DEPRECATION")
@@ -1010,7 +1166,6 @@ jobs:
                       }
                   } catch (_: Throwable) {}
 
-                  // 2. Показываем системный баннер уведомления
                   try {
                       val intent = Intent(this, MainActivity::class.java).apply {
                           flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -1042,7 +1197,6 @@ jobs:
               private fun acquireWifiMulticastLock() {
                   try {
                       val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                      // Захватываем MulticastLock ТОЛЬКО если Wi-Fi уже включен пользователем!
                       if (wifi != null && wifi.isWifiEnabled && multicastLock == null) {
                           multicastLock = wifi.createMulticastLock("mayak_multicast_lock").apply {
                               setReferenceCounted(false)
@@ -1253,6 +1407,7 @@ jobs:
               override fun onDestroy() {
                   if (currentInstance == this) currentInstance = null
                   stopAudioInternal()
+                  disposeInAppVideoInternal()
                   try {
                       multicastLock?.release()
                   } catch (_: Throwable) {}
