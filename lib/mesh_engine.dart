@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -19,6 +20,7 @@ class ChatMessage {
   String? fileName;
   int? fileSize;
   double transferProgress; // 0.0 .. 1.0
+  Map<String, String> reactions; // senderNodeId -> emoji
 
   ChatMessage({
     required this.msgId,
@@ -33,7 +35,8 @@ class ChatMessage {
     this.fileName,
     this.fileSize,
     this.transferProgress = 1.0,
-  });
+    Map<String, String>? reactions,
+  }) : reactions = reactions ?? {};
 
   bool get isImageFile {
     final name = (fileName ?? filePath ?? '').toLowerCase();
@@ -43,6 +46,27 @@ class ChatMessage {
         name.endsWith('.webp') ||
         name.endsWith('.gif') ||
         name.endsWith('.bmp');
+  }
+
+  bool get isVideoFile {
+    final name = (fileName ?? filePath ?? '').toLowerCase();
+    return name.endsWith('.mp4') ||
+        name.endsWith('.mkv') ||
+        name.endsWith('.mov') ||
+        name.endsWith('.webm') ||
+        name.endsWith('.avi') ||
+        name.endsWith('.3gp');
+  }
+
+  bool get isAudioFile {
+    final name = (fileName ?? filePath ?? '').toLowerCase();
+    return name.endsWith('.m4a') ||
+        name.endsWith('.mp3') ||
+        name.endsWith('.wav') ||
+        name.endsWith('.ogg') ||
+        name.endsWith('.flac') ||
+        name.endsWith('.aac') ||
+        name.endsWith('.opus');
   }
 
   String get timeFormatted {
@@ -70,21 +94,62 @@ class ChatMessage {
         'fn': fileName,
         'fs': fileSize,
         'pr': transferProgress,
+        'rx': reactions,
       };
 
-  factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
-        msgId: j['id'] as String,
-        peerId: j['p'] as String,
-        senderId: j['s'] as String,
-        senderName: j['sn'] as String,
-        text: j['txt'] as String,
-        timestamp: j['ts'] as int,
-        isMe: j['me'] as bool,
-        isDelivered: (j['ack'] as bool?) ?? false,
-        filePath: j['fp'] as String?,
-        fileName: j['fn'] as String?,
-        fileSize: j['fs'] as int?,
-        transferProgress: ((j['pr'] as num?) ?? 1.0).toDouble(),
+  factory ChatMessage.fromJson(Map<String, dynamic> j) {
+    final rawRx = j['rx'];
+    final rxMap = <String, String>{};
+    if (rawRx is Map) {
+      rawRx.forEach((k, v) {
+        rxMap[k.toString()] = v.toString();
+      });
+    }
+    return ChatMessage(
+      msgId: j['id'] as String,
+      peerId: j['p'] as String,
+      senderId: j['s'] as String,
+      senderName: j['sn'] as String,
+      text: j['txt'] as String,
+      timestamp: j['ts'] as int,
+      isMe: j['me'] as bool,
+      isDelivered: (j['ack'] as bool?) ?? false,
+      filePath: j['fp'] as String?,
+      fileName: j['fn'] as String?,
+      fileSize: j['fs'] as int?,
+      transferProgress: ((j['pr'] as num?) ?? 1.0).toDouble(),
+      reactions: rxMap,
+    );
+  }
+}
+
+class PendingFileJob {
+  final String fileId;
+  final String targetNodeId;
+  final String filePath;
+  final String fileName;
+  bool isSending;
+
+  PendingFileJob({
+    required this.fileId,
+    required this.targetNodeId,
+    required this.filePath,
+    required this.fileName,
+    this.isSending = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'fid': fileId,
+        'dst': targetNodeId,
+        'fp': filePath,
+        'fn': fileName,
+      };
+
+  factory PendingFileJob.fromJson(Map<String, dynamic> j) => PendingFileJob(
+        fileId: j['fid'] as String,
+        targetNodeId: j['dst'] as String,
+        filePath: j['fp'] as String,
+        fileName: j['fn'] as String,
       );
 }
 
@@ -94,6 +159,7 @@ class IncomingFileAssembly {
   final int totalSize;
   final int totalChunks;
   final String sha256Hex;
+  final int createdAtMs;
   final Map<int, List<int>> chunks = {};
 
   IncomingFileAssembly({
@@ -102,6 +168,7 @@ class IncomingFileAssembly {
     required this.totalSize,
     required this.totalChunks,
     required this.sha256Hex,
+    required this.createdAtMs,
   });
 }
 
@@ -115,6 +182,7 @@ class ContactProfile {
   bool isDirectPeer;
   String lastAddress;
   int unreadCount;
+  int lastPingMs;
 
   ContactProfile({
     required this.nodeId,
@@ -126,6 +194,7 @@ class ContactProfile {
     this.isDirectPeer = false,
     this.lastAddress = '',
     this.unreadCount = 0,
+    this.lastPingMs = -1,
   });
 
   String get displayTitle =>
@@ -218,12 +287,32 @@ class MeshPacket {
       );
 }
 
+class BenchmarkReport {
+  final double chachaMbPerSec;
+  final int x25519HandshakesPerSec;
+  final int ed25519SignsPerSec;
+  final Map<String, int> peerPingsMs;
+  final bool readyForVoicePtt;
+  final bool readyForVideoCalls;
+
+  BenchmarkReport({
+    required this.chachaMbPerSec,
+    required this.x25519HandshakesPerSec,
+    required this.ed25519SignsPerSec,
+    required this.peerPingsMs,
+    required this.readyForVoicePtt,
+    required this.readyForVideoCalls,
+  });
+}
+
 class MeshEngine {
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
   static const int maxBufferPackets = 400;
-  static const int fileChunkSize = 24 * 1024; // 24 КБ на чанк
+  static const int maxLineLengthBytes = 140 * 1024;
+  static const int maxConcurrentIncomingFiles = 6;
+  static const int fileChunkSize = 14 * 1024;
   static const String serviceId = 'com.p2pmesh.intercom';
   static const MethodChannel _nativeChannel = MethodChannel('mayak/native');
 
@@ -251,23 +340,38 @@ class MeshEngine {
   bool vpnDetected = false;
   bool gpsDisabledOnAndroid = false;
   bool notificationsEnabled = true;
+  bool isRecordingVoice = false;
+  String? currentlyPlayingAudioPath;
   String? activeOpenChatId;
   int unreadBroadcastCount = 0;
   String lastStatusLog = 'Запуск ядра...';
   final List<String> debugLogs = [];
 
   List<String> cachedIps = ['127.0.0.1'];
+  String _previousPrimaryIp = '';
   String cachedInviteCode = '';
   int _lastIpRefreshMs = 0;
 
   final Map<Socket, String> _tcpPeers = {};
   final Set<String> _connectingHosts = {};
   final Map<String, String> _blePeers = {};
-  final Set<String> _seenBroadcastIds = {};
+
+  final Queue<String> _seenPacketQueue = Queue<String>();
+  final Set<String> _seenPacketSet = {};
+
+  // Постоянный список удаленных контактов (чтобы они НЕ воскресали после перезапуска проги!)
+  final Set<String> deletedContactIds = {};
+
+  final Map<String, List<int>> _staticSharedSecretCache = {};
   final Map<String, IncomingFileAssembly> _incomingFiles = {};
+  // Очередь недоотправленных файлов (автоматически докачивает файлы при смене сети!)
+  final Map<String, PendingFileJob> pendingFileJobs = {};
+  final Map<String, int> _pendingPingTimestamps = {};
+  final Map<String, Completer<int>> _pingCompleters = {};
+
+  Future<void> _rxProcessingChain = Future.value();
 
   final Map<String, MeshPacket> transitBuffer = {};
-  // Вечная очередь своих собственных исходящих пакетов (сохраняется на диск!)
   final Map<String, MeshPacket> myPersistentOutbox = {};
   final Map<String, MeshPacket> deliveredAcks = {};
   final Map<String, ContactProfile> knownContacts = {};
@@ -283,6 +387,17 @@ class MeshEngine {
     if (Platform.isAndroid) {
       _nativeChannel.setMethodCallHandler(_handleNativeCallback);
     }
+  }
+
+  bool _markPacketSeen(String id) {
+    if (_seenPacketSet.contains(id)) return false;
+    _seenPacketSet.add(id);
+    _seenPacketQueue.addLast(id);
+    while (_seenPacketQueue.length > 2500) {
+      final oldest = _seenPacketQueue.removeFirst();
+      _seenPacketSet.remove(oldest);
+    }
+    return true;
   }
 
   List<ChatMessage> getMessagesFor(String peerId) {
@@ -306,9 +421,22 @@ class MeshEngine {
     onStateChanged();
   }
 
+  /// Очистка только переписки (сам контакт остается в списке)
+  Future<void> clearChatHistoryOnly(String targetNodeId) async {
+    chatHistory[targetNodeId] = [];
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  /// Полное удаление контакта и чата (с занесением в deletedContactIds, чтобы он НЕ появлялся снова после перезапуска!)
   Future<void> deleteContact(String targetNodeId) async {
+    deletedContactIds.add(targetNodeId);
     knownContacts.remove(targetNodeId);
     chatHistory.remove(targetNodeId);
+    _staticSharedSecretCache.remove(targetNodeId);
+    pendingFileJobs.removeWhere((_, job) => job.targetNodeId == targetNodeId);
+    myPersistentOutbox.removeWhere((_, pkt) => pkt.dstNodeId == targetNodeId);
+    transitBuffer.removeWhere((_, pkt) => pkt.dstNodeId == targetNodeId);
     if (activeOpenChatId == targetNodeId) {
       activeOpenChatId = null;
     }
@@ -316,7 +444,6 @@ class MeshEngine {
     onStateChanged();
   }
 
-  /// Честный полный выход из программы и остановка фоновой службы Android в ноль
   Future<void> stopAllAndExitApp() async {
     await _saveContactsAndChats();
     if (Platform.isAndroid) {
@@ -343,6 +470,100 @@ class MeshEngine {
       groups.add(numVal.toString().padLeft(3, '0'));
     }
     return groups.join(' - ');
+  }
+
+  Future<BenchmarkReport> runBenchmarkAndPing() async {
+    final sampleBlock = _randomBytes(256 * 1024);
+    final tempKey = SecretKey(_randomBytes(32));
+    final tempNonce = _randomBytes(12);
+    final swCipher = Stopwatch()..start();
+    for (int i = 0; i < 8; i++) {
+      await _cipher.encrypt(sampleBlock, secretKey: tempKey, nonce: tempNonce);
+    }
+    swCipher.stop();
+    final elapsedSec = max(swCipher.elapsedMicroseconds / 1000000.0, 0.001);
+    final mbPerSec = 2.0 / elapsedSec;
+
+    final remoteKp = await _x25519.newKeyPair();
+    final remotePub = await remoteKp.extractPublicKey();
+    final swDh = Stopwatch()..start();
+    const dhIterations = 20;
+    for (int i = 0; i < dhIterations; i++) {
+      final shared = await _x25519.sharedSecretKey(
+        keyPair: _dhKeyPair,
+        remotePublicKey: remotePub,
+      );
+      await _hkdf.deriveKey(
+        secretKey: shared,
+        nonce: const [1, 2, 3, 4],
+        info: const [5, 6],
+      );
+    }
+    swDh.stop();
+    final dhPerSec =
+        (dhIterations / max(swDh.elapsedMicroseconds / 1000000.0, 0.001))
+            .round();
+
+    final msgBytes = utf8.encode('Mayak benchmark payload verification test');
+    final swSign = Stopwatch()..start();
+    const signIterations = 20;
+    for (int i = 0; i < signIterations; i++) {
+      final sig = await _ed25519.sign(msgBytes, keyPair: _signKeyPair);
+      await _ed25519.verify(msgBytes, signature: sig);
+    }
+    swSign.stop();
+    final signsPerSec =
+        (signIterations / max(swSign.elapsedMicroseconds / 1000000.0, 0.001))
+            .round();
+
+    final pings = <String, int>{};
+    final activePeerIds = {..._tcpPeers.values, ..._blePeers.values};
+    for (final pid in activePeerIds) {
+      final rtt = await pingPeer(pid);
+      final name = knownContacts[pid]?.displayTitle ?? pid;
+      pings[name] = rtt;
+    }
+
+    return BenchmarkReport(
+      chachaMbPerSec: mbPerSec,
+      x25519HandshakesPerSec: dhPerSec,
+      ed25519SignsPerSec: signsPerSec,
+      peerPingsMs: pings,
+      readyForVoicePtt: mbPerSec >= 1.5 && dhPerSec >= 10,
+      readyForVideoCalls: mbPerSec >= 8.0 && dhPerSec >= 25,
+    );
+  }
+
+  Future<int> pingPeer(String peerId) async {
+    final pingId = _randomHex(8);
+    final comp = Completer<int>();
+    _pendingPingTimestamps[pingId] = DateTime.now().millisecondsSinceEpoch;
+    _pingCompleters[pingId] = comp;
+
+    final payload = jsonEncode({
+      'ping_req': pingId,
+      'from': nodeId,
+    });
+
+    for (final entry in _tcpPeers.entries) {
+      if (entry.value == peerId) {
+        _sendTcpLine(entry.key, payload);
+      }
+    }
+    for (final entry in _blePeers.entries) {
+      if (entry.value == peerId) {
+        unawaited(_sendBleLine(entry.key, payload));
+      }
+    }
+
+    return comp.future.timeout(
+      const Duration(seconds: 2),
+      onTimeout: () {
+        _pendingPingTimestamps.remove(pingId);
+        _pingCompleters.remove(pingId);
+        return -1;
+      },
+    );
   }
 
   void _addLog(String msg, {bool triggerUi = true}) {
@@ -377,6 +598,10 @@ class MeshEngine {
           final endpointId = map['endpointId'] as String;
           final data = map['data'] as String;
           await _onBlePayload(endpointId, data);
+          break;
+        case 'onAudioCompleted':
+          currentlyPlayingAudioPath = null;
+          onStateChanged();
           break;
         case 'onNativeLog':
           final msg = call.arguments as String;
@@ -421,9 +646,9 @@ class MeshEngine {
       );
     }
 
-    await refreshNetworkCache();
+    await refreshNetworkCache(force: true);
     await _startLanAutoDiscovery();
-    _addLog('Защищенный узел готов (порт $listenPort)');
+    _addLog('Защищенный узел v1.1 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -497,13 +722,16 @@ class MeshEngine {
   Future<void> _loadPersistedContactsAndChats() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      final deletedRaw = prefs.getStringList('deleted_contacts_v11') ?? [];
+      deletedContactIds.addAll(deletedRaw);
+
       final contactsRaw = prefs.getString('saved_contacts_v7');
       if (contactsRaw != null && contactsRaw.isNotEmpty) {
         final list = jsonDecode(contactsRaw) as List;
         for (final item in list) {
           final c =
               ContactProfile.fromJson(Map<String, dynamic>.from(item as Map));
-          if (c.nodeId != nodeId) {
+          if (c.nodeId != nodeId && !deletedContactIds.contains(c.nodeId)) {
             knownContacts[c.nodeId] = c;
           }
         }
@@ -513,6 +741,7 @@ class MeshEngine {
       if (chatsRaw != null && chatsRaw.isNotEmpty) {
         final map = jsonDecode(chatsRaw) as Map<String, dynamic>;
         map.forEach((peerId, msgsJson) {
+          if (deletedContactIds.contains(peerId)) return;
           final list = (msgsJson as List)
               .map((m) =>
                   ChatMessage.fromJson(Map<String, dynamic>.from(m as Map)))
@@ -521,7 +750,6 @@ class MeshEngine {
         });
       }
 
-      // Восстанавливаем вечную очередь своих собственных недоставленных сообщений (Outbox) после перезагрузки!
       final outboxRaw = prefs.getString('saved_outbox_v9');
       if (outboxRaw != null && outboxRaw.isNotEmpty) {
         final list = jsonDecode(outboxRaw) as List;
@@ -529,9 +757,23 @@ class MeshEngine {
         for (final item in list) {
           final pkt =
               MeshPacket.fromJson(Map<String, dynamic>.from(item as Map));
-          if (pkt.expiresAt > now) {
+          if (pkt.expiresAt > now &&
+              !deletedContactIds.contains(pkt.dstNodeId)) {
             myPersistentOutbox[pkt.msgId] = pkt;
             transitBuffer[pkt.msgId] = pkt;
+          }
+        }
+      }
+
+      final pendingFilesRaw = prefs.getString('saved_pending_files_v11');
+      if (pendingFilesRaw != null && pendingFilesRaw.isNotEmpty) {
+        final list = jsonDecode(pendingFilesRaw) as List;
+        for (final item in list) {
+          final job =
+              PendingFileJob.fromJson(Map<String, dynamic>.from(item as Map));
+          if (!deletedContactIds.contains(job.targetNodeId) &&
+              File(job.filePath).existsSync()) {
+            pendingFileJobs[job.fileId] = job;
           }
         }
       }
@@ -541,6 +783,9 @@ class MeshEngine {
   Future<void> _saveContactsAndChats() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+          'deleted_contacts_v11', deletedContactIds.toList());
+
       final contactsList =
           knownContacts.values.map((c) => c.toJson()).toList();
       await prefs.setString('saved_contacts_v7', jsonEncode(contactsList));
@@ -556,6 +801,10 @@ class MeshEngine {
       final outboxList =
           myPersistentOutbox.values.map((p) => p.toJson()).toList();
       await prefs.setString('saved_outbox_v9', jsonEncode(outboxList));
+
+      final filesList =
+          pendingFileJobs.values.map((j) => j.toJson()).toList();
+      await prefs.setString('saved_pending_files_v11', jsonEncode(filesList));
     } catch (_) {}
   }
 
@@ -568,7 +817,7 @@ class MeshEngine {
       await prefs.setString('user_nickname', nickname);
     } catch (_) {}
 
-    await refreshNetworkCache();
+    await refreshNetworkCache(force: true);
     final hello = _buildHelloJson();
     for (final s in _tcpPeers.keys.toList()) {
       _sendTcpLine(s, hello);
@@ -600,13 +849,32 @@ class MeshEngine {
     return jsonEncode({'peer_sync': peers});
   }
 
-  Future<void> refreshNetworkCache() async {
+  /// Детектирует смену сети (например, переход на другую точку доступа) и мгновенно переподключает узлы!
+  Future<void> refreshNetworkCache({bool force = false}) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastIpRefreshMs < 8000 && cachedInviteCode.isNotEmpty) {
+    if (!force && now - _lastIpRefreshMs < 4000 && cachedInviteCode.isNotEmpty) {
       return;
     }
     _lastIpRefreshMs = now;
-    cachedIps = await getLocalIPv4Addresses();
+    final newIps = await getLocalIPv4Addresses();
+    final primaryIp = newIps.isNotEmpty ? newIps.first : '127.0.0.1';
+
+    if (_previousPrimaryIp.isNotEmpty && _previousPrimaryIp != primaryIp) {
+      _addLog('Смена сети ($_previousPrimaryIp -> $primaryIp), обновление связей...');
+      // Закрываем зависшие сокеты старой подсети, чтобы они не мешали новому подключению
+      for (final s in _tcpPeers.keys.toList()) {
+        _cleanupSocket(s);
+      }
+      if (Platform.isAndroid) {
+        try {
+          await _nativeChannel.invokeMethod('acquireMulticastLock');
+        } catch (_) {}
+      }
+      unawaited(scanLocalSubnet(quickOnly: true));
+    }
+    _previousPrimaryIp = primaryIp;
+    cachedIps = newIps;
+
     if (nodeId.isNotEmpty) {
       final bundle = {
         'ips': cachedIps,
@@ -717,7 +985,7 @@ class MeshEngine {
       final host = match.group(1)!;
       final port = int.tryParse(match.group(2) ?? '') ?? defaultTcpPort;
       _addLog('Прямое подключение к $host:$port...');
-      await connectToHost(host, port);
+      await connectToHost(host, port, forceNewConnection: true);
       return null;
     }
 
@@ -725,8 +993,19 @@ class MeshEngine {
         as Map<String, dynamic>;
     final port = (decoded['p'] as int?) ?? defaultTcpPort;
     final targetId = decoded['id'] as String;
+    final targetDh = decoded['dh'] as String;
+    final targetSign = decoded['sg'] as String;
     final targetNick = (decoded['nick'] as String?) ?? 'Узел $targetId';
     final targetHw = (decoded['hw'] as String?) ?? '';
+
+    final verifiedId = await _calcNodeId(_fromHex(targetDh));
+    if (verifiedId != targetId) {
+      _addLog('⚠️ Отклонен поддельный инвайт-код (не совпадает хеш ключа)!');
+      return null;
+    }
+
+    // Если пользователь сам вручную подключает ранее удаленный контакт — снимаем блокировку удаления!
+    deletedContactIds.remove(targetId);
 
     final List<String> candidateIps = [];
     if (decoded['ips'] is List) {
@@ -737,15 +1016,17 @@ class MeshEngine {
 
     _upsertContact(
       nodeId: targetId,
-      dhPubHex: decoded['dh'] as String,
-      signPubHex: decoded['sg'] as String,
+      dhPubHex: targetDh,
+      signPubHex: targetSign,
       nick: targetNick,
       hwFingerprint: targetHw,
       address: candidateIps.isNotEmpty ? '${candidateIps.first}:$port' : '',
+      allowEvenIfDeleted: true,
     );
 
     for (final ip in candidateIps) {
-      unawaited(connectToHost(ip, port, expectedNodeId: targetId));
+      unawaited(connectToHost(ip, port,
+          expectedNodeId: targetId, forceNewConnection: true));
     }
     unawaited(_saveContactsAndChats());
     onStateChanged();
@@ -758,7 +1039,7 @@ class MeshEngine {
     if (!quickOnly) _addLog('Поиск устройств в локальной Wi-Fi сети...');
     onStateChanged();
     try {
-      await refreshNetworkCache();
+      await refreshNetworkCache(force: true);
       final myIps = cachedIps;
       final prefixes = <String>{};
       for (final ip in myIps) {
@@ -852,7 +1133,7 @@ class MeshEngine {
       final ok = await _nativeChannel
               .invokeMethod<bool>('requestNotificationPermission') ??
           false;
-      notificationsEnabled = ok;
+      notificationsEnabled = true; // На POCO/Xiaomi всегда держим звуковой оповещатель активным!
       return ok;
     } catch (_) {
       return false;
@@ -866,21 +1147,22 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// Выбор фото или любого файла на Android и Windows (без внешних падающих плагинов!)
-  Future<Map<String, dynamic>?> pickFileForChat({bool onlyImages = false}) async {
+  /// Выбор медиа (Фото + Видео), Аудио/Музыки или Любого файла
+  Future<Map<String, dynamic>?> pickFileForChat({String mode = 'all'}) async {
     try {
       if (Platform.isAndroid) {
         final res = await _nativeChannel.invokeMapMethod<String, dynamic>(
           'pickFile',
-          {'onlyImages': onlyImages},
+          {'mode': mode},
         );
         return res;
       } else if (Platform.isWindows) {
-        final filter = onlyImages
-            ? 'Images (*.jpg;*.jpeg;*.png;*.webp;*.gif)|*.jpg;*.jpeg;*.png;*.webp;*.gif|All files (*.*)|*.*'
-            : 'All files (*.*)|*.*';
-        final psScript =
-            "Add-Type -AssemblyName System.Windows.Forms; "
+        final filter = mode == 'media'
+            ? 'Media (*.jpg;*.jpeg;*.png;*.webp;*.gif;*.mp4;*.mkv;*.mov;*.webm)|*.jpg;*.jpeg;*.png;*.webp;*.gif;*.mp4;*.mkv;*.mov;*.webm|All files (*.*)|*.*'
+            : (mode == 'audio'
+                ? 'Audio (*.mp3;*.m4a;*.wav;*.ogg;*.flac;*.aac)|*.mp3;*.m4a;*.wav;*.ogg;*.flac;*.aac|All files (*.*)|*.*'
+                : 'All files (*.*)|*.*');
+        final psScript = "Add-Type -AssemblyName System.Windows.Forms; "
             "\$dlg = New-Object System.Windows.Forms.OpenFileDialog; "
             "\$dlg.Filter = '$filter'; "
             "if (\$dlg.ShowDialog() -eq 'OK') { Write-Output \$dlg.FileName }";
@@ -907,14 +1189,82 @@ class MeshEngine {
     return null;
   }
 
-  /// Сохранение полученного файла в папку «Загрузки/Mayak»
+  /// Запись голосового сообщения с микрофона
+  Future<bool> startVoiceRecording() async {
+    if (Platform.isAndroid) {
+      try {
+        final ok =
+            await _nativeChannel.invokeMethod<bool>('startVoiceRecord') ??
+                false;
+        isRecordingVoice = ok;
+        onStateChanged();
+        return ok;
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  Future<Map<String, dynamic>?> stopVoiceRecording() async {
+    isRecordingVoice = false;
+    onStateChanged();
+    if (Platform.isAndroid) {
+      try {
+        final res = await _nativeChannel
+            .invokeMapMethod<String, dynamic>('stopVoiceRecord');
+        return res;
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /// Проигрывание голосового сообщения или музыки прямо в чате
+  Future<void> togglePlayAudioFile(String filePath) async {
+    if (currentlyPlayingAudioPath == filePath) {
+      if (Platform.isAndroid) {
+        await _nativeChannel.invokeMethod('stopAudioFile');
+      }
+      currentlyPlayingAudioPath = null;
+      onStateChanged();
+      return;
+    }
+
+    if (Platform.isAndroid) {
+      final ok = await _nativeChannel
+              .invokeMethod<bool>('playAudioFile', {'path': filePath}) ??
+          false;
+      if (ok) {
+        currentlyPlayingAudioPath = filePath;
+        onStateChanged();
+      }
+    } else if (Platform.isWindows) {
+      await openFileExternal(filePath);
+    }
+  }
+
+  /// Открытие видео, музыки или документа системным плеером
+  Future<void> openFileExternal(String filePath) async {
+    try {
+      if (Platform.isAndroid) {
+        await _nativeChannel
+            .invokeMethod('openFileExternal', {'path': filePath});
+      } else if (Platform.isWindows) {
+        await Process.run('explorer', [filePath.replaceAll('/', '\\')]);
+      }
+    } catch (_) {}
+  }
+
   Future<String> saveReceivedFileToDownloads(
       String srcPath, String fileName) async {
     try {
+      final safeName = _sanitizeFileName(fileName);
       if (Platform.isAndroid) {
         final res = await _nativeChannel.invokeMethod<String>(
           'saveFileToDownloads',
-          {'path': srcPath, 'name': fileName},
+          {'path': srcPath, 'name': safeName},
         );
         return res ?? 'Сохранено';
       } else {
@@ -925,7 +1275,7 @@ class MeshEngine {
         if (!await dlDir.exists()) {
           await dlDir.create(recursive: true);
         }
-        final dstPath = '${dlDir.path}/$fileName';
+        final dstPath = '${dlDir.path}/$safeName';
         await File(srcPath).copy(dstPath);
         return 'Сохранено в: $dstPath';
       }
@@ -934,83 +1284,285 @@ class MeshEngine {
     }
   }
 
-  /// Отправка выбранного фото или файла в личный чат с нарезкой на чанки по 24 КБ и сквозным шифрованием E2EE v2
+  /// Отправка реакции (👍 ❤️ 🔥 😂 😮 👏 💯) на любое сообщение
+  Future<void> sendReaction(
+    String peerId,
+    String targetMsgId,
+    String emoji,
+  ) async {
+    final msgs = getMessagesFor(peerId);
+    for (final m in msgs) {
+      if (m.msgId == targetMsgId) {
+        if (m.reactions[nodeId] == emoji) {
+          m.reactions.remove(nodeId);
+        } else {
+          m.reactions[nodeId] = emoji;
+        }
+        break;
+      }
+    }
+    unawaited(_saveContactsAndChats());
+    onStateChanged();
+
+    if (peerId == broadcastChannelId) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final pktId = _randomHex(12);
+      final expiresAt = now + 3600 * 1000;
+      final rxJson = jsonEncode({
+        'rx_msg': targetMsgId,
+        'emoji': emoji,
+      });
+      final b64Payload = base64Encode(utf8.encode(rxJson));
+      final sigPayload = utf8.encode(
+          '$pktId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
+      final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
+
+      final pkt = MeshPacket(
+        type: 'BROADCAST',
+        msgId: pktId,
+        dstNodeId: broadcastChannelId,
+        srcNickname: nickname,
+        srcSignPubHex: signPubHex,
+        srcDhPubHex: dhPubHex,
+        dstSignPubHex: '',
+        ephPubHex: 'REACTION',
+        nonceHex: '',
+        ciphertextHex: b64Payload,
+        macHex: '',
+        signatureHex: _toHex(sig.bytes),
+        expiresAt: expiresAt,
+        ttl: 5,
+      );
+      _markPacketSeen(pktId);
+      _floodAllTransports(pkt);
+      return;
+    }
+
+    final contact = knownContacts[peerId];
+    if (contact == null) return;
+
+    final pktId = _randomHex(12);
+    final envelopeJson = jsonEncode({
+      'v': 2,
+      'kind': 'REACTION',
+      'targetId': targetMsgId,
+      'emoji': emoji,
+      'nick': nickname,
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: peerId,
+      contact: contact,
+      msgId: pktId,
+      sealedPayloadBytes: utf8.encode(envelopeJson),
+      persistInOutbox: true,
+    );
+  }
+
+  /// Отправка фото, видео, голосовых и музыки (до 150 МБ) с авто-докачкой при смене сети!
   Future<void> sendFileMessage(
     String targetNodeId, {
     required String filePath,
     required String fileName,
+    String? existingFileId,
   }) async {
     final contact = knownContacts[targetNodeId];
     if (contact == null) return;
 
     final file = File(filePath);
-    if (!await file.exists()) return;
+    if (!await file.exists()) {
+      _addLog('Не удалось прочитать выбранный файл');
+      return;
+    }
     final bytes = await file.readAsBytes();
     final totalSize = bytes.length;
     if (totalSize == 0) return;
 
-    if (totalSize > 25 * 1024 * 1024) {
-      _addLog('Максимальный размер файла для Mesh-передачи: 25 МБ');
+    if (totalSize > 150 * 1024 * 1024) {
+      _addLog('Максимальный размер видео/файла: 150 МБ');
       return;
     }
 
-    final fileId = _randomHex(12);
-    final fileHash = _toHex((await _sha256.hash(bytes)).bytes);
-    final totalChunks = (totalSize / fileChunkSize).ceil();
+    String cleanFileName = _sanitizeFileName(fileName);
+    if (!cleanFileName.contains('.')) {
+      final detectedExt = _detectMediaExtensionFromBytes(bytes);
+      if (detectedExt != null) {
+        cleanFileName = '$cleanFileName.$detectedExt';
+      }
+    }
+
+    final fileId = existingFileId ?? _randomHex(12);
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    final myMsg = ChatMessage(
-      msgId: fileId,
-      peerId: targetNodeId,
-      senderId: nodeId,
-      senderName: nickname,
-      text: '📎 Файл: $fileName',
-      timestamp: now,
-      isMe: true,
-      isDelivered: false,
-      filePath: filePath,
-      fileName: fileName,
-      fileSize: totalSize,
-      transferProgress: 0.05,
+    ChatMessage? myMsg;
+    for (final m in getMessagesFor(targetNodeId)) {
+      if (m.msgId == fileId) {
+        myMsg = m;
+        break;
+      }
+    }
+    if (myMsg == null) {
+      myMsg = ChatMessage(
+        msgId: fileId,
+        peerId: targetNodeId,
+        senderId: nodeId,
+        senderName: nickname,
+        text: '📎 $cleanFileName',
+        timestamp: now,
+        isMe: true,
+        isDelivered: false,
+        filePath: filePath,
+        fileName: cleanFileName,
+        fileSize: totalSize,
+        transferProgress: 0.02,
+      );
+      getMessagesFor(targetNodeId).add(myMsg);
+    }
+
+    // Регистрируем задание в очереди авто-докачки (на случай смены Wi-Fi сети или разрыва связи!)
+    final job = pendingFileJobs.putIfAbsent(
+      fileId,
+      () => PendingFileJob(
+        fileId: fileId,
+        targetNodeId: targetNodeId,
+        filePath: filePath,
+        fileName: cleanFileName,
+      ),
     );
-    getMessagesFor(targetNodeId).add(myMsg);
+    if (job.isSending) return;
+    job.isSending = true;
+    await _saveContactsAndChats();
     onStateChanged();
 
-    for (int idx = 0; idx < totalChunks; idx++) {
-      final start = idx * fileChunkSize;
-      final end = min(start + fileChunkSize, totalSize);
-      final chunkBytes = bytes.sublist(start, end);
+    try {
+      final fileHash = _toHex((await _sha256.hash(bytes)).bytes);
+      final totalChunks = (totalSize / fileChunkSize).ceil();
+      final fileEphKeyPair = await _x25519.newKeyPair();
+      final fileEphPub = await fileEphKeyPair.extractPublicKey();
+      final fileEphPubHex = _toHex(fileEphPub.bytes);
 
-      final chunkEnvelopeJson = jsonEncode({
-        'v': 2,
-        'kind': 'FILE_CHUNK',
-        'fid': fileId,
-        'fn': fileName,
-        'fs': totalSize,
-        'sha': fileHash,
-        'idx': idx,
-        'tot': totalChunks,
-        'nick': nickname,
-        'b64': base64Encode(chunkBytes),
-      });
+      for (int idx = 0; idx < totalChunks; idx++) {
+        // Если контакт пропал во время передачи большого видео — ставим на паузу до переподключения в новой сети!
+        if (!_tcpPeers.containsValue(targetNodeId) &&
+            !_blePeers.containsValue(targetNodeId) &&
+            totalChunks > 15) {
+          _addLog('Ожидание сети для докачки $cleanFileName...');
+          break;
+        }
 
-      final chunkMsgId = (idx == totalChunks - 1) ? fileId : '${fileId}_$idx';
-      await _encryptAndQueueSealedDataPacket(
-        targetNodeId: targetNodeId,
-        contact: contact,
-        msgId: chunkMsgId,
-        sealedPayloadBytes: utf8.encode(chunkEnvelopeJson),
-        persistInOutbox: totalSize <= 512 * 1024,
-      );
+        final start = idx * fileChunkSize;
+        final end = min(start + fileChunkSize, totalSize);
+        final chunkBytes = bytes.sublist(start, end);
 
-      myMsg.transferProgress = (idx + 1) / totalChunks;
-      onStateChanged();
-      // Небольшая пауза между чанками, чтобы не забивать сокет и UI
-      await Future.delayed(const Duration(milliseconds: 18));
+        final chunkEnvelopeJson = jsonEncode({
+          'v': 2,
+          'kind': 'FILE_CHUNK',
+          'fid': fileId,
+          'fn': cleanFileName,
+          'fs': totalSize,
+          'sha': fileHash,
+          'idx': idx,
+          'tot': totalChunks,
+          'nick': nickname,
+          'b64': base64Encode(chunkBytes),
+        });
+
+        final isLastChunk = (idx == totalChunks - 1);
+        final chunkMsgId = isLastChunk ? fileId : '${fileId}_$idx';
+
+        await _encryptAndQueueSealedDataPacket(
+          targetNodeId: targetNodeId,
+          contact: contact,
+          msgId: chunkMsgId,
+          sealedPayloadBytes: utf8.encode(chunkEnvelopeJson),
+          precomputedEphKeyPair: fileEphKeyPair,
+          precomputedEphPubHex: fileEphPubHex,
+          keepInTransitBuffer: isLastChunk || totalChunks <= 8,
+          persistInOutbox: false,
+        );
+
+        myMsg.transferProgress = (idx + 1) / totalChunks;
+        if (idx % 5 == 0 || isLastChunk) {
+          onStateChanged();
+        }
+        // Даем сокету прокачать буфер (особенно важно для тяжелых видеофайлов!)
+        await Future.delayed(Duration(milliseconds: totalChunks > 80 ? 18 : 10));
+      }
+    } finally {
+      job.isSending = false;
     }
 
     await _saveContactsAndChats();
     onStateChanged();
+  }
+
+  /// Авто-докачка всех незавершенных файлов при переподключении друга в новой сети!
+  Future<void> _resumePendingFilesForPeer(String peerId) async {
+    final jobs = pendingFileJobs.values
+        .where((j) => j.targetNodeId == peerId && !j.isSending)
+        .toList();
+    for (final job in jobs) {
+      if (File(job.filePath).existsSync()) {
+        _addLog('Авто-докачка файла ${job.fileName} в новой сети...');
+        unawaited(sendFileMessage(
+          peerId,
+          filePath: job.filePath,
+          fileName: job.fileName,
+          existingFileId: job.fileId,
+        ));
+      } else {
+        pendingFileJobs.remove(job.fileId);
+      }
+    }
+  }
+
+  String? _detectMediaExtensionFromBytes(List<int> b) {
+    if (b.length < 12) return null;
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return 'jpg';
+    if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) {
+      return 'png';
+    }
+    if (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) return 'gif';
+    if (b[0] == 0x52 &&
+        b[1] == 0x49 &&
+        b[2] == 0x46 &&
+        b[3] == 0x46 &&
+        b[8] == 0x57 &&
+        b[9] == 0x45 &&
+        b[10] == 0x42 &&
+        b[11] == 0x50) {
+      return 'webp';
+    }
+    // MP4 / MOV ('ftyp' на смещении 4)
+    if (b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70) {
+      return 'mp4';
+    }
+    // MKV / WebM (0x1A 0x45 0xDF 0xA3)
+    if (b[0] == 0x1A && b[1] == 0x45 && b[2] == 0xDF && b[3] == 0xA3) {
+      return 'mkv';
+    }
+    // MP3 ('ID3' или 0xFF 0xFB)
+    if ((b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33) ||
+        (b[0] == 0xFF && (b[1] & 0xE0) == 0xE0)) {
+      return 'mp3';
+    }
+    // OGG ('OggS')
+    if (b[0] == 0x4F && b[1] == 0x67 && b[2] == 0x67 && b[3] == 0x53) {
+      return 'ogg';
+    }
+    return null;
+  }
+
+  String _sanitizeFileName(String raw) {
+    final cleaned = raw
+        .replaceAll(RegExp(r'[/\\:*?"<>|]'), '_')
+        .replaceAll('..', '_')
+        .trim();
+    if (cleaned.isEmpty || cleaned == '.' || cleaned == '_') {
+      return 'file_${DateTime.now().millisecondsSinceEpoch}.bin';
+    }
+    return cleaned.length > 80
+        ? cleaned.substring(cleaned.length - 80)
+        : cleaned;
   }
 
   Future<Directory> _getReceivedFilesDir() async {
@@ -1053,14 +1605,27 @@ class MeshEngine {
     String? nick,
     String? hwFingerprint,
     String? address,
+    bool allowEvenIfDeleted = false,
   }) {
     if (nodeId.isEmpty || nodeId == this.nodeId) return;
+    if (dhPubHex.length != 64 || signPubHex.length != 64) return;
+    if (!allowEvenIfDeleted && deletedContactIds.contains(nodeId)) {
+      return;
+    }
 
     final cleanNick = (nick ?? '').trim();
     final cleanHw = (hwFingerprint ?? '').trim();
     final cleanIp = (address != null && address.contains(':'))
         ? address.split(':').first
         : (address ?? '');
+
+    final existing = knownContacts[nodeId];
+    if (existing != null) {
+      if (existing.dhPubHex != dhPubHex || existing.signPubHex != signPubHex) {
+        _addLog('⚠️ Блокирована попытка подмены ключа для узла $nodeId!');
+        return;
+      }
+    }
 
     final duplicateIds = <String>[];
     knownContacts.forEach((oldId, oldContact) {
@@ -1096,9 +1661,9 @@ class MeshEngine {
         activeOpenChatId = nodeId;
       }
       knownContacts.remove(oldId);
+      _staticSharedSecretCache.remove(oldId);
     }
 
-    final existing = knownContacts[nodeId];
     final isPeerConnected =
         _tcpPeers.containsValue(nodeId) || _blePeers.containsValue(nodeId);
     if (existing != null) {
@@ -1127,20 +1692,21 @@ class MeshEngine {
     }
   }
 
+  /// ФИКС СМЕНЫ СЕТИ: если узел пришел с НОВОГО IP-адреса, мы НЕ блокируем подключение из-за старого зависшего сокета!
   Future<void> connectToHost(
     String host,
     int port, {
     String? expectedNodeId,
     Duration timeout = const Duration(seconds: 2),
+    bool forceNewConnection = false,
   }) async {
     if (port <= 0 || host == '127.0.0.1') return;
-    if (expectedNodeId != null && _tcpPeers.containsValue(expectedNodeId)) {
-      return;
-    }
-    for (final s in _tcpPeers.keys) {
-      try {
-        if (s.remoteAddress.address == host) return;
-      } catch (_) {}
+    if (!forceNewConnection) {
+      for (final s in _tcpPeers.keys) {
+        try {
+          if (s.remoteAddress.address == host) return;
+        } catch (_) {}
+      }
     }
 
     final key = '$host:$port';
@@ -1172,27 +1738,47 @@ class MeshEngine {
         .bind(socket)
         .transform(const LineSplitter())
         .listen(
-          (line) => _processIncomingJsonLine(
-            line,
-            remoteAddr: remoteAddr,
-            onHello: (peerId, peerNick) async {
-              _tcpPeers[socket] = peerId;
-              _refreshOnlineStatuses();
-              _addLog('Подключен: $peerNick ($peerId)');
+          (line) {
+            if (line.length > maxLineLengthBytes) return;
+            _rxProcessingChain = _rxProcessingChain.then((_) =>
+                _processIncomingJsonLine(
+                  line,
+                  remoteAddr: remoteAddr,
+                  onHello: (peerId, peerNick) async {
+                    // Закрываем старые мертвые сокеты этого же пира с прошлых подсетей
+                    for (final entry in _tcpPeers.entries.toList()) {
+                      if (entry.value == peerId && entry.key != socket) {
+                        try {
+                          if (entry.key.remoteAddress.address !=
+                              socket.remoteAddress.address) {
+                            _cleanupSocket(entry.key);
+                          }
+                        } catch (_) {
+                          _cleanupSocket(entry.key);
+                        }
+                      }
+                    }
 
-              _sendTcpLine(socket, _buildPeerSyncJson());
+                    _tcpPeers[socket] = peerId;
+                    _refreshOnlineStatuses();
+                    _addLog('Подключен: $peerNick ($peerId)');
 
-              _evictExpired();
-              for (final ack in deliveredAcks.values) {
-                _sendTcpLine(socket, jsonEncode(ack.toJson()));
-              }
-              for (final entry in transitBuffer.entries.toList()) {
-                _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
-              }
-            },
-            replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
-            excludeTcpSocket: socket,
-          ),
+                    _sendTcpLine(socket, _buildPeerSyncJson());
+
+                    _evictExpired();
+                    for (final ack in deliveredAcks.values) {
+                      _sendTcpLine(socket, jsonEncode(ack.toJson()));
+                    }
+                    for (final entry in transitBuffer.entries.toList()) {
+                      _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
+                    }
+                    // Авто-докачка файлов при смене сети!
+                    unawaited(_resumePendingFilesForPeer(peerId));
+                  },
+                  replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
+                  excludeTcpSocket: socket,
+                ));
+          },
           onDone: () => _cleanupSocket(socket),
           onError: (_) => _cleanupSocket(socket),
           cancelOnError: true,
@@ -1209,15 +1795,41 @@ class MeshEngine {
   }) async {
     try {
       final map = jsonDecode(line) as Map<String, dynamic>;
+
+      if (map.containsKey('ping_req')) {
+        replyDirect(jsonEncode({
+          'ping_resp': map['ping_req'],
+          'from': nodeId,
+        }));
+        return;
+      }
+      if (map.containsKey('ping_resp')) {
+        final pid = map['ping_resp'] as String;
+        final fromNode = (map['from'] as String?) ?? '';
+        final sentAt = _pendingPingTimestamps.remove(pid);
+        final comp = _pingCompleters.remove(pid);
+        if (sentAt != null && comp != null && !comp.isCompleted) {
+          final rtt = DateTime.now().millisecondsSinceEpoch - sentAt;
+          knownContacts[fromNode]?.lastPingMs = rtt;
+          comp.complete(rtt);
+        }
+        return;
+      }
+
       if (map.containsKey('hello')) {
         final peerId = map['hello'] as String;
-        if (peerId == nodeId) return;
+        if (peerId == nodeId || deletedContactIds.contains(peerId)) return;
+        final peerDh = (map['dh'] as String?) ?? '';
+        final peerSign = (map['sg'] as String?) ?? '';
+        final expectedId = await _calcNodeId(_fromHex(peerDh));
+        if (expectedId != peerId) return;
+
         final peerNick = (map['nick'] as String?) ?? '';
         final peerHw = (map['hw'] as String?) ?? '';
         _upsertContact(
           nodeId: peerId,
-          dhPubHex: map['dh'] as String,
-          signPubHex: map['sg'] as String,
+          dhPubHex: peerDh,
+          signPubHex: peerSign,
           nick: peerNick,
           hwFingerprint: peerHw,
           address: remoteAddr,
@@ -1235,16 +1847,23 @@ class MeshEngine {
         for (final item in list) {
           final m = Map<String, dynamic>.from(item as Map);
           final pid = m['id'] as String;
-          if (pid != nodeId && !knownContacts.containsKey(pid)) {
-            _upsertContact(
-              nodeId: pid,
-              dhPubHex: m['dh'] as String,
-              signPubHex: m['sg'] as String,
-              nick: (m['nick'] as String?) ?? 'Узел $pid',
-              hwFingerprint: (m['hw'] as String?) ?? '',
-              address: 'Через Mesh',
-            );
-            addedAny = true;
+          final pdh = (m['dh'] as String?) ?? '';
+          final psg = (m['sg'] as String?) ?? '';
+          if (pid != nodeId &&
+              !deletedContactIds.contains(pid) &&
+              !knownContacts.containsKey(pid)) {
+            final expectedId = await _calcNodeId(_fromHex(pdh));
+            if (expectedId == pid) {
+              _upsertContact(
+                nodeId: pid,
+                dhPubHex: pdh,
+                signPubHex: psg,
+                nick: (m['nick'] as String?) ?? 'Узел $pid',
+                hwFingerprint: (m['hw'] as String?) ?? '',
+                address: 'Через Mesh',
+              );
+              addedAny = true;
+            }
           }
         }
         if (addedAny) {
@@ -1273,24 +1892,34 @@ class MeshEngine {
   }
 
   Future<SecretKey> _deriveHardenedConversationKey({
-    required SimpleKeyPair firstKeyPair,
-    required SimplePublicKey firstRemotePub,
-    required SimpleKeyPair secondKeyPair,
-    required SimplePublicKey secondRemotePub,
+    required SimpleKeyPair ephKeyPair,
+    required SimplePublicKey ephRemotePub,
+    required String peerNodeId,
+    required String peerStaticDhHex,
     required String msgId,
     required String dstNodeId,
   }) async {
     final secret1 = await _x25519.sharedSecretKey(
-      keyPair: firstKeyPair,
-      remotePublicKey: firstRemotePub,
+      keyPair: ephKeyPair,
+      remotePublicKey: ephRemotePub,
     );
-    final secret2 = await _x25519.sharedSecretKey(
-      keyPair: secondKeyPair,
-      remotePublicKey: secondRemotePub,
-    );
+
+    List<int>? staticSecretBytes = _staticSharedSecretCache[peerNodeId];
+    if (staticSecretBytes == null) {
+      final secret2 = await _x25519.sharedSecretKey(
+        keyPair: _dhKeyPair,
+        remotePublicKey: SimplePublicKey(
+          _fromHex(peerStaticDhHex),
+          type: KeyPairType.x25519,
+        ),
+      );
+      staticSecretBytes = await secret2.extractBytes();
+      _staticSharedSecretCache[peerNodeId] = staticSecretBytes;
+    }
+
     final combinedIkm = <int>[
       ...(await secret1.extractBytes()),
-      ...(await secret2.extractBytes()),
+      ...staticSecretBytes,
     ];
     return _hkdf.deriveKey(
       secretKey: SecretKey(combinedIkm),
@@ -1329,12 +1958,15 @@ class MeshEngine {
     required ContactProfile contact,
     required String msgId,
     required List<int> sealedPayloadBytes,
+    SimpleKeyPair? precomputedEphKeyPair,
+    String? precomputedEphPubHex,
+    bool keepInTransitBuffer = true,
     bool persistInOutbox = true,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final ephKeyPair = await _x25519.newKeyPair();
-    final ephPub = await ephKeyPair.extractPublicKey();
-    final ephPubHex = _toHex(ephPub.bytes);
+    final ephKeyPair = precomputedEphKeyPair ?? await _x25519.newKeyPair();
+    final ephPubHex = precomputedEphPubHex ??
+        _toHex((await ephKeyPair.extractPublicKey()).bytes);
 
     final recipientDhPub = SimplePublicKey(
       _fromHex(contact.dhPubHex),
@@ -1342,10 +1974,10 @@ class MeshEngine {
     );
 
     final sessionKey = await _deriveHardenedConversationKey(
-      firstKeyPair: ephKeyPair,
-      firstRemotePub: recipientDhPub,
-      secondKeyPair: _dhKeyPair,
-      secondRemotePub: recipientDhPub,
+      ephKeyPair: ephKeyPair,
+      ephRemotePub: recipientDhPub,
+      peerNodeId: targetNodeId,
+      peerStaticDhHex: contact.dhPubHex,
       msgId: msgId,
       dstNodeId: targetNodeId,
     );
@@ -1385,7 +2017,10 @@ class MeshEngine {
       ttl: 7,
     );
 
-    transitBuffer[msgId] = pkt;
+    _markPacketSeen(msgId);
+    if (keepInTransitBuffer) {
+      transitBuffer[msgId] = pkt;
+    }
     if (persistInOutbox) {
       myPersistentOutbox[msgId] = pkt;
     }
@@ -1397,8 +2032,10 @@ class MeshEngine {
     final msgId = _randomHex(16);
 
     if (targetNodeId == broadcastChannelId) {
+      final expiresAt = now + 3600 * 1000;
       final b64Payload = base64Encode(utf8.encode(plainText));
-      final sigPayload = utf8.encode('$msgId|$broadcastChannelId|$b64Payload');
+      final sigPayload = utf8.encode(
+          '$msgId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
       final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
 
       final pkt = MeshPacket(
@@ -1414,11 +2051,11 @@ class MeshEngine {
         ciphertextHex: b64Payload,
         macHex: '',
         signatureHex: _toHex(sig.bytes),
-        expiresAt: now + 3600 * 1000,
+        expiresAt: expiresAt,
         ttl: 5,
       );
 
-      _seenBroadcastIds.add(msgId);
+      _markPacketSeen(msgId);
       final myMsg = ChatMessage(
         msgId: msgId,
         peerId: broadcastChannelId,
@@ -1436,6 +2073,7 @@ class MeshEngine {
       return;
     }
 
+    deletedContactIds.remove(targetNodeId);
     final contact = knownContacts[targetNodeId];
     if (contact == null) return;
 
@@ -1471,11 +2109,23 @@ class MeshEngine {
     String? excludeBleId,
   }) async {
     _evictExpired();
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    if (pkt.expiresAt <= now || pkt.expiresAt > now + 25 * 3600 * 1000) {
+      return;
+    }
+
+    if (deliveredAcks.containsKey(pkt.msgId)) {
+      replyDirect(jsonEncode(deliveredAcks[pkt.msgId]!.toJson()));
+      return;
+    }
+
+    if (!_markPacketSeen(pkt.msgId)) return;
 
     if (pkt.type == 'BROADCAST') {
-      if (_seenBroadcastIds.contains(pkt.msgId)) return;
       final sigValid = await _ed25519.verify(
-        utf8.encode('${pkt.msgId}|$broadcastChannelId|${pkt.ciphertextHex}'),
+        utf8.encode(
+            '${pkt.msgId}|$broadcastChannelId|${pkt.srcDhPubHex}|${pkt.expiresAt}|${pkt.ciphertextHex}'),
         signature: Signature(
           _fromHex(pkt.signatureHex),
           publicKey: SimplePublicKey(
@@ -1483,10 +2133,29 @@ class MeshEngine {
         ),
       );
       if (!sigValid) return;
-      _seenBroadcastIds.add(pkt.msgId);
 
       final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
       if (senderId == nodeId) return;
+
+      if (pkt.ephPubHex == 'REACTION') {
+        final rxMap = jsonDecode(utf8.decode(base64Decode(pkt.ciphertextHex)))
+            as Map<String, dynamic>;
+        final targetId = rxMap['rx_msg'] as String;
+        final emoji = rxMap['emoji'] as String;
+        for (final m in getMessagesFor(broadcastChannelId)) {
+          if (m.msgId == targetId) {
+            if (m.reactions[senderId] == emoji) {
+              m.reactions.remove(senderId);
+            } else {
+              m.reactions[senderId] = emoji;
+            }
+            break;
+          }
+        }
+        unawaited(_saveContactsAndChats());
+        onStateChanged();
+        return;
+      }
 
       _upsertContact(
         nodeId: senderId,
@@ -1502,7 +2171,7 @@ class MeshEngine {
         senderId: senderId,
         senderName: senderName,
         text: decodedText,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
+        timestamp: now,
         isMe: false,
         isDelivered: true,
       );
@@ -1527,12 +2196,6 @@ class MeshEngine {
       return;
     }
 
-    if (deliveredAcks.containsKey(pkt.msgId)) {
-      replyDirect(jsonEncode(deliveredAcks[pkt.msgId]!.toJson()));
-      return;
-    }
-    if (transitBuffer.containsKey(pkt.msgId)) return;
-
     final v2SigPayload = utf8.encode(
         '${pkt.msgId}|${pkt.dstNodeId}|${pkt.ephPubHex}|${pkt.srcDhPubHex}|${pkt.ciphertextHex}|${pkt.macHex}');
     final sigValid = await _ed25519.verify(
@@ -1546,16 +2209,15 @@ class MeshEngine {
     if (!sigValid) return;
 
     if (pkt.dstNodeId == nodeId) {
+      final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
       final senderEphPub =
           SimplePublicKey(_fromHex(pkt.ephPubHex), type: KeyPairType.x25519);
-      final senderStaticDhPub =
-          SimplePublicKey(_fromHex(pkt.srcDhPubHex), type: KeyPairType.x25519);
 
       final sessionKey = await _deriveHardenedConversationKey(
-        firstKeyPair: _dhKeyPair,
-        firstRemotePub: senderEphPub,
-        secondKeyPair: _dhKeyPair,
-        secondRemotePub: senderStaticDhPub,
+        ephKeyPair: _dhKeyPair,
+        ephRemotePub: senderEphPub,
+        peerNodeId: senderId,
+        peerStaticDhHex: pkt.srcDhPubHex,
         msgId: pkt.msgId,
         dstNodeId: pkt.dstNodeId,
       );
@@ -1577,18 +2239,41 @@ class MeshEngine {
       final kind = (envelope['kind'] as String?) ?? 'TEXT';
       final senderNickInside =
           (envelope['nick'] as String?) ?? pkt.srcNickname;
-      final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
 
+      // Если человек реально прислал нам личное сообщение, разблокируем его из удаленных!
+      deletedContactIds.remove(senderId);
       _upsertContact(
         nodeId: senderId,
         dhPubHex: pkt.srcDhPubHex,
         signPubHex: pkt.srcSignPubHex,
         nick: senderNickInside,
+        allowEvenIfDeleted: true,
       );
-      final contact = knownContacts[senderId]!;
+      final contact = knownContacts[senderId];
+      if (contact == null) return;
 
+      bool shouldSendAck = true;
       if (kind == 'FILE_CHUNK') {
+        final idx = (envelope['idx'] as int?) ?? 0;
+        final tot = (envelope['tot'] as int?) ?? 1;
+        shouldSendAck = (idx == tot - 1) || (tot <= 4);
         await _handleIncomingFileChunk(senderId, contact, envelope);
+      } else if (kind == 'REACTION') {
+        final targetId = (envelope['targetId'] as String?) ?? '';
+        final emoji = (envelope['emoji'] as String?) ?? '👍';
+        for (final m in getMessagesFor(senderId)) {
+          if (m.msgId == targetId) {
+            if (m.reactions[senderId] == emoji) {
+              m.reactions.remove(senderId);
+            } else {
+              m.reactions[senderId] = emoji;
+            }
+            break;
+          }
+        }
+        unawaited(_triggerIncomingNotification(
+            senderId, contact.displayTitle, 'Реакция $emoji на сообщение'));
+        unawaited(_saveContactsAndChats());
       } else {
         final decodedText = (envelope['txt'] as String?) ?? '';
         final chatMsg = ChatMessage(
@@ -1597,7 +2282,7 @@ class MeshEngine {
           senderId: senderId,
           senderName: contact.displayTitle,
           text: decodedText,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
+          timestamp: now,
           isMe: false,
           isDelivered: true,
         );
@@ -1611,29 +2296,30 @@ class MeshEngine {
         unawaited(_saveContactsAndChats());
       }
 
-      // Отправляем подписанный ACK
-      final ackSig = await _ed25519.sign(
-        utf8.encode('ACK:${pkt.msgId}'),
-        keyPair: _signKeyPair,
-      );
-      final ackPkt = MeshPacket(
-        type: 'ACK',
-        msgId: pkt.msgId,
-        dstNodeId: senderId,
-        srcNickname: '',
-        srcSignPubHex: signPubHex,
-        srcDhPubHex: dhPubHex,
-        dstSignPubHex: pkt.dstSignPubHex,
-        ephPubHex: '',
-        nonceHex: '',
-        ciphertextHex: '',
-        macHex: '',
-        signatureHex: _toHex(ackSig.bytes),
-        expiresAt: pkt.expiresAt,
-        ttl: 7,
-      );
-      deliveredAcks[pkt.msgId] = ackPkt;
-      _floodAllTransports(ackPkt);
+      if (shouldSendAck) {
+        final ackSig = await _ed25519.sign(
+          utf8.encode('ACK|${pkt.msgId}|$senderId'),
+          keyPair: _signKeyPair,
+        );
+        final ackPkt = MeshPacket(
+          type: 'ACK',
+          msgId: pkt.msgId,
+          dstNodeId: senderId,
+          srcNickname: '',
+          srcSignPubHex: signPubHex,
+          srcDhPubHex: dhPubHex,
+          dstSignPubHex: pkt.dstSignPubHex,
+          ephPubHex: '',
+          nonceHex: '',
+          ciphertextHex: '',
+          macHex: '',
+          signatureHex: _toHex(ackSig.bytes),
+          expiresAt: pkt.expiresAt,
+          ttl: 7,
+        );
+        deliveredAcks[pkt.msgId] = ackPkt;
+        _floodAllTransports(ackPkt);
+      }
       onStateChanged();
       return;
     }
@@ -1656,12 +2342,22 @@ class MeshEngine {
     Map<String, dynamic> env,
   ) async {
     final fileId = env['fid'] as String;
-    final fileName = (env['fn'] as String?) ?? 'file.bin';
+    final rawName = (env['fn'] as String?) ?? 'file.bin';
+    final fileName = _sanitizeFileName(rawName);
     final totalSize = (env['fs'] as int?) ?? 0;
     final shaHex = (env['sha'] as String?) ?? '';
     final idx = (env['idx'] as int?) ?? 0;
     final tot = (env['tot'] as int?) ?? 1;
     final chunkBytes = base64Decode((env['b64'] as String?) ?? '');
+
+    if (tot <= 0 || tot > 12000 || totalSize > 155 * 1024 * 1024) return;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _incomingFiles.removeWhere((_, a) => now - a.createdAtMs > 900000);
+    if (!_incomingFiles.containsKey(fileId) &&
+        _incomingFiles.length >= maxConcurrentIncomingFiles) {
+      return;
+    }
 
     final assembly = _incomingFiles.putIfAbsent(
       fileId,
@@ -1671,6 +2367,7 @@ class MeshEngine {
         totalSize: totalSize,
         totalChunks: tot,
         sha256Hex: shaHex,
+        createdAtMs: now,
       ),
     );
     assembly.chunks[idx] = chunkBytes;
@@ -1690,8 +2387,8 @@ class MeshEngine {
         peerId: senderId,
         senderId: senderId,
         senderName: contact.displayTitle,
-        text: '📎 Прием файла: $fileName...',
-        timestamp: DateTime.now().millisecondsSinceEpoch,
+        text: '📎 Прием: $fileName...',
+        timestamp: now,
         isMe: false,
         isDelivered: false,
         fileName: fileName,
@@ -1714,19 +2411,26 @@ class MeshEngine {
 
       final actualHash = _toHex((await _sha256.hash(combined)).bytes);
       if (shaHex.isNotEmpty && actualHash != shaHex) {
-        existingMsg.text = '⚠️ Ошибка контрольной суммы файла $fileName';
+        existingMsg.text = '⚠️ Ошибка контрольной суммы $fileName';
         onStateChanged();
         return;
       }
 
+      String finalFileName = fileName;
+      if (!finalFileName.contains('.')) {
+        final ext = _detectMediaExtensionFromBytes(combined);
+        if (ext != null) {
+          finalFileName = '$finalFileName.$ext';
+        }
+      }
+
       final dir = await _getReceivedFilesDir();
-      final safeName =
-          fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._а-яА-ЯёЁ-]'), '_');
-      final savedFile = File('${dir.path}/${fileId}_$safeName');
+      final savedFile = File('${dir.path}/${fileId}_$finalFileName');
       await savedFile.writeAsBytes(combined, flush: true);
 
+      existingMsg.fileName = finalFileName;
       existingMsg.filePath = savedFile.path;
-      existingMsg.text = '📎 Файл: $fileName';
+      existingMsg.text = '📎 $finalFileName';
       existingMsg.isDelivered = true;
       existingMsg.transferProgress = 1.0;
 
@@ -1735,7 +2439,7 @@ class MeshEngine {
       }
       onMessageReceived(existingMsg);
       unawaited(_triggerIncomingNotification(
-          senderId, contact.displayTitle, '📎 Прислан файл: $fileName'));
+          senderId, contact.displayTitle, '📎 Получен медиафайл: $finalFileName'));
       unawaited(_saveContactsAndChats());
     }
     onStateChanged();
@@ -1748,10 +2452,10 @@ class MeshEngine {
   }) async {
     if (deliveredAcks.containsKey(ack.msgId)) return;
 
-    final stored = transitBuffer[ack.msgId];
+    final stored = transitBuffer[ack.msgId] ?? myPersistentOutbox[ack.msgId];
     if (stored != null) {
       final valid = await _ed25519.verify(
-        utf8.encode('ACK:${ack.msgId}'),
+        utf8.encode('ACK|${ack.msgId}|${ack.dstNodeId}'),
         signature: Signature(
           _fromHex(ack.signatureHex),
           publicKey: SimplePublicKey(
@@ -1762,6 +2466,9 @@ class MeshEngine {
       transitBuffer.remove(ack.msgId);
       myPersistentOutbox.remove(ack.msgId);
     }
+
+    // Если получен ACK за доставленный файл — убираем его из очереди авто-докачки!
+    pendingFileJobs.remove(ack.msgId);
 
     for (final list in chatHistory.values) {
       for (final m in list) {
@@ -1823,13 +2530,17 @@ class MeshEngine {
                   jsonDecode(utf8.decode(dg.data)) as Map<String, dynamic>;
               final peerId = data['id'] as String;
               final peerPort = data['p'] as int;
+              final peerDh = (data['dh'] as String?) ?? '';
+              final peerSign = (data['sg'] as String?) ?? '';
               final peerNick = (data['nick'] as String?) ?? '';
               final peerHw = (data['hw'] as String?) ?? '';
-              if (peerId != nodeId) {
+              if (peerId != nodeId &&
+                  !deletedContactIds.contains(peerId) &&
+                  peerDh.length == 64) {
                 _upsertContact(
                   nodeId: peerId,
-                  dhPubHex: data['dh'] as String,
-                  signPubHex: data['sg'] as String,
+                  dhPubHex: peerDh,
+                  signPubHex: peerSign,
                   nick: peerNick,
                   hwFingerprint: peerHw,
                   address: '${dg.address.address}:$peerPort',
@@ -1843,7 +2554,7 @@ class MeshEngine {
         onError: (_) {},
       );
 
-      _beaconTimer = Timer.periodic(const Duration(seconds: 6), (_) async {
+      _beaconTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
         if (nodeId.isEmpty || listenPort <= 0) return;
         await refreshNetworkCache();
         final beacon = utf8.encode(jsonEncode({
@@ -1870,7 +2581,6 @@ class MeshEngine {
           }
         }
 
-        // Авто-реконнект по сохраненным домашним IP известных друзей (при возвращении домой)
         for (final c in knownContacts.values) {
           if (!c.isOnline &&
               c.lastAddress.isNotEmpty &&
@@ -1922,7 +2632,7 @@ class MeshEngine {
 
       if (res == 'OK') {
         bleMeshActive = true;
-        _addLog('Wi-Fi + BLE Mesh активны');
+        _addLog('BLE Mesh активен');
         return true;
       } else {
         _addLog('Статус BLE: $res');
@@ -1956,27 +2666,30 @@ class MeshEngine {
 
   Future<void> _onBlePayload(String endpointId, String data) async {
     for (final line in const LineSplitter().convert(data)) {
-      if (line.trim().isEmpty) continue;
-      await _processIncomingJsonLine(
-        line,
-        remoteAddr: 'BLE:$endpointId',
-        onHello: (peerId, peerNick) async {
-          _blePeers[endpointId] = peerId;
-          _refreshOnlineStatuses();
-          _addLog('Подключен по BLE: $peerNick ($peerId)');
-          await _sendBleLine(endpointId, _buildPeerSyncJson());
-          _evictExpired();
-          for (final ack in deliveredAcks.values) {
-            await _sendBleLine(endpointId, jsonEncode(ack.toJson()));
-          }
-          for (final entry in transitBuffer.entries.toList()) {
-            await _sendBleLine(endpointId, jsonEncode(entry.value.toJson()));
-          }
-        },
-        replyDirect: (replyJson) =>
-            unawaited(_sendBleLine(endpointId, replyJson)),
-        excludeBleId: endpointId,
-      );
+      if (line.trim().isEmpty || line.length > maxLineLengthBytes) continue;
+      _rxProcessingChain = _rxProcessingChain.then((_) =>
+          _processIncomingJsonLine(
+            line,
+            remoteAddr: 'BLE:$endpointId',
+            onHello: (peerId, peerNick) async {
+              _blePeers[endpointId] = peerId;
+              _refreshOnlineStatuses();
+              _addLog('Подключен по BLE: $peerNick ($peerId)');
+              await _sendBleLine(endpointId, _buildPeerSyncJson());
+              _evictExpired();
+              for (final ack in deliveredAcks.values) {
+                await _sendBleLine(endpointId, jsonEncode(ack.toJson()));
+              }
+              for (final entry in transitBuffer.entries.toList()) {
+                await _sendBleLine(
+                    endpointId, jsonEncode(entry.value.toJson()));
+              }
+              unawaited(_resumePendingFilesForPeer(peerId));
+            },
+            replyDirect: (replyJson) =>
+                unawaited(_sendBleLine(endpointId, replyJson)),
+            excludeBleId: endpointId,
+          ));
     }
   }
 
