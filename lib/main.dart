@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -127,7 +128,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (target == null || target == MeshEngine.broadcastChannelId) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Пересылка зашифрованных медиа и файлов доступна в личных чатах'),
+          content: Text(
+              'Пересылка зашифрованных медиа и файлов доступна в личных чатах'),
         ),
       );
       return;
@@ -159,7 +161,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final ok = await _engine.startVoiceRecording();
       if (!ok && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Разрешите доступ к микрофону для записи голоса')),
+          const SnackBar(
+              content: Text('Проверьте доступ к микрофону для записи голоса')),
         );
       }
     } else {
@@ -236,7 +239,8 @@ class _HomeScreenState extends State<HomeScreen> {
             CircularProgressIndicator(),
             SizedBox(width: 16),
             Expanded(
-              child: Text('Тестирование крипто-ядра и замер пинга до друзей...'),
+              child:
+                  Text('Тестирование крипто-ядра и замер пинга до друзей...'),
             ),
           ],
         ),
@@ -254,7 +258,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Icon(Icons.speed, color: Colors.tealAccent),
             SizedBox(width: 8),
-            Expanded(child: Text('Бенчмарк Маяк v1.1')),
+            Expanded(child: Text('Бенчмарк Маяк v1.2')),
           ],
         ),
         content: SingleChildScrollView(
@@ -306,15 +310,18 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// ФИКС ЗУМА ФОТО: полноэкранный зум без обрезки черными рамками (SizedBox.expand + Clip.none + maxScale 6.0)!
   void _openFullScreenImage(String imagePath, String title) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => Scaffold(
           backgroundColor: Colors.black,
+          extendBodyBehindAppBar: true,
           appBar: AppBar(
-            backgroundColor: Colors.black87,
-            title: Text(title),
+            backgroundColor: Colors.black54,
+            elevation: 0,
+            title: Text(title, style: const TextStyle(fontSize: 15)),
             actions: [
               IconButton(
                 icon: const Icon(Icons.download),
@@ -330,13 +337,36 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          body: Center(
+          body: SizedBox.expand(
             child: InteractiveViewer(
+              clipBehavior: Clip.none,
+              panEnabled: true,
+              scaleEnabled: true,
               minScale: 0.5,
-              maxScale: 4.0,
-              child: Image.file(File(imagePath)),
+              maxScale: 6.0,
+              child: Center(
+                child: Image.file(
+                  File(imagePath),
+                  fit: BoxFit.contain,
+                ),
+              ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Открытие встроенного видеоплеера прямо внутри приложения!
+  void _openInAppVideoPlayer(String videoPath, String title) {
+    _engine.stopAudioPlayback();
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => InAppVideoPlayerScreen(
+          engine: _engine,
+          videoPath: videoPath,
+          title: title,
         ),
       ),
     );
@@ -489,7 +519,7 @@ class _HomeScreenState extends State<HomeScreen> {
             controller: scrollCtrl,
             children: [
               const Text(
-                'Управление узлом «Маяк v1.1.0»',
+                'Управление узлом «Маяк v1.2.0»',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 10),
@@ -519,7 +549,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         await _engine.requestIgnoreBatteryOptimizations();
                       },
                       icon: const Icon(Icons.battery_charging_full, size: 18),
-                      label: const Text('Разрешить работу в фоне (POCO/Xiaomi)'),
+                      label:
+                          const Text('Разрешить работу в фоне (POCO/Xiaomi)'),
                     ),
                   if (Platform.isWindows)
                     FilledButton.tonalIcon(
@@ -550,18 +581,16 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const Divider(height: 24),
               const Text(
-                'Что нового в версии v1.1.0:',
+                'Что нового в версии v1.2.0:',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
               const SizedBox(height: 6),
               const Text(
-                '• Запись голосовых сообщений (кнопка 🎤 справа) и отправка/прослушивание музыки прямо в чате.\n'
-                '• Поддержка выбора и быстрой пересылки видеофайлов (до 150 МБ) с кнопкой запуска видеоплеера.\n'
-                '• Реакции на сообщения (нажми на любое сообщение в чате, чтобы поставить 👍 ❤️ 🔥 😂).\n'
-                '• Встроенная панель смайликов 😊 (решает проблему клавиатуры на Tecno).\n'
-                '• Пробивные звуковые уведомления для POCO / Xiaomi и авто-докачка файлов при смене сети.\n'
-                '• Удаленные чаты запоминаются и больше не открываются после перезапуска, а телефон больше не включает сам Wi-Fi в оффлайне.',
+                '• Постоянный ключ подписи APK (mayak_release.jks): теперь новые версии APK ставятся прямо поверх старых кнопкой «Обновить» без конфликта пакетов и без потери чатов (плюс авто-бэкап переписки в Downloads/Mayak).\n'
+                '• Потоковая пересылка файлов и видео до 1 ГБ (1024 МБ) напрямую с диска с окнами подтверждения (не забивает память).\n'
+                '• Встроенный аудиоплеер с ползунком перемотки (Seek Bar) и запись голосовых сообщений 🎤 прямо внутри программы и на Android, и на Windows ПК!\n'
+                '• Встроенный видеоплеер прямо внутри приложения и исправленный зум фотографий на весь экран без черных рамок.',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
             ],
@@ -1096,7 +1125,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final fileReady = m.filePath != null && File(m.filePath!).existsSync();
-    final isPlayingThis =
+    final isThisAudioActive =
         fileReady && _engine.currentlyPlayingAudioPath == m.filePath;
 
     return Column(
@@ -1126,90 +1155,137 @@ class _HomeScreenState extends State<HomeScreen> {
             color: Colors.black26,
             borderRadius: BorderRadius.circular(10),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (m.isAudioFile && fileReady)
-                IconButton(
-                  icon: Icon(
-                    isPlayingThis
-                        ? Icons.stop_circle
-                        : Icons.play_circle_fill,
-                    color: Colors.tealAccent,
-                    size: 32,
-                  ),
-                  tooltip: isPlayingThis ? 'Остановить' : 'Прослушать',
-                  onPressed: () => _engine.togglePlayAudioFile(m.filePath!),
-                )
-              else if (m.isVideoFile && fileReady)
-                IconButton(
-                  icon: const Icon(
-                    Icons.play_circle_outline,
-                    color: Colors.amberAccent,
-                    size: 32,
-                  ),
-                  tooltip: 'Смотреть видео',
-                  onPressed: () => _engine.openFileExternal(m.filePath!),
-                )
-              else
-                Icon(
-                  m.isImageFile
-                      ? Icons.image
-                      : (m.isVideoFile
-                          ? Icons.videocam
-                          : (m.isAudioFile
-                              ? Icons.audiotrack
-                              : Icons.insert_drive_file)),
-                  color: Colors.tealAccent,
-                  size: 26,
-                ),
-              const SizedBox(width: 6),
-              Flexible(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      m.fileName!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (m.isAudioFile && fileReady)
+                    IconButton(
+                      icon: Icon(
+                        (isThisAudioActive && _engine.isAudioPlaying)
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_fill,
+                        color: Colors.tealAccent,
+                        size: 34,
                       ),
+                      tooltip: (isThisAudioActive && _engine.isAudioPlaying)
+                          ? 'Пауза'
+                          : 'Прослушать в программе',
+                      onPressed: () => _engine.togglePlayAudioFile(m.filePath!),
+                    )
+                  else if (m.isVideoFile && fileReady)
+                    IconButton(
+                      icon: const Icon(
+                        Icons.smart_display,
+                        color: Colors.amberAccent,
+                        size: 34,
+                      ),
+                      tooltip: 'Смотреть видео в программе',
+                      onPressed: () =>
+                          _openInAppVideoPlayer(m.filePath!, m.fileName!),
+                    )
+                  else
+                    Icon(
+                      m.isImageFile
+                          ? Icons.image
+                          : (m.isVideoFile
+                              ? Icons.videocam
+                              : (m.isAudioFile
+                                  ? Icons.audiotrack
+                                  : Icons.insert_drive_file)),
+                      color: Colors.tealAccent,
+                      size: 26,
                     ),
-                    Text(
-                      m.transferProgress < 1.0
-                          ? '${m.fileSizeFormatted} • Загрузка ${(m.transferProgress * 100).toInt()}%'
-                          : m.fileSizeFormatted,
-                      style:
-                          const TextStyle(fontSize: 11, color: Colors.white70),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          m.fileName!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                          ),
+                        ),
+                        Text(
+                          m.transferProgress < 1.0
+                              ? '${m.fileSizeFormatted} • Передача ${(m.transferProgress * 100).toInt()}%'
+                              : m.fileSizeFormatted,
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (fileReady) ...[
+                    IconButton(
+                      icon: const Icon(Icons.download,
+                          size: 20, color: Colors.tealAccent),
+                      tooltip: 'Сохранить в Загрузки/Mayak',
+                      onPressed: () async {
+                        final res = await _engine.saveReceivedFileToDownloads(
+                          m.filePath!,
+                          m.fileName!,
+                        );
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(res)),
+                        );
+                      },
                     ),
                   ],
-                ),
+                ],
               ),
-              if (fileReady) ...[
-                IconButton(
-                  icon: const Icon(Icons.open_in_new,
-                      size: 19, color: Colors.white70),
-                  tooltip: 'Открыть в плеере / системе',
-                  onPressed: () => _engine.openFileExternal(m.filePath!),
+              // ПОЛЗУНОК ПЕРЕМОТКИ АУДИО (Seek Bar) прямо внутри пузыря сообщения!
+              if (m.isAudioFile && isThisAudioActive)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Column(
+                    children: [
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 3,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6),
+                        ),
+                        child: Slider(
+                          value: _engine.audioPositionMs
+                              .toDouble()
+                              .clamp(0.0, _engine.audioDurationMs.toDouble()),
+                          min: 0.0,
+                          max: max(_engine.audioDurationMs.toDouble(), 1.0),
+                          activeColor: Colors.tealAccent,
+                          inactiveColor: Colors.white24,
+                          onChanged: (val) {
+                            _engine.seekAudioFile(val.round());
+                          },
+                        ),
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            MeshEngine.formatDurationMs(
+                                _engine.audioPositionMs),
+                            style: const TextStyle(
+                                fontSize: 10.5, color: Colors.white70),
+                          ),
+                          Text(
+                            MeshEngine.formatDurationMs(
+                                _engine.audioDurationMs),
+                            style: const TextStyle(
+                                fontSize: 10.5, color: Colors.white70),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.download,
-                      size: 20, color: Colors.tealAccent),
-                  tooltip: 'Сохранить в Загрузки/Mayak',
-                  onPressed: () async {
-                    final res = await _engine.saveReceivedFileToDownloads(
-                      m.filePath!,
-                      m.fileName!,
-                    );
-                    if (!mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(res)),
-                    );
-                  },
-                ),
-              ],
             ],
           ),
         ),
@@ -1231,7 +1307,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (chatId == null) {
       return const Center(
         child: Text(
-          'Выберите чат слева или подключите устройство,\nчтобы начать переписку, отправку голосовых, музыки, фото и видео.',
+          'Выберите чат слева или подключите устройство,\nчтобы начать переписку и обмен файлами до 1 ГБ.',
           textAlign: TextAlign.center,
           style: TextStyle(color: Colors.white38, fontSize: 14),
         ),
@@ -1246,7 +1322,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final subtitle = isBroadcast
         ? 'Видят все устройства поблизости (Онлайн: ${_engine.connectedPeersCount})'
         : (contact?.isOnline == true
-            ? '🟢 Прямая связь (${contact?.lastAddress ?? "P2P"}) • Sealed E2EE v2'
+            ? '🟢 Прямая связь (${contact?.lastAddress ?? "P2P"}) • Файлы до 1 ГБ'
             : '🟠 Через буфер Mesh («3 улицы») • Авто-докачка активна');
 
     final messages = _engine.getMessagesFor(chatId);
@@ -1326,7 +1402,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Text(
                       isBroadcast
                           ? 'Здесь отображаются открытые сообщения и реакции для всех вокруг.'
-                          : 'Защищенный E2EE v2 диалог с «$title».\nОтправляйте текст, смайлики 😊, голосовые 🎤, музыку 🎵, фото и видео 🎬.\nНажмите на любое сообщение, чтобы поставить реакцию 👍❤️🔥.',
+                          : 'Защищенный E2EE v2 диалог с «$title».\nОтправляйте текст, смайлики 😊, голосовые 🎤, музыку 🎵, фото и видео до 1 ГБ 🎬.\nНажмите на любое сообщение, чтобы поставить реакцию 👍❤️🔥.',
                       textAlign: TextAlign.center,
                       style:
                           const TextStyle(color: Colors.white38, fontSize: 13),
@@ -1347,7 +1423,6 @@ class _HomeScreenState extends State<HomeScreen> {
                         ? const Color(0xFF005C4B)
                         : const Color(0xFF1F2C34);
 
-                    // Группируем реакции по эмодзи
                     final reactionCounts = <String, int>{};
                     for (final emoji in m.reactions.values) {
                       reactionCounts[emoji] = (reactionCounts[emoji] ?? 0) + 1;
@@ -1585,7 +1660,251 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-/// Панель ввода со встроенной панелью смайликов 😊 (для Tecno и любых телефонов), выбором Фото/Видео, Музыки и записью Голосовых 🎤
+/// Встроенный видеоплеер прямо внутри приложения «Маяк» (с паузой, перемоткой Slider и -10с/+10с)
+class InAppVideoPlayerScreen extends StatefulWidget {
+  final MeshEngine engine;
+  final String videoPath;
+  final String title;
+
+  const InAppVideoPlayerScreen({
+    super.key,
+    required this.engine,
+    required this.videoPath,
+    required this.title,
+  });
+
+  @override
+  State<InAppVideoPlayerScreen> createState() => _InAppVideoPlayerScreenState();
+}
+
+class _InAppVideoPlayerScreenState extends State<InAppVideoPlayerScreen> {
+  int? _textureId;
+  int _videoWidth = 1280;
+  int _videoHeight = 720;
+  int _positionMs = 0;
+  int _durationMs = 1;
+  bool _isPlaying = true;
+  bool _loading = true;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _initVideo();
+  }
+
+  Future<void> _initVideo() async {
+    if (Platform.isAndroid) {
+      final res = await widget.engine.nativeChannel.invokeMapMethod<String, dynamic>(
+        'initInAppVideo',
+        {'path': widget.videoPath},
+      );
+      if (!mounted) return;
+      if (res != null) {
+        setState(() {
+          _textureId = res['textureId'] as int?;
+          _videoWidth = (res['width'] as int?) ?? 1280;
+          _videoHeight = (res['height'] as int?) ?? 720;
+          _durationMs = max((res['durationMs'] as int?) ?? 1, 1);
+          _loading = false;
+        });
+        _timer = Timer.periodic(const Duration(milliseconds: 300), (_) async {
+          final st = await widget.engine.nativeChannel
+              .invokeMapMethod<String, dynamic>(
+            'controlInAppVideo',
+            {'action': 'status', 'positionMs': 0},
+          );
+          if (!mounted || st == null) return;
+          setState(() {
+            _isPlaying = (st['isPlaying'] as bool?) ?? false;
+            _positionMs = (st['positionMs'] as int?) ?? 0;
+            _durationMs = max((st['durationMs'] as int?) ?? 1, 1);
+          });
+        });
+      } else {
+        setState(() => _loading = false);
+      }
+    } else {
+      // На Windows запускаем аудиодорожку через MCI и даем кнопку полноэкранного рендера
+      await widget.engine.togglePlayAudioFile(widget.videoPath);
+      if (mounted) {
+        setState(() => _loading = false);
+      }
+    }
+  }
+
+  Future<void> _sendControl(String action, [int posMs = 0]) async {
+    if (Platform.isAndroid) {
+      final st = await widget.engine.nativeChannel
+          .invokeMapMethod<String, dynamic>(
+        'controlInAppVideo',
+        {'action': action, 'positionMs': posMs},
+      );
+      if (!mounted || st == null) return;
+      setState(() {
+        _isPlaying = (st['isPlaying'] as bool?) ?? false;
+        _positionMs = (st['positionMs'] as int?) ?? 0;
+      });
+    } else if (Platform.isWindows) {
+      if (action == 'seek') {
+        await widget.engine.seekAudioFile(posMs);
+      } else {
+        await widget.engine.togglePlayAudioFile(widget.videoPath);
+      }
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    if (Platform.isAndroid) {
+      widget.engine.nativeChannel.invokeMethod('disposeInAppVideo');
+    } else {
+      widget.engine.stopAudioPlayback();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final aspect = _videoHeight > 0 ? (_videoWidth / _videoHeight) : (16 / 9);
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black87,
+        title: Text(widget.title, style: const TextStyle(fontSize: 15)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.download),
+            tooltip: 'Сохранить в Загрузки/Mayak',
+            onPressed: () async {
+              final msg = await widget.engine.saveReceivedFileToDownloads(
+                widget.videoPath,
+                widget.title,
+              );
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(msg)),
+              );
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: Center(
+              child: _loading
+                  ? const CircularProgressIndicator()
+                  : (_textureId != null
+                      ? AspectRatio(
+                          aspectRatio: aspect,
+                          child: Texture(textureId: _textureId!),
+                        )
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.movie,
+                                size: 72, color: Colors.tealAccent),
+                            const SizedBox(height: 12),
+                            Text(widget.title),
+                            const SizedBox(height: 12),
+                            FilledButton.icon(
+                              onPressed: () => widget.engine
+                                  .openFileExternal(widget.videoPath),
+                              icon: const Icon(Icons.fullscreen),
+                              label: const Text('Развернуть окно видео DirectX'),
+                            ),
+                          ],
+                        )),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            color: const Color(0xFF141C24),
+            child: Column(
+              children: [
+                Slider(
+                  value: (Platform.isAndroid
+                          ? _positionMs
+                          : widget.engine.audioPositionMs)
+                      .toDouble()
+                      .clamp(
+                          0.0,
+                          max(
+                              (Platform.isAndroid
+                                      ? _durationMs
+                                      : widget.engine.audioDurationMs)
+                                  .toDouble(),
+                              1.0)),
+                  min: 0.0,
+                  max: max(
+                      (Platform.isAndroid
+                              ? _durationMs
+                              : widget.engine.audioDurationMs)
+                          .toDouble(),
+                      1.0),
+                  activeColor: Colors.tealAccent,
+                  onChanged: (val) => _sendControl('seek', val.round()),
+                ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      MeshEngine.formatDurationMs(Platform.isAndroid
+                          ? _positionMs
+                          : widget.engine.audioPositionMs),
+                      style:
+                          const TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                    Row(
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.replay_10, size: 28),
+                          onPressed: () =>
+                              _sendControl('seek', max(0, _positionMs - 10000)),
+                        ),
+                        const SizedBox(width: 8),
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: Colors.tealAccent.shade700,
+                          child: IconButton(
+                            icon: Icon(
+                              _isPlaying ? Icons.pause : Icons.play_arrow,
+                              color: Colors.black,
+                              size: 28,
+                            ),
+                            onPressed: () =>
+                                _sendControl(_isPlaying ? 'pause' : 'play'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.forward_10, size: 28),
+                          onPressed: () => _sendControl(
+                              'seek', min(_durationMs, _positionMs + 10000)),
+                        ),
+                      ],
+                    ),
+                    Text(
+                      MeshEngine.formatDurationMs(Platform.isAndroid
+                          ? _durationMs
+                          : widget.engine.audioDurationMs),
+                      style:
+                          const TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class ChatInputBar extends StatefulWidget {
   final String hintText;
   final bool allowAttachments;
@@ -1650,8 +1969,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
       );
     } else {
       _ctrl.text = text + emoji;
-      _ctrl.selection =
-          TextSelection.collapsed(offset: _ctrl.text.length);
+      _ctrl.selection = TextSelection.collapsed(offset: _ctrl.text.length);
     }
   }
 
@@ -1667,8 +1985,9 @@ class _ChatInputBarState extends State<ChatInputBar> {
                 backgroundColor: Colors.teal,
                 child: Icon(Icons.perm_media, color: Colors.white),
               ),
-              title: const Text('Фото или Видео'),
-              subtitle: const Text('Отправить фотографию или видеоролик из галереи'),
+              title: const Text('Фото или Видео (до 1 ГБ)'),
+              subtitle: const Text(
+                  'Отправить фотографию или большой видеоролик из галереи'),
               onTap: () {
                 Navigator.pop(ctx);
                 widget.onPickMedia();
@@ -1680,7 +1999,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
                 child: Icon(Icons.music_note, color: Colors.white),
               ),
               title: const Text('Музыка или Аудиофайл'),
-              subtitle: const Text('Отправить трек (.mp3, .m4a, .wav, .ogg, .flac)'),
+              subtitle: const Text(
+                  'Отправить трек с проигрыванием и перемоткой в чате'),
               onTap: () {
                 Navigator.pop(ctx);
                 widget.onPickAudio();
@@ -1691,8 +2011,9 @@ class _ChatInputBarState extends State<ChatInputBar> {
                 backgroundColor: Colors.blueGrey,
                 child: Icon(Icons.insert_drive_file, color: Colors.white),
               ),
-              title: const Text('Любой файл / Документ'),
-              subtitle: const Text('Архивы, документы, APK и другие файлы (до 150 МБ)'),
+              title: const Text('Любой файл / Архив (до 1 ГБ)'),
+              subtitle:
+                  const Text('Потоковая передача больших файлов напрямую с диска'),
               onTap: () {
                 Navigator.pop(ctx);
                 widget.onPickFile();
@@ -1756,7 +2077,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
               if (widget.allowAttachments)
                 IconButton(
                   icon: const Icon(Icons.attach_file, color: Colors.tealAccent),
-                  tooltip: 'Прикрепить Фото, Видео, Музыку или Файл',
+                  tooltip: 'Прикрепить Фото, Видео, Музыку или Файл (до 1 ГБ)',
                   onPressed: _showAttachmentMenu,
                 ),
               Expanded(
@@ -1782,7 +2103,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
                   ),
                 ),
               ),
-              if (widget.allowAttachments && Platform.isAndroid) ...[
+              // Кнопка записи голосового сообщения теперь доступна и на Android, и на Windows ПК!
+              if (widget.allowAttachments) ...[
                 const SizedBox(width: 6),
                 CircleAvatar(
                   radius: 20,
