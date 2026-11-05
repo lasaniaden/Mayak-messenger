@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Native Bridge + File Picker + Stop Button v0.9.0
+      - name: Recreate Clean Android Platform & Inject Native Bridge v1.1.0
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
@@ -103,8 +103,8 @@ jobs:
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 9
-                  versionName = "0.9.0"
+                  versionCode = 11
+                  versionName = "1.1.0"
               }
 
               packaging {
@@ -157,8 +157,8 @@ jobs:
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 9
-                  versionName "0.9.0"
+                  versionCode 11
+                  versionName "1.1.0"
               }
 
               packagingOptions {
@@ -187,7 +187,21 @@ jobs:
           }
           """)
 
-          # 5. Записываем AndroidManifest.xml
+          # 5. Записываем AndroidManifest.xml:
+          #    - УБРАНО CHANGE_WIFI_STATE (теперь телефон НЕ включает сам Wi-Fi при работе без интернета!)
+          #    - Добавлен RECORD_AUDIO для записи голосовых сообщений
+          #    - Добавлен FileProvider для открытия полученных видео и музыки
+          res_xml_dir = "android/app/src/main/res/xml"
+          os.makedirs(res_xml_dir, exist_ok=True)
+          with open(os.path.join(res_xml_dir, "file_paths.xml"), "w") as f:
+              f.write("""<?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <cache-path name="cache" path="." />
+              <files-path name="files" path="." />
+              <external-path name="external" path="." />
+          </paths>
+          """)
+
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "w") as f:
               f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -197,13 +211,14 @@ jobs:
               <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
               <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
               <uses-feature android:name="android.hardware.wifi" android:required="false"/>
+              <uses-feature android:name="android.hardware.microphone" android:required="false"/>
 
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
               <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
               <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
               <uses-permission android:name="android.permission.VIBRATE"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
               <uses-permission android:name="android.permission.WAKE_LOCK"/>
@@ -231,6 +246,16 @@ jobs:
                   <meta-data
                       android:name="io.flutter.embedding.android.EnableImpeller"
                       android:value="false" />
+
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths" />
+                  </provider>
 
                   <service
                       android:name=".MayakBackgroundService"
@@ -262,7 +287,7 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем MainActivity.kt + MayakBackgroundService (с кнопкой полного выхода в шторке и нативным выбором файлов/фото)
+          # 6. Записываем MainActivity.kt (с пробивом уведомлений для POCO/Xiaomi, записью голосовых, плеером музыки и открытием видео)
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -271,6 +296,7 @@ jobs:
 
           import android.Manifest
           import android.app.Activity
+          import android.app.Notification
           import android.app.NotificationChannel
           import android.app.NotificationManager
           import android.app.PendingIntent
@@ -282,6 +308,10 @@ jobs:
           import android.content.pm.ServiceInfo
           import android.database.Cursor
           import android.location.LocationManager
+          import android.media.AudioAttributes
+          import android.media.MediaPlayer
+          import android.media.MediaRecorder
+          import android.media.RingtoneManager
           import android.net.ConnectivityManager
           import android.net.NetworkCapabilities
           import android.net.Uri
@@ -293,12 +323,16 @@ jobs:
           import android.os.IBinder
           import android.os.Looper
           import android.os.PowerManager
+          import android.os.VibrationEffect
+          import android.os.Vibrator
           import android.provider.MediaStore
           import android.provider.OpenableColumns
           import android.provider.Settings
+          import android.webkit.MimeTypeMap
           import androidx.core.app.ActivityCompat
           import androidx.core.app.NotificationCompat
           import androidx.core.content.ContextCompat
+          import androidx.core.content.FileProvider
           import com.google.android.gms.nearby.Nearby
           import com.google.android.gms.nearby.connection.AdvertisingOptions
           import com.google.android.gms.nearby.connection.ConnectionInfo
@@ -319,7 +353,6 @@ jobs:
           import java.util.Locale
           import kotlin.system.exitProcess
 
-          // Фоновая служба с честной кнопкой «Выключить и выйти» прямо в уведомлении шторки
           class MayakBackgroundService : Service() {
               companion object {
                   const val ACTION_STOP_SERVICE = "com.mayak.mesh.STOP_SERVICE"
@@ -356,7 +389,6 @@ jobs:
                       }
                       val pendingOpen = PendingIntent.getActivity(this, 0, openIntent, pFlags)
 
-                      // Интент для кнопки «Выключить и выйти» прямо в шторке
                       val stopIntent = Intent(this, MayakBackgroundService::class.java).apply {
                           action = ACTION_STOP_SERVICE
                       }
@@ -384,10 +416,13 @@ jobs:
                           acquire()
                       }
 
+                      // Берем WifiLock ТОЛЬКО если Wi-Fi реально включен пользователем (не включаем Wi-Fi сами!)
                       val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                      wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Mayak::BgWifiLock")?.apply {
-                          setReferenceCounted(false)
-                          acquire()
+                      if (wm != null && wm.isWifiEnabled) {
+                          wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Mayak::BgWifiLock")?.apply {
+                              setReferenceCounted(false)
+                              acquire()
+                          }
                       }
                   } catch (_: Throwable) {}
               }
@@ -436,7 +471,7 @@ jobs:
               }
 
               private val CHANNEL = "mayak/native"
-              private val NOTIF_CHANNEL_ID = "mayak_messages_channel_v2"
+              private val NOTIF_CHANNEL_ID = "mayak_poco_high_alert_v3"
               private var methodChannel: MethodChannel? = null
               private var multicastLock: WifiManager.MulticastLock? = null
               private var pendingPermResult: MethodChannel.Result? = null
@@ -445,6 +480,10 @@ jobs:
               private var serviceId: String = "com.p2pmesh.intercom"
               private var notifIdCounter = 1001
               private var isAppInForeground = true
+              private var mediaRecorder: MediaRecorder? = null
+              private var currentVoiceFilePath: String? = null
+              private var voiceStartMs: Long = 0L
+              private var mediaPlayer: MediaPlayer? = null
               private val connectedBleEndpoints = mutableSetOf<String>()
               private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -484,13 +523,22 @@ jobs:
               private fun createNotificationChannel() {
                   try {
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                          val audioAttr = AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                              .build()
                           val channel = NotificationChannel(
                               NOTIF_CHANNEL_ID,
-                              "Входящие сообщения Маяк",
+                              "Экстренные сообщения Маяк (POCO/MIUI)",
                               NotificationManager.IMPORTANCE_HIGH
                           ).apply {
-                              description = "Звуковые пуш-уведомления о новых сообщениях и файлах"
+                              description = "Пробивные уведомления о сообщениях со звуком и вибрацией"
                               enableVibration(true)
+                              vibrationPattern = longArrayOf(0, 280, 120, 280)
+                              lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                              setBypassDnd(true)
+                              setSound(soundUri, audioAttr)
                           }
                           val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                           nm?.createNotificationChannel(channel)
@@ -523,13 +571,52 @@ jobs:
                                   }
                               }
                               "pickFile" -> {
-                                  val onlyImages = call.argument<Boolean>("onlyImages") ?: false
+                                  val mode = call.argument<String>("mode") ?: "all"
                                   pendingFilePickResult = result
                                   val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                                      type = if (onlyImages) "image/*" else "*/*"
                                       addCategory(Intent.CATEGORY_OPENABLE)
+                                      putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+                                      when (mode) {
+                                          "media" -> {
+                                              type = "*/*"
+                                              putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+                                          }
+                                          "audio" -> {
+                                              type = "audio/*"
+                                          }
+                                          else -> {
+                                              type = "*/*"
+                                          }
+                                      }
                                   }
-                                  startActivityForResult(Intent.createChooser(intent, "Выберите файл или фото"), 7004)
+                                  startActivityForResult(Intent.createChooser(intent, "Выберите медиа или файл"), 7004)
+                              }
+                              "openFileExternal" -> {
+                                  val path = call.argument<String>("path") ?: ""
+                                  val ok = openFileWithSystemViewer(path)
+                                  result.success(ok)
+                              }
+                              "startVoiceRecord" -> {
+                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                      pendingPermResult = result
+                                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 7005)
+                                  } else {
+                                      val started = startVoiceRecordingInternal()
+                                      result.success(started)
+                                  }
+                              }
+                              "stopVoiceRecord" -> {
+                                  val info = stopVoiceRecordingInternal()
+                                  result.success(info)
+                              }
+                              "playAudioFile" -> {
+                                  val path = call.argument<String>("path") ?: ""
+                                  val ok = playAudioInternal(path)
+                                  result.success(ok)
+                              }
+                              "stopAudioFile" -> {
+                                  stopAudioInternal()
+                                  result.success(true)
                               }
                               "saveFileToDownloads" -> {
                                   val srcPath = call.argument<String>("path") ?: ""
@@ -565,7 +652,7 @@ jobs:
                                   val body = call.argument<String>("body") ?: ""
                                   val forceWhenOpen = call.argument<Boolean>("forceWhenOpen") ?: false
                                   if (!isAppInForeground || forceWhenOpen) {
-                                      showSystemNotification(title, body)
+                                      showSystemNotificationWithPocoBypass(title, body)
                                   }
                                   result.success(true)
                               }
@@ -612,6 +699,105 @@ jobs:
                   }
               }
 
+              private fun startVoiceRecordingInternal(): Boolean {
+                  return try {
+                      stopVoiceRecordingInternal()
+                      val outDir = File(cacheDir, "voice_notes").apply { mkdirs() }
+                      val outFile = File(outDir, "voice_${System.currentTimeMillis()}.m4a")
+                      val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                          MediaRecorder(this)
+                      } else {
+                          @Suppress("DEPRECATION")
+                          MediaRecorder()
+                      }
+                      recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+                      recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                      recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                      recorder.setAudioSamplingRate(16000)
+                      recorder.setAudioEncodingBitRate(24000)
+                      recorder.setOutputFile(outFile.absolutePath)
+                      recorder.prepare()
+                      recorder.start()
+                      mediaRecorder = recorder
+                      currentVoiceFilePath = outFile.absolutePath
+                      voiceStartMs = System.currentTimeMillis()
+                      true
+                  } catch (t: Throwable) {
+                      mediaRecorder = null
+                      false
+                  }
+              }
+
+              private fun stopVoiceRecordingInternal(): Map<String, Any>? {
+                  val rec = mediaRecorder ?: return null
+                  val path = currentVoiceFilePath
+                  mediaRecorder = null
+                  currentVoiceFilePath = null
+                  return try {
+                      rec.stop()
+                      rec.release()
+                      val durSec = ((System.currentTimeMillis() - voiceStartMs) / 1000L).coerceAtLeast(1L)
+                      if (path != null && File(path).exists() && File(path).length() > 0) {
+                          mapOf(
+                              "path" to path,
+                              "name" to "Голосовое_${durSec}сек.m4a",
+                              "size" to File(path).length(),
+                              "durationSec" to durSec
+                          )
+                      } else null
+                  } catch (_: Throwable) {
+                      try { rec.release() } catch (_: Throwable) {}
+                      null
+                  }
+              }
+
+              private fun playAudioInternal(path: String): Boolean {
+                  return try {
+                      stopAudioInternal()
+                      val mp = MediaPlayer()
+                      mp.setDataSource(path)
+                      mp.prepare()
+                      mp.start()
+                      mp.setOnCompletionListener {
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onAudioCompleted", path)
+                          }
+                      }
+                      mediaPlayer = mp
+                      true
+                  } catch (_: Throwable) {
+                      false
+                  }
+              }
+
+              private fun stopAudioInternal() {
+                  try {
+                      mediaPlayer?.stop()
+                  } catch (_: Throwable) {}
+                  try {
+                      mediaPlayer?.release()
+                  } catch (_: Throwable) {}
+                  mediaPlayer = null
+              }
+
+              private fun openFileWithSystemViewer(path: String): Boolean {
+                  return try {
+                      val file = File(path)
+                      if (!file.exists()) return false
+                      val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                      val ext = file.extension.lowercase(Locale.US)
+                      val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+                      val intent = Intent(Intent.ACTION_VIEW).apply {
+                          setDataAndType(uri, mime)
+                          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                      }
+                      startActivity(Intent.createChooser(intent, "Открыть файл"))
+                      true
+                  } catch (_: Throwable) {
+                      false
+                  }
+              }
+
               override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
                   super.onActivityResult(requestCode, resultCode, data)
                   if (requestCode == 7004) {
@@ -630,10 +816,36 @@ jobs:
                               if (it.moveToFirst()) {
                                   val idx = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                                   if (idx >= 0) {
-                                      displayName = it.getString(idx) ?: displayName
+                                      val rawName = it.getString(idx)
+                                      if (!rawName.isNullOrBlank()) {
+                                          displayName = rawName
+                                      }
                                   }
                               }
                           }
+
+                          val mime = contentResolver.getType(uri) ?: ""
+                          if (!displayName.contains(".")) {
+                              val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+                                  ?: when {
+                                      mime.contains("jpeg") || mime.contains("jpg") -> "jpg"
+                                      mime.contains("png") -> "png"
+                                      mime.contains("webp") -> "webp"
+                                      mime.contains("gif") -> "gif"
+                                      mime.contains("mp4") -> "mp4"
+                                      mime.contains("mkv") -> "mkv"
+                                      mime.contains("webm") -> "webm"
+                                      mime.contains("quicktime") || mime.contains("mov") -> "mov"
+                                      mime.contains("mpeg") || mime.contains("mp3") -> "mp3"
+                                      mime.contains("m4a") || mime.contains("mp4a") -> "m4a"
+                                      mime.contains("wav") -> "wav"
+                                      mime.contains("ogg") -> "ogg"
+                                      mime.contains("pdf") -> "pdf"
+                                      else -> "bin"
+                                  }
+                              displayName = "$displayName.$ext"
+                          }
+
                           val safeName = displayName.replace(Regex("[^a-zA-Z0-9._а-яА-ЯёЁ-]"), "_")
                           val outDir = File(cacheDir, "picked_files").apply { mkdirs() }
                           val outFile = File(outDir, "${System.currentTimeMillis()}_$safeName")
@@ -642,14 +854,22 @@ jobs:
                                   input.copyTo(output)
                               }
                           }
+                          if (!outFile.exists() || outFile.length() == 0L) {
+                              res.success(null)
+                              return
+                          }
                           res.success(
                               mapOf(
                                   "path" to outFile.absolutePath,
                                   "name" to displayName,
-                                  "size" to outFile.length()
+                                  "size" to outFile.length(),
+                                  "mime" to mime
                               )
                           )
                       } catch (t: Throwable) {
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNativeLog", "Ошибка чтения файла: ${t.message}")
+                          }
                           res.success(null)
                       }
                   }
@@ -728,16 +948,18 @@ jobs:
                   var vpnActive = false
                   try {
                       val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                      val ipInt = wifi?.connectionInfo?.ipAddress ?: 0
-                      if (ipInt != 0) {
-                          wifiIp = String.format(
-                              Locale.US,
-                              "%d.%d.%d.%d",
-                              ipInt and 0xff,
-                              ipInt shr 8 and 0xff,
-                              ipInt shr 16 and 0xff,
-                              ipInt shr 24 and 0xff
-                          )
+                      if (wifi != null && wifi.isWifiEnabled) {
+                          val ipInt = wifi.connectionInfo?.ipAddress ?: 0
+                          if (ipInt != 0) {
+                              wifiIp = String.format(
+                                  Locale.US,
+                                  "%d.%d.%d.%d",
+                                  ipInt and 0xff,
+                                  ipInt shr 8 and 0xff,
+                                  ipInt shr 16 and 0xff,
+                                  ipInt shr 24 and 0xff
+                              )
+                          }
                       }
                   } catch (_: Throwable) {}
 
@@ -759,13 +981,37 @@ jobs:
                   )
               }
 
-              private fun showSystemNotification(title: String, body: String) {
+              // ПРОБИВНЫЕ УВЕДОМЛЕНИЯ ДЛЯ POCO / XIAOMI (работают со звуком, вибрацией и пробуждением экрана даже при ограничениях оболочки MIUI/HyperOS)
+              private fun showSystemNotificationWithPocoBypass(title: String, body: String) {
+                  // 1. Принудительно подаем сигнал и вибрацию напрямую и будим экран на 3 секунды
                   try {
-                      if (Build.VERSION.SDK_INT >= 33) {
-                          if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                              return
-                          }
+                      val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                      @Suppress("DEPRECATION")
+                      val screenWake = pm?.newWakeLock(
+                          PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                          "Mayak::AlertWakeUp"
+                      )
+                      screenWake?.acquire(3000L)
+                  } catch (_: Throwable) {}
+
+                  try {
+                      val notifUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                      val ringtone = RingtoneManager.getRingtone(applicationContext, notifUri)
+                      ringtone?.play()
+                  } catch (_: Throwable) {}
+
+                  try {
+                      val vib = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          vib?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 250, 120, 250), -1))
+                      } else {
+                          @Suppress("DEPRECATION")
+                          vib?.vibrate(400)
                       }
+                  } catch (_: Throwable) {}
+
+                  // 2. Показываем системный баннер уведомления
+                  try {
                       val intent = Intent(this, MainActivity::class.java).apply {
                           flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                       }
@@ -780,8 +1026,11 @@ jobs:
                           .setSmallIcon(android.R.drawable.stat_notify_chat)
                           .setContentTitle(title)
                           .setContentText(body)
-                          .setPriority(NotificationCompat.PRIORITY_HIGH)
+                          .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                          .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                          .setPriority(NotificationCompat.PRIORITY_MAX)
                           .setDefaults(NotificationCompat.DEFAULT_ALL)
+                          .setFullScreenIntent(pendingIntent, true)
                           .setAutoCancel(true)
                           .setContentIntent(pendingIntent)
 
@@ -793,7 +1042,8 @@ jobs:
               private fun acquireWifiMulticastLock() {
                   try {
                       val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                      if (wifi != null && multicastLock == null) {
+                      // Захватываем MulticastLock ТОЛЬКО если Wi-Fi уже включен пользователем!
+                      if (wifi != null && wifi.isWifiEnabled && multicastLock == null) {
                           multicastLock = wifi.createMulticastLock("mayak_multicast_lock").apply {
                               setReferenceCounted(false)
                               acquire()
@@ -832,6 +1082,13 @@ jobs:
                       try {
                           if (requestCode == 7001) {
                               res.success(getMissingNearbyPermissions().isEmpty())
+                          } else if (requestCode == 7005) {
+                              val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                              if (granted) {
+                                  res.success(startVoiceRecordingInternal())
+                              } else {
+                                  res.success(false)
+                              }
                           } else if (requestCode == 7002 || requestCode == 7003) {
                               val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
                               res.success(granted)
@@ -995,6 +1252,7 @@ jobs:
 
               override fun onDestroy() {
                   if (currentInstance == this) currentInstance = null
+                  stopAudioInternal()
                   try {
                       multicastLock?.release()
                   } catch (_: Throwable) {}
