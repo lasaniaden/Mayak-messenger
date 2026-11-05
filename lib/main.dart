@@ -122,17 +122,17 @@ class _HomeScreenState extends State<HomeScreen> {
     _scrollToBottom();
   }
 
-  Future<void> _pickAndSendAttachment({required bool onlyImages}) async {
+  Future<void> _pickAndSendAttachment(String mode) async {
     final target = _activeChatId;
     if (target == null || target == MeshEngine.broadcastChannelId) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Пересылка зашифрованных файлов доступна в личных чатах'),
+          content: Text('Пересылка зашифрованных медиа и файлов доступна в личных чатах'),
         ),
       );
       return;
     }
-    final picked = await _engine.pickFileForChat(onlyImages: onlyImages);
+    final picked = await _engine.pickFileForChat(mode: mode);
     if (picked == null) return;
     final path = picked['path'] as String?;
     final name = picked['name'] as String?;
@@ -142,6 +142,168 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     setState(() {});
     _scrollToBottom();
+  }
+
+  Future<void> _toggleVoiceNoteRecording() async {
+    final target = _activeChatId;
+    if (target == null || target == MeshEngine.broadcastChannelId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Голосовые сообщения отправляются в личных чатах'),
+        ),
+      );
+      return;
+    }
+
+    if (!_engine.isRecordingVoice) {
+      final ok = await _engine.startVoiceRecording();
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Разрешите доступ к микрофону для записи голоса')),
+        );
+      }
+    } else {
+      final recInfo = await _engine.stopVoiceRecording();
+      if (recInfo != null) {
+        final path = recInfo['path'] as String?;
+        final name = recInfo['name'] as String?;
+        if (path != null && name != null) {
+          await _engine.sendFileMessage(target, filePath: path, fileName: name);
+          if (mounted) setState(() {});
+          _scrollToBottom();
+        }
+      }
+    }
+  }
+
+  void _showReactionPicker(ChatMessage msg) {
+    final target = _activeChatId;
+    if (target == null) return;
+    const emojis = ['👍', '❤️', '🔥', '😂', '😮', '👏', '💯', '🤝'];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A2530),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Поставить реакцию на сообщение',
+              style: TextStyle(fontSize: 13, color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: emojis
+                  .map(
+                    (e) => InkWell(
+                      borderRadius: BorderRadius.circular(24),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _engine.sendReaction(target, msg.msgId, e);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: Text(
+                          e,
+                          style: const TextStyle(fontSize: 26),
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showBenchmarkModal() async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(
+              child: Text('Тестирование крипто-ядра и замер пинга до друзей...'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final report = await _engine.runBenchmarkAndPing();
+    if (!mounted) return;
+    Navigator.pop(context);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.speed, color: Colors.tealAccent),
+            SizedBox(width: 8),
+            Expanded(child: Text('Бенчмарк Маяк v1.1')),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Производительность криптографии на устройстве:',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, color: Colors.tealAccent),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '• Потоковое шифрование ChaCha20-Poly1305: ${report.chachaMbPerSec.toStringAsFixed(1)} МБ/сек\n'
+                '• Рукопожатия X25519 + HKDF: ${report.x25519HandshakesPerSec} опер/сек\n'
+                '• Цифровые подписи Ed25519: ${report.ed25519SignsPerSec} пакет/сек',
+                style: const TextStyle(fontSize: 13),
+              ),
+              const Divider(height: 20),
+              const Text(
+                'Живой сетевой пинг (RTT) до подключенных узлов:',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold, color: Colors.tealAccent),
+              ),
+              const SizedBox(height: 6),
+              if (report.peerPingsMs.isEmpty)
+                const Text(
+                  'Нет активных прямых подключений для замера пинга.',
+                  style: TextStyle(fontSize: 12.5, color: Colors.white60),
+                )
+              else
+                ...report.peerPingsMs.entries.map(
+                  (e) => Text(
+                    '• ${e.key}: ${e.value >= 0 ? "${e.value} мс" : "Таймаут"}',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отлично'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _openFullScreenImage(String imagePath, String title) {
@@ -222,13 +384,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 12),
-            const Text(
-              '• Шифрование текста и файлов: Double X25519 + HKDF-SHA256 + ChaCha20-Poly1305\n'
-              '• Подпись каждого пакета и чанка: Ed25519\n'
-              '• Защита метаданных: Sealed Sender (промежуточные узлы не видят ваше имя и содержимое)',
-              style: TextStyle(fontSize: 11.5, color: Colors.white60),
-            ),
           ],
         ),
         actions: [
@@ -245,15 +400,22 @@ class _HomeScreenState extends State<HomeScreen> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Удалить «${contact.displayTitle}»?'),
-        content: Text(
-          'Узел (${contact.nodeId}) и переписка с ним будут удалены из списка.',
-          style: const TextStyle(fontSize: 13),
+        title: Text('Управление чатом «${contact.displayTitle}»'),
+        content: const Text(
+          'Вы можете очистить только переписку или полностью удалить контакт (он больше не появится автоматически после перезапуска).',
+          style: TextStyle(fontSize: 13),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Отмена'),
+          ),
+          OutlinedButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _engine.clearChatHistoryOnly(contact.nodeId);
+            },
+            child: const Text('Очистить СМС'),
           ),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
@@ -261,7 +423,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Navigator.pop(ctx);
               await _engine.deleteContact(contact.nodeId);
             },
-            child: const Text('Удалить'),
+            child: const Text('Удалить навсегда'),
           ),
         ],
       ),
@@ -327,7 +489,7 @@ class _HomeScreenState extends State<HomeScreen> {
             controller: scrollCtrl,
             children: [
               const Text(
-                'Управление узлом и Защита «Маяк v0.9.0»',
+                'Управление узлом «Маяк v1.1.0»',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 10),
@@ -336,6 +498,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 runSpacing: 8,
                 children: [
                   FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _showBenchmarkModal();
+                    },
+                    icon: const Icon(Icons.speed, size: 18),
+                    label: const Text('Запустить Бенчмарк и Пинг'),
+                  ),
+                  FilledButton.tonalIcon(
                     onPressed: () {
                       Navigator.pop(ctx);
                       _engine.scanLocalSubnet();
@@ -349,7 +519,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         await _engine.requestIgnoreBatteryOptimizations();
                       },
                       icon: const Icon(Icons.battery_charging_full, size: 18),
-                      label: const Text('Разрешить работу в фоне без сна'),
+                      label: const Text('Разрешить работу в фоне (POCO/Xiaomi)'),
                     ),
                   if (Platform.isWindows)
                     FilledButton.tonalIcon(
@@ -380,27 +550,18 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const Divider(height: 24),
               const Text(
-                '1. Пересылка зашифрованных фото и файлов (Новое в v0.9.0):',
+                'Что нового в версии v1.1.0:',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 6),
               const Text(
-                '• Нажми на иконку фото или скрепки слева от поля ввода сообщения в личном чате.\n'
-                '• Файл автоматически разрезается на блоки по 24 КБ, каждый блок шифруется сквозным ключом Double X25519 + ChaCha20-Poly1305 и проверяется по контрольной сумме SHA-256.\n'
-                '• Фотографии отображаются прямо внутри пузыря сообщения (нажми на фото для увеличения или сохранения в Загрузки).',
-                style: TextStyle(fontSize: 13, color: Colors.white70),
-              ),
-              const SizedBox(height: 14),
-              const Text(
-                '2. Вечная очередь исходящих и честный фоновый режим:',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, color: Colors.tealAccent),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                '• Если ты написал сообщения в оффлайне (горят часики ⏳) и перезагрузил телефон — сообщения сохранены на диске в зашифрованном виде и сами отправятся при появлении связи.\n'
-                '• Чтобы полностью остановить фоновое дежурство — нажми кнопку «Выключить и выйти» прямо на уведомлении в шторке Android или красную кнопку выше.',
+                '• Запись голосовых сообщений (кнопка 🎤 справа) и отправка/прослушивание музыки прямо в чате.\n'
+                '• Поддержка выбора и быстрой пересылки видеофайлов (до 150 МБ) с кнопкой запуска видеоплеера.\n'
+                '• Реакции на сообщения (нажми на любое сообщение в чате, чтобы поставить 👍 ❤️ 🔥 😂).\n'
+                '• Встроенная панель смайликов 😊 (решает проблему клавиатуры на Tecno).\n'
+                '• Пробивные звуковые уведомления для POCO / Xiaomi и авто-докачка файлов при смене сети.\n'
+                '• Удаленные чаты запоминаются и больше не открываются после перезапуска, а телефон больше не включает сам Wi-Fi в оффлайне.',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
             ],
@@ -426,7 +587,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 'Аппаратный отпечаток: ${_engine.myHwFingerprint}\n'
                 'Физические IP: ${_engine.cachedIps.join(", ")}\n'
                 'TCP-порт: ${_engine.listenPort}\n'
-                'Очередь отправки (Outbox): ${_engine.myPersistentOutbox.length}\n'
+                'Файлов в очереди докачки: ${_engine.pendingFileJobs.length}\n'
                 'Статус: ${_engine.lastStatusLog}',
                 style: const TextStyle(fontSize: 12, color: Colors.white70),
               ),
@@ -516,7 +677,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showMyQrModal() async {
-    await _engine.refreshNetworkCache();
+    await _engine.refreshNetworkCache(force: true);
     if (!mounted || _engine.cachedInviteCode.isEmpty) return;
     showDialog(
       context: context,
@@ -772,7 +933,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           size: 48, color: Colors.white24),
                       const SizedBox(height: 12),
                       const Text(
-                        'Пока нет найденных друзей.\n\n'
+                        'Пока нет активных чатов.\n\n'
                         '• В одной Wi-Fi сети или Точке доступа устройства находятся автоматически.\n'
                         '• Для Bluetooth-связи без Wi-Fi нажмите «Вкл BLE» на обоих телефонах.\n'
                         '• Или добавьте друга по IP / QR-коду кнопкой ниже.',
@@ -928,13 +1089,16 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildMessageContent(ChatMessage m) {
     final hasFile = m.fileName != null && m.fileName!.isNotEmpty;
     if (!hasFile) {
-      return SelectableText(
+      return Text(
         m.text,
-        style: const TextStyle(fontSize: 14.5, color: Colors.white),
+        style: const TextStyle(fontSize: 15, color: Colors.white),
       );
     }
 
     final fileReady = m.filePath != null && File(m.filePath!).existsSync();
+    final isPlayingThis =
+        fileReady && _engine.currentlyPlayingAudioPath == m.filePath;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -960,17 +1124,46 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
             color: Colors.black26,
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(10),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                m.isImageFile ? Icons.image : Icons.insert_drive_file,
-                color: Colors.tealAccent,
-                size: 24,
-              ),
-              const SizedBox(width: 8),
+              if (m.isAudioFile && fileReady)
+                IconButton(
+                  icon: Icon(
+                    isPlayingThis
+                        ? Icons.stop_circle
+                        : Icons.play_circle_fill,
+                    color: Colors.tealAccent,
+                    size: 32,
+                  ),
+                  tooltip: isPlayingThis ? 'Остановить' : 'Прослушать',
+                  onPressed: () => _engine.togglePlayAudioFile(m.filePath!),
+                )
+              else if (m.isVideoFile && fileReady)
+                IconButton(
+                  icon: const Icon(
+                    Icons.play_circle_outline,
+                    color: Colors.amberAccent,
+                    size: 32,
+                  ),
+                  tooltip: 'Смотреть видео',
+                  onPressed: () => _engine.openFileExternal(m.filePath!),
+                )
+              else
+                Icon(
+                  m.isImageFile
+                      ? Icons.image
+                      : (m.isVideoFile
+                          ? Icons.videocam
+                          : (m.isAudioFile
+                              ? Icons.audiotrack
+                              : Icons.insert_drive_file)),
+                  color: Colors.tealAccent,
+                  size: 26,
+                ),
+              const SizedBox(width: 6),
               Flexible(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -986,7 +1179,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     Text(
                       m.transferProgress < 1.0
-                          ? '${m.fileSizeFormatted} • ${(m.transferProgress * 100).toInt()}%'
+                          ? '${m.fileSizeFormatted} • Загрузка ${(m.transferProgress * 100).toInt()}%'
                           : m.fileSizeFormatted,
                       style:
                           const TextStyle(fontSize: 11, color: Colors.white70),
@@ -995,7 +1188,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
               if (fileReady) ...[
-                const SizedBox(width: 6),
+                IconButton(
+                  icon: const Icon(Icons.open_in_new,
+                      size: 19, color: Colors.white70),
+                  tooltip: 'Открыть в плеере / системе',
+                  onPressed: () => _engine.openFileExternal(m.filePath!),
+                ),
                 IconButton(
                   icon: const Icon(Icons.download,
                       size: 20, color: Colors.tealAccent),
@@ -1033,7 +1231,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (chatId == null) {
       return const Center(
         child: Text(
-          'Выберите чат слева или подключите устройство,\nчтобы начать защищенную переписку и обмен файлами.',
+          'Выберите чат слева или подключите устройство,\nчтобы начать переписку, отправку голосовых, музыки, фото и видео.',
           textAlign: TextAlign.center,
           style: TextStyle(color: Colors.white38, fontSize: 14),
         ),
@@ -1049,7 +1247,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ? 'Видят все устройства поблизости (Онлайн: ${_engine.connectedPeersCount})'
         : (contact?.isOnline == true
             ? '🟢 Прямая связь (${contact?.lastAddress ?? "P2P"}) • Sealed E2EE v2'
-            : '🟠 Через буфер Mesh («3 улицы») • Sealed E2EE v2');
+            : '🟠 Через буфер Mesh («3 улицы») • Авто-докачка активна');
 
     final messages = _engine.getMessagesFor(chatId);
 
@@ -1113,7 +1311,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 IconButton(
                   icon: const Icon(Icons.delete_outline,
                       color: Colors.white54, size: 20),
-                  tooltip: 'Удалить контакт',
+                  tooltip: 'Очистить или удалить чат',
                   onPressed: () => _confirmDeleteContact(contact),
                 ),
               ],
@@ -1127,8 +1325,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     padding: const EdgeInsets.all(24),
                     child: Text(
                       isBroadcast
-                          ? 'Здесь отображаются открытые сообщения для всех участников вокруг вас.'
-                          : 'Защищенный E2EE v2 диалог с «$title».\nМожно отправлять текст, фотографии и файлы до 25 МБ без интернета.',
+                          ? 'Здесь отображаются открытые сообщения и реакции для всех вокруг.'
+                          : 'Защищенный E2EE v2 диалог с «$title».\nОтправляйте текст, смайлики 😊, голосовые 🎤, музыку 🎵, фото и видео 🎬.\nНажмите на любое сообщение, чтобы поставить реакцию 👍❤️🔥.',
                       textAlign: TextAlign.center,
                       style:
                           const TextStyle(color: Colors.white38, fontSize: 13),
@@ -1149,66 +1347,107 @@ class _HomeScreenState extends State<HomeScreen> {
                         ? const Color(0xFF005C4B)
                         : const Color(0xFF1F2C34);
 
+                    // Группируем реакции по эмодзи
+                    final reactionCounts = <String, int>{};
+                    for (final emoji in m.reactions.values) {
+                      reactionCounts[emoji] = (reactionCounts[emoji] ?? 0) + 1;
+                    }
+
                     return Column(
                       crossAxisAlignment: align,
                       children: [
-                        Container(
-                          constraints: const BoxConstraints(maxWidth: 340),
-                          margin: const EdgeInsets.symmetric(vertical: 4),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: bubbleColor,
-                            borderRadius: BorderRadius.only(
-                              topLeft: const Radius.circular(14),
-                              topRight: const Radius.circular(14),
-                              bottomLeft:
-                                  Radius.circular(m.isMe ? 14 : 3),
-                              bottomRight:
-                                  Radius.circular(m.isMe ? 3 : 14),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              if (!m.isMe && isBroadcast)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 3),
-                                  child: Text(
-                                    m.senderName,
-                                    style: const TextStyle(
-                                      fontSize: 11.5,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.tealAccent,
-                                    ),
-                                  ),
-                                ),
-                              _buildMessageContent(m),
-                              const SizedBox(height: 3),
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  Text(
-                                    m.timeFormatted,
-                                    style: const TextStyle(
-                                        fontSize: 10.5, color: Colors.white60),
-                                  ),
-                                  if (m.isMe) ...[
-                                    const SizedBox(width: 5),
-                                    Icon(
-                                      m.isDelivered
-                                          ? Icons.done_all
-                                          : Icons.schedule,
-                                      size: 14,
-                                      color: m.isDelivered
-                                          ? Colors.lightBlueAccent
-                                          : Colors.white54,
-                                    ),
-                                  ],
-                                ],
+                        GestureDetector(
+                          onTap: () => _showReactionPicker(m),
+                          onLongPress: () => _showReactionPicker(m),
+                          child: Container(
+                            constraints: const BoxConstraints(maxWidth: 340),
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: bubbleColor,
+                              borderRadius: BorderRadius.only(
+                                topLeft: const Radius.circular(14),
+                                topRight: const Radius.circular(14),
+                                bottomLeft:
+                                    Radius.circular(m.isMe ? 14 : 3),
+                                bottomRight:
+                                    Radius.circular(m.isMe ? 3 : 14),
                               ),
-                            ],
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (!m.isMe && isBroadcast)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 3),
+                                    child: Text(
+                                      m.senderName,
+                                      style: const TextStyle(
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.tealAccent,
+                                      ),
+                                    ),
+                                  ),
+                                _buildMessageContent(m),
+                                if (reactionCounts.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 6),
+                                    child: Wrap(
+                                      spacing: 4,
+                                      runSpacing: 4,
+                                      children: reactionCounts.entries
+                                          .map(
+                                            (e) => Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 7,
+                                                      vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: Colors.black38,
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: Text(
+                                                e.value > 1
+                                                    ? '${e.key} ${e.value}'
+                                                    : e.key,
+                                                style: const TextStyle(
+                                                    fontSize: 13),
+                                              ),
+                                            ),
+                                          )
+                                          .toList(),
+                                    ),
+                                  ),
+                                const SizedBox(height: 3),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    Text(
+                                      m.timeFormatted,
+                                      style: const TextStyle(
+                                          fontSize: 10.5,
+                                          color: Colors.white60),
+                                    ),
+                                    if (m.isMe) ...[
+                                      const SizedBox(width: 5),
+                                      Icon(
+                                        m.isDelivered
+                                            ? Icons.done_all
+                                            : Icons.schedule,
+                                        size: 14,
+                                        color: m.isDelivered
+                                            ? Colors.lightBlueAccent
+                                            : Colors.white54,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ],
@@ -1219,11 +1458,14 @@ class _HomeScreenState extends State<HomeScreen> {
         ChatInputBar(
           hintText: isBroadcast
               ? 'Сообщение всем вокруг...'
-              : 'Сообщение или файл для $title...',
+              : 'Сообщение для $title...',
           allowAttachments: !isBroadcast,
+          isRecordingVoice: _engine.isRecordingVoice,
           onSend: _sendTextMessage,
-          onPickImage: () => _pickAndSendAttachment(onlyImages: true),
-          onPickFile: () => _pickAndSendAttachment(onlyImages: false),
+          onPickMedia: () => _pickAndSendAttachment('media'),
+          onPickAudio: () => _pickAndSendAttachment('audio'),
+          onPickFile: () => _pickAndSendAttachment('all'),
+          onToggleVoiceRecord: _toggleVoiceNoteRecording,
         ),
       ],
     );
@@ -1275,6 +1517,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
               actions: [
+                IconButton(
+                  icon: const Icon(Icons.speed, color: Colors.tealAccent),
+                  tooltip: 'Бенчмарк и Пинг',
+                  onPressed: _showBenchmarkModal,
+                ),
                 IconButton(
                   icon: const Icon(Icons.person_add_alt_1),
                   tooltip: 'Добавить по IP или коду',
@@ -1338,21 +1585,27 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-/// Изолированная панель ввода с кнопками прикрепления фото и файлов
+/// Панель ввода со встроенной панелью смайликов 😊 (для Tecno и любых телефонов), выбором Фото/Видео, Музыки и записью Голосовых 🎤
 class ChatInputBar extends StatefulWidget {
   final String hintText;
   final bool allowAttachments;
+  final bool isRecordingVoice;
   final Future<void> Function(String text) onSend;
-  final VoidCallback onPickImage;
+  final VoidCallback onPickMedia;
+  final VoidCallback onPickAudio;
   final VoidCallback onPickFile;
+  final VoidCallback onToggleVoiceRecord;
 
   const ChatInputBar({
     super.key,
     required this.hintText,
     required this.allowAttachments,
+    required this.isRecordingVoice,
     required this.onSend,
-    required this.onPickImage,
+    required this.onPickMedia,
+    required this.onPickAudio,
     required this.onPickFile,
+    required this.onToggleVoiceRecord,
   });
 
   @override
@@ -1362,6 +1615,14 @@ class ChatInputBar extends StatefulWidget {
 class _ChatInputBarState extends State<ChatInputBar> {
   final TextEditingController _ctrl = TextEditingController();
   final FocusNode _focus = FocusNode();
+  bool _showEmojiPanel = false;
+
+  static const List<String> _builtInEmojis = [
+    '😀', '😂', '🤣', '😊', '😍', '😎', '🤝', '👍',
+    '👎', '❤️', '🔥', '💯', '🎉', '👏', '🙏', '💪',
+    '🤔', '😮', '😢', '😡', '🥳', '🤩', '🫡', '🤫',
+    '✅', '❌', '⚡', '📡', '🛡️', '🔒', '📍', '🚀',
+  ];
 
   @override
   void dispose() {
@@ -1378,56 +1639,182 @@ class _ChatInputBarState extends State<ChatInputBar> {
     widget.onSend(text);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-      color: const Color(0xFF18222C),
-      child: Row(
-        children: [
-          if (widget.allowAttachments) ...[
-            IconButton(
-              icon: const Icon(Icons.photo_outlined, color: Colors.tealAccent),
-              tooltip: 'Отправить фото',
-              onPressed: widget.onPickImage,
+  void _insertEmoji(String emoji) {
+    final text = _ctrl.text;
+    final sel = _ctrl.selection;
+    if (sel.isValid && sel.start >= 0) {
+      final newText = text.replaceRange(sel.start, sel.end, emoji);
+      _ctrl.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: sel.start + emoji.length),
+      );
+    } else {
+      _ctrl.text = text + emoji;
+      _ctrl.selection =
+          TextSelection.collapsed(offset: _ctrl.text.length);
+    }
+  }
+
+  void _showAttachmentMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A2530),
+      builder: (ctx) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const CircleAvatar(
+                backgroundColor: Colors.teal,
+                child: Icon(Icons.perm_media, color: Colors.white),
+              ),
+              title: const Text('Фото или Видео'),
+              subtitle: const Text('Отправить фотографию или видеоролик из галереи'),
+              onTap: () {
+                Navigator.pop(ctx);
+                widget.onPickMedia();
+              },
             ),
-            IconButton(
-              icon: const Icon(Icons.attach_file, color: Colors.white70),
-              tooltip: 'Отправить любой файл',
-              onPressed: widget.onPickFile,
+            ListTile(
+              leading: const CircleAvatar(
+                backgroundColor: Colors.deepPurple,
+                child: Icon(Icons.music_note, color: Colors.white),
+              ),
+              title: const Text('Музыка или Аудиофайл'),
+              subtitle: const Text('Отправить трек (.mp3, .m4a, .wav, .ogg, .flac)'),
+              onTap: () {
+                Navigator.pop(ctx);
+                widget.onPickAudio();
+              },
+            ),
+            ListTile(
+              leading: const CircleAvatar(
+                backgroundColor: Colors.blueGrey,
+                child: Icon(Icons.insert_drive_file, color: Colors.white),
+              ),
+              title: const Text('Любой файл / Документ'),
+              subtitle: const Text('Архивы, документы, APK и другие файлы (до 150 МБ)'),
+              onTap: () {
+                Navigator.pop(ctx);
+                widget.onPickFile();
+              },
             ),
           ],
-          Expanded(
-            child: TextField(
-              controller: _ctrl,
-              focusNode: _focus,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration(
-                hintText: widget.hintText,
-                filled: true,
-                fillColor: const Color(0xFF23303C),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
-                ),
-                isDense: true,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          CircleAvatar(
-            radius: 22,
-            backgroundColor: Colors.tealAccent.shade700,
-            child: IconButton(
-              icon: const Icon(Icons.send, color: Colors.black, size: 20),
-              onPressed: _submit,
-            ),
-          ),
-        ],
+        ),
       ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_showEmojiPanel)
+          Container(
+            height: 150,
+            padding: const EdgeInsets.all(8),
+            color: const Color(0xFF141C24),
+            child: GridView.builder(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 8,
+                mainAxisSpacing: 4,
+                crossAxisSpacing: 4,
+              ),
+              itemCount: _builtInEmojis.length,
+              itemBuilder: (_, i) {
+                final e = _builtInEmojis[i];
+                return InkWell(
+                  onTap: () => _insertEmoji(e),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Center(
+                    child: Text(
+                      e,
+                      style: const TextStyle(fontSize: 22),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+          color: const Color(0xFF18222C),
+          child: Row(
+            children: [
+              IconButton(
+                icon: Icon(
+                  _showEmojiPanel
+                      ? Icons.keyboard
+                      : Icons.emoji_emotions_outlined,
+                  color: Colors.amberAccent,
+                ),
+                tooltip: 'Смайлики',
+                onPressed: () {
+                  setState(() => _showEmojiPanel = !_showEmojiPanel);
+                },
+              ),
+              if (widget.allowAttachments)
+                IconButton(
+                  icon: const Icon(Icons.attach_file, color: Colors.tealAccent),
+                  tooltip: 'Прикрепить Фото, Видео, Музыку или Файл',
+                  onPressed: _showAttachmentMenu,
+                ),
+              Expanded(
+                child: TextField(
+                  controller: _ctrl,
+                  focusNode: _focus,
+                  minLines: 1,
+                  maxLines: 4,
+                  keyboardType: TextInputType.multiline,
+                  decoration: InputDecoration(
+                    hintText: widget.isRecordingVoice
+                        ? '🔴 Идет запись голоса (нажми стоп)...'
+                        : widget.hintText,
+                    filled: true,
+                    fillColor: const Color(0xFF23303C),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
+                    ),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              if (widget.allowAttachments && Platform.isAndroid) ...[
+                const SizedBox(width: 6),
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: widget.isRecordingVoice
+                      ? Colors.redAccent
+                      : const Color(0xFF263542),
+                  child: IconButton(
+                    icon: Icon(
+                      widget.isRecordingVoice ? Icons.stop : Icons.mic,
+                      color: Colors.white,
+                      size: 19,
+                    ),
+                    tooltip: widget.isRecordingVoice
+                        ? 'Остановить и отправить голосовое'
+                        : 'Записать голосовое сообщение',
+                    onPressed: widget.onToggleVoiceRecord,
+                  ),
+                ),
+              ],
+              const SizedBox(width: 6),
+              CircleAvatar(
+                radius: 21,
+                backgroundColor: Colors.tealAccent.shade700,
+                child: IconButton(
+                  icon: const Icon(Icons.send, color: Colors.black, size: 19),
+                  onPressed: _submit,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
