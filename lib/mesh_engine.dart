@@ -8,7 +8,6 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-// Нативный мост к Windows Multimedia API (winmm.dll) для записи голосовых и проигрывания аудио с перемоткой прямо внутри программы на ПК!
 typedef _MciSendStringNative = Int32 Function(
   Pointer<Uint16> command,
   Pointer<Uint16> buffer,
@@ -89,7 +88,7 @@ class ChatMessage {
   String? filePath;
   String? fileName;
   int? fileSize;
-  double transferProgress; // 0.0 .. 1.0
+  double transferProgress;
   Map<String, String> reactions;
 
   ChatMessage({
@@ -227,7 +226,7 @@ class PendingFileJob {
       );
 }
 
-/// Потоковый сборщик больших файлов (до 1 ГБ) прямо на диск без хранения чанков в ОЗУ!
+/// Потоковый сборщик больших файлов (до 1 ГБ) с единым открытым дескриптором RandomAccessFile!
 class IncomingFileStreamAssembly {
   final String fileId;
   final String fileName;
@@ -235,6 +234,7 @@ class IncomingFileStreamAssembly {
   final int totalChunks;
   final String partFilePath;
   final int createdAtMs;
+  RandomAccessFile? openRaf;
   final Set<int> receivedChunkIndices = {};
 
   IncomingFileStreamAssembly({
@@ -244,6 +244,7 @@ class IncomingFileStreamAssembly {
     required this.totalChunks,
     required this.partFilePath,
     required this.createdAtMs,
+    this.openRaf,
   });
 }
 
@@ -258,6 +259,8 @@ class ContactProfile {
   String lastAddress;
   int unreadCount;
   int lastPingMs;
+  int packetsSeenCount;
+  int lastSeenTimestamp;
 
   ContactProfile({
     required this.nodeId,
@@ -270,6 +273,8 @@ class ContactProfile {
     this.lastAddress = '',
     this.unreadCount = 0,
     this.lastPingMs = -1,
+    this.packetsSeenCount = 0,
+    this.lastSeenTimestamp = 0,
   });
 
   String get displayTitle =>
@@ -387,9 +392,15 @@ class MeshEngine {
   static const int maxBufferPackets = 400;
   static const int maxLineLengthBytes = 220 * 1024;
   static const int maxConcurrentIncomingFiles = 8;
-  static const int fileChunkSize = 32 * 1024; // 32 КБ потоковый блок на диск (для файлов до 1 ГБ!)
+  static const int fileChunkSize = 32 * 1024;
   static const String serviceId = 'com.p2pmesh.intercom';
   static const MethodChannel _nativeChannel = MethodChannel('mayak/native');
+
+  // КРИПТОГРАФИЧЕСКАЯ ЗАЩИТА КОНСОЛИ АДМИНА (сама секретная фраза в коде НЕ хранится!)
+  static const String _adminAuthHashHex =
+      'f6e05d33ffb089dd5dc55f21aac369b78f87cf2f6bdeceff4b90769fb9b7e4cb';
+  static const String _adminMasterPubHex =
+      'c8710970e7334ca7849340676b1b3e7210b4ad1f6b24325c36b9c747df30a47f';
 
   final _ed25519 = Ed25519();
   final _x25519 = X25519();
@@ -399,6 +410,9 @@ class MeshEngine {
 
   late SimpleKeyPair _signKeyPair;
   late SimpleKeyPair _dhKeyPair;
+  SimpleKeyPair? _unlockedAdminMasterKeyPair;
+  bool isAdminUnlocked = false;
+
   String nodeId = '';
   String nickname = '';
   String dhPubHex = '';
@@ -417,7 +431,6 @@ class MeshEngine {
   bool gpsDisabledOnAndroid = false;
   bool notificationsEnabled = true;
 
-  // Запись голосовых и встроенный аудиоплеер с перемоткой
   bool isRecordingVoice = false;
   int _winVoiceStartMs = 0;
   String? currentlyPlayingAudioPath;
@@ -442,6 +455,10 @@ class MeshEngine {
   final Queue<String> _seenPacketQueue = Queue<String>();
   final Set<String> _seenPacketSet = {};
   final Set<String> deletedContactIds = {};
+
+  // Глобальный список забаненных администратором узлов и их аппаратных отпечатков
+  final Set<String> bannedNodeIds = {};
+  final Set<String> bannedHwFingerprints = {};
 
   final Map<String, List<int>> _staticSharedSecretCache = {};
   final Map<String, IncomingFileStreamAssembly> _incomingFiles = {};
@@ -471,6 +488,103 @@ class MeshEngine {
   }
 
   MethodChannel get nativeChannel => _nativeChannel;
+
+  bool isNodeBanned(String targetNodeId, [String hw = '']) {
+    if (bannedNodeIds.contains(targetNodeId)) return true;
+    if (hw.isNotEmpty && bannedHwFingerprints.contains(hw)) return true;
+    final c = knownContacts[targetNodeId];
+    if (c != null &&
+        c.hwFingerprint.isNotEmpty &&
+        bannedHwFingerprints.contains(c.hwFingerprint)) {
+      return true;
+    }
+    return false;
+  }
+
+  /// Проверка секретной фразы для открытия скрытой консоли Админа и генерации мастер-ключа Ed25519 в ОЗУ
+  Future<bool> tryUnlockAdminConsole(String candidatePhrase) async {
+    final clean = candidatePhrase.trim();
+    final digest =
+        await _sha256.hash(utf8.encode('MAYAK-ADMIN-AUTH-SALT-V1|$clean'));
+    if (_toHex(digest.bytes) != _adminAuthHashHex) {
+      return false;
+    }
+    final seedDigest =
+        await _sha256.hash(utf8.encode('MAYAK-ADMIN-ED25519-SEED-V1|$clean'));
+    _unlockedAdminMasterKeyPair =
+        await _ed25519.newKeyPairFromSeed(seedDigest.bytes);
+    isAdminUnlocked = true;
+    onStateChanged();
+    return true;
+  }
+
+  /// Подписанная мастер-ключом команда глобального Бана или Разбана узла по всей сети
+  Future<void> executeAdminBanOrUnban({
+    required String targetNodeId,
+    required bool ban,
+  }) async {
+    final masterKp = _unlockedAdminMasterKeyPair;
+    if (masterKp == null) return;
+
+    final targetHw = knownContacts[targetNodeId]?.hwFingerprint ?? '';
+    final action = ban ? 'BAN' : 'UNBAN';
+    if (ban) {
+      bannedNodeIds.add(targetNodeId);
+      if (targetHw.isNotEmpty) bannedHwFingerprints.add(targetHw);
+      _disconnectBannedPeerImmediately(targetNodeId);
+    } else {
+      bannedNodeIds.remove(targetNodeId);
+      if (targetHw.isNotEmpty) bannedHwFingerprints.remove(targetHw);
+    }
+    await _saveContactsAndChats();
+    onStateChanged();
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final pktId = _randomHex(12);
+    final expiresAt = now + 24 * 3600 * 1000;
+    final cmdPayloadJson = jsonEncode({
+      'act': action,
+      'target': targetNodeId,
+      'hw': targetHw,
+      'ts': now,
+    });
+    final b64Payload = base64Encode(utf8.encode(cmdPayloadJson));
+    final sigBytes =
+        utf8.encode('ADMIN_CMD|$pktId|$expiresAt|$b64Payload');
+    final adminSig = await _ed25519.sign(sigBytes, keyPair: masterKp);
+
+    final pkt = MeshPacket(
+      type: 'BROADCAST',
+      msgId: pktId,
+      dstNodeId: broadcastChannelId,
+      srcNickname: '',
+      srcSignPubHex: _adminMasterPubHex,
+      srcDhPubHex: dhPubHex,
+      dstSignPubHex: '',
+      ephPubHex: 'ADMIN_CMD',
+      nonceHex: '',
+      ciphertextHex: b64Payload,
+      macHex: '',
+      signatureHex: _toHex(adminSig.bytes),
+      expiresAt: expiresAt,
+      ttl: 7,
+    );
+
+    _markPacketSeen(pktId);
+    transitBuffer[pktId] = pkt;
+    _floodAllTransports(pkt);
+  }
+
+  void _disconnectBannedPeerImmediately(String targetNodeId) {
+    for (final entry in _tcpPeers.entries.toList()) {
+      if (entry.value == targetNodeId) {
+        _cleanupSocket(entry.key);
+      }
+    }
+    _blePeers.removeWhere((_, v) => v == targetNodeId);
+    transitBuffer.removeWhere((_, p) => p.dstNodeId == targetNodeId);
+    _refreshOnlineStatuses();
+  }
 
   bool _markPacketSeen(String id) {
     if (_seenPacketSet.contains(id)) return false;
@@ -527,6 +641,11 @@ class MeshEngine {
 
   Future<void> stopAllAndExitApp() async {
     await stopAudioPlayback();
+    for (final a in _incomingFiles.values) {
+      try {
+        await a.openRaf?.close();
+      } catch (_) {}
+    }
     await _saveContactsAndChats();
     if (Platform.isAndroid) {
       try {
@@ -733,7 +852,7 @@ class MeshEngine {
 
     await refreshNetworkCache(force: true);
     await _startLanAutoDiscovery();
-    _addLog('Защищенный узел v1.2 готов (порт $listenPort)');
+    _addLog('Защищенный узел v1.3 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -829,10 +948,15 @@ class MeshEngine {
       final deletedRaw = prefs.getStringList('deleted_contacts_v11') ?? [];
       deletedContactIds.addAll(deletedRaw);
 
+      final bannedIdsRaw = prefs.getStringList('banned_nodes_v13') ?? [];
+      bannedNodeIds.addAll(bannedIdsRaw);
+
+      final bannedHwRaw = prefs.getStringList('banned_hw_v13') ?? [];
+      bannedHwFingerprints.addAll(bannedHwRaw);
+
       String? contactsRaw = prefs.getString('saved_contacts_v7');
       String? chatsRaw = prefs.getString('saved_chats_v7');
 
-      // Если после переустановки SharedPreferences пуст — автоматически восстанавливаем чаты из резервной копии на диске!
       if ((contactsRaw == null || contactsRaw.isEmpty) &&
           (chatsRaw == null || chatsRaw.isEmpty)) {
         try {
@@ -909,6 +1033,8 @@ class MeshEngine {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(
           'deleted_contacts_v11', deletedContactIds.toList());
+      await prefs.setStringList('banned_nodes_v13', bannedNodeIds.toList());
+      await prefs.setStringList('banned_hw_v13', bannedHwFingerprints.toList());
 
       final contactsJson =
           jsonEncode(knownContacts.values.map((c) => c.toJson()).toList());
@@ -931,7 +1057,6 @@ class MeshEngine {
           pendingFileJobs.values.map((j) => j.toJson()).toList();
       await prefs.setString('saved_pending_files_v11', jsonEncode(filesList));
 
-      // Синхронно дублируем бэкап чатов во внешнюю папку Downloads/Mayak/.mayak_backup_v12.json
       try {
         final bkpFile = await _getExternalBackupFile();
         await bkpFile.writeAsString(jsonEncode({
@@ -973,6 +1098,7 @@ class MeshEngine {
 
   String _buildPeerSyncJson() {
     final peers = knownContacts.values
+        .where((c) => !isNodeBanned(c.nodeId, c.hwFingerprint))
         .map((c) => {
               'id': c.nodeId,
               'nick': c.nickname,
@@ -1280,7 +1406,6 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// ФИКС ОТПРАВКИ ФАЙЛОВ НА WINDOWS: принудительная кодировка UTF-8 для русских путей и окно поверх всех!
   Future<Map<String, dynamic>?> pickFileForChat({String mode = 'all'}) async {
     try {
       if (Platform.isAndroid) {
@@ -1328,7 +1453,6 @@ class MeshEngine {
     return null;
   }
 
-  /// Запись голосового сообщения (работает и на Android, и на Windows ПК!)
   Future<bool> startVoiceRecording() async {
     if (Platform.isAndroid) {
       try {
@@ -1394,7 +1518,6 @@ class MeshEngine {
     return null;
   }
 
-  /// Встроенный аудиоплеер с перемоткой (работает прямо внутри чата и на Android, и на Windows!)
   Future<void> togglePlayAudioFile(String filePath) async {
     if (Platform.isAndroid) {
       final info = await _nativeChannel
@@ -1613,8 +1736,6 @@ class MeshEngine {
     );
   }
 
-  /// ПОТОКОВАЯ ПЕРЕДАЧА БОЛЬШИХ ФАЙЛОВ И ВИДЕО ДО 1 ГБ (1024 МБ) БЕЗ ЗАГРУЗКИ В ОЗУ!
-  /// Читает файл с диска кусочками по 32 КБ через RandomAccessFile и ждет подтверждения окна каждые 16 чанков!
   Future<void> sendFileMessage(
     String targetNodeId, {
     required String filePath,
@@ -1622,7 +1743,7 @@ class MeshEngine {
     String? existingFileId,
   }) async {
     final contact = knownContacts[targetNodeId];
-    if (contact == null) return;
+    if (contact == null || isNodeBanned(targetNodeId)) return;
 
     final file = File(filePath);
     if (!await file.exists()) {
@@ -1749,7 +1870,6 @@ class MeshEngine {
           }
 
           if (winWaiter != null) {
-            // Ждем подтверждения приема окна (512 КБ) от получателя, чтобы сокет никогда не захлебывался на файлах до 1 ГБ!
             await winWaiter.future.timeout(
               const Duration(milliseconds: 1200),
               onTimeout: () {},
@@ -1771,6 +1891,7 @@ class MeshEngine {
   }
 
   Future<void> _resumePendingFilesForPeer(String peerId) async {
+    if (isNodeBanned(peerId)) return;
     final jobs = pendingFileJobs.values
         .where((j) => j.targetNodeId == peerId && !j.isSending)
         .toList();
@@ -1835,7 +1956,6 @@ class MeshEngine {
         : cleaned;
   }
 
-  /// Постоянная папка для принятых файлов (не очищается системой!)
   Future<Directory> _getReceivedFilesDir() async {
     if (Platform.isAndroid) {
       try {
@@ -1955,6 +2075,7 @@ class MeshEngine {
 
     final isPeerConnected =
         _tcpPeers.containsValue(nodeId) || _blePeers.containsValue(nodeId);
+    final now = DateTime.now().millisecondsSinceEpoch;
     if (existing != null) {
       if (cleanNick.isNotEmpty && !cleanNick.startsWith('Узел ')) {
         existing.nickname = cleanNick;
@@ -1967,6 +2088,8 @@ class MeshEngine {
       }
       existing.isOnline = isPeerConnected;
       existing.isDirectPeer = isPeerConnected;
+      existing.packetsSeenCount++;
+      existing.lastSeenTimestamp = now;
     } else {
       knownContacts[nodeId] = ContactProfile(
         nodeId: nodeId,
@@ -1977,6 +2100,8 @@ class MeshEngine {
         isOnline: isPeerConnected,
         isDirectPeer: isPeerConnected,
         lastAddress: address ?? '',
+        packetsSeenCount: 1,
+        lastSeenTimestamp: now,
       );
     }
   }
@@ -1989,6 +2114,7 @@ class MeshEngine {
     bool forceNewConnection = false,
   }) async {
     if (port <= 0 || host == '127.0.0.1') return;
+    if (expectedNodeId != null && isNodeBanned(expectedNodeId)) return;
     if (!forceNewConnection) {
       for (final s in _tcpPeers.keys) {
         try {
@@ -2033,6 +2159,10 @@ class MeshEngine {
                   line,
                   remoteAddr: remoteAddr,
                   onHello: (peerId, peerNick) async {
+                    if (isNodeBanned(peerId)) {
+                      _cleanupSocket(socket);
+                      return;
+                    }
                     for (final entry in _tcpPeers.entries.toList()) {
                       if (entry.value == peerId && entry.key != socket) {
                         try {
@@ -2113,14 +2243,18 @@ class MeshEngine {
 
       if (map.containsKey('hello')) {
         final peerId = map['hello'] as String;
-        if (peerId == nodeId || deletedContactIds.contains(peerId)) return;
+        final peerHw = (map['hw'] as String?) ?? '';
+        if (peerId == nodeId ||
+            deletedContactIds.contains(peerId) ||
+            isNodeBanned(peerId, peerHw)) {
+          return;
+        }
         final peerDh = (map['dh'] as String?) ?? '';
         final peerSign = (map['sg'] as String?) ?? '';
         final expectedId = await _calcNodeId(_fromHex(peerDh));
         if (expectedId != peerId) return;
 
         final peerNick = (map['nick'] as String?) ?? '';
-        final peerHw = (map['hw'] as String?) ?? '';
         _upsertContact(
           nodeId: peerId,
           dhPubHex: peerDh,
@@ -2144,8 +2278,10 @@ class MeshEngine {
           final pid = m['id'] as String;
           final pdh = (m['dh'] as String?) ?? '';
           final psg = (m['sg'] as String?) ?? '';
+          final phw = (m['hw'] as String?) ?? '';
           if (pid != nodeId &&
               !deletedContactIds.contains(pid) &&
+              !isNodeBanned(pid, phw) &&
               !knownContacts.containsKey(pid)) {
             final expectedId = await _calcNodeId(_fromHex(pdh));
             if (expectedId == pid) {
@@ -2154,7 +2290,7 @@ class MeshEngine {
                 dhPubHex: pdh,
                 signPubHex: psg,
                 nick: (m['nick'] as String?) ?? 'Узел $pid',
-                hwFingerprint: (m['hw'] as String?) ?? '',
+                hwFingerprint: phw,
                 address: 'Через Mesh',
               );
               addedAny = true;
@@ -2323,6 +2459,7 @@ class MeshEngine {
   }
 
   Future<void> sendMessage(String targetNodeId, String plainText) async {
+    if (isNodeBanned(nodeId, myHwFingerprint)) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     final msgId = _randomHex(16);
 
@@ -2368,6 +2505,7 @@ class MeshEngine {
       return;
     }
 
+    if (isNodeBanned(targetNodeId)) return;
     deletedContactIds.remove(targetNodeId);
     final contact = knownContacts[targetNodeId];
     if (contact == null) return;
@@ -2417,6 +2555,54 @@ class MeshEngine {
 
     if (!_markPacketSeen(pkt.msgId)) return;
 
+    // 1. ПРОВЕРКА ПОДПИСАННОЙ КОМАНДЫ АДМИНИСТРАТОРА (ADMIN_CMD: BAN / UNBAN)
+    if (pkt.type == 'BROADCAST' && pkt.ephPubHex == 'ADMIN_CMD') {
+      final adminSigValid = await _ed25519.verify(
+        utf8.encode(
+            'ADMIN_CMD|${pkt.msgId}|${pkt.expiresAt}|${pkt.ciphertextHex}'),
+        signature: Signature(
+          _fromHex(pkt.signatureHex),
+          publicKey: SimplePublicKey(
+              _fromHex(_adminMasterPubHex), type: KeyPairType.ed25519),
+        ),
+      );
+      if (!adminSigValid) return;
+
+      final cmdMap = jsonDecode(utf8.decode(base64Decode(pkt.ciphertextHex)))
+          as Map<String, dynamic>;
+      final act = (cmdMap['act'] as String?) ?? '';
+      final target = (cmdMap['target'] as String?) ?? '';
+      final hw = (cmdMap['hw'] as String?) ?? '';
+
+      if (act == 'BAN' && target.isNotEmpty) {
+        bannedNodeIds.add(target);
+        if (hw.isNotEmpty) bannedHwFingerprints.add(hw);
+        _disconnectBannedPeerImmediately(target);
+        _addLog('🛡️ Узел $target заблокирован администратором сети');
+      } else if (act == 'UNBAN' && target.isNotEmpty) {
+        bannedNodeIds.remove(target);
+        if (hw.isNotEmpty) bannedHwFingerprints.remove(hw);
+        _addLog('🛡️ Блокировка узла $target снята администратором');
+      }
+      await _saveContactsAndChats();
+      if (pkt.ttl > 1) {
+        pkt.ttl -= 1;
+        transitBuffer[pkt.msgId] = pkt;
+        _floodAllTransports(
+          pkt,
+          excludeTcpSocket: excludeTcpSocket,
+          excludeBleId: excludeBleId,
+        );
+      }
+      onStateChanged();
+      return;
+    }
+
+    final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
+    if (isNodeBanned(senderId) || isNodeBanned(pkt.dstNodeId)) {
+      return;
+    }
+
     if (pkt.type == 'BROADCAST') {
       final sigValid = await _ed25519.verify(
         utf8.encode(
@@ -2428,8 +2614,6 @@ class MeshEngine {
         ),
       );
       if (!sigValid) return;
-
-      final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
       if (senderId == nodeId) return;
 
       if (pkt.ephPubHex == 'REACTION') {
@@ -2504,7 +2688,6 @@ class MeshEngine {
     if (!sigValid) return;
 
     if (pkt.dstNodeId == nodeId) {
-      final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
       final senderEphPub =
           SimplePublicKey(_fromHex(pkt.ephPubHex), type: KeyPairType.x25519);
 
@@ -2635,7 +2818,7 @@ class MeshEngine {
     }
   }
 
-  /// Потоковая запись чанков напрямую в файл на диске через RandomAccessFile (0 нагрузки на ОЗУ при файлах до 1 ГБ!)
+  /// ФИКС ЗАПИСИ ФАЙЛОВ ДО 1 ГБ: держим единый RandomAccessFile (FileMode.write) в сборщике, чтобы setPosition работал точно по смещению!
   Future<void> _handleIncomingFileChunk(
     String senderId,
     ContactProfile contact,
@@ -2652,7 +2835,17 @@ class MeshEngine {
     if (tot <= 0 || tot > 40000 || totalSize > 1050 * 1024 * 1024) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    _incomingFiles.removeWhere((_, a) => now - a.createdAtMs > 3600000);
+    final expiredIds = <String>[];
+    _incomingFiles.forEach((k, a) {
+      if (now - a.createdAtMs > 3600000) expiredIds.add(k);
+    });
+    for (final k in expiredIds) {
+      final old = _incomingFiles.remove(k);
+      try {
+        await old?.openRaf?.close();
+      } catch (_) {}
+    }
+
     if (!_incomingFiles.containsKey(fileId) &&
         _incomingFiles.length >= maxConcurrentIncomingFiles) {
       return;
@@ -2661,28 +2854,29 @@ class MeshEngine {
     final dir = await _getReceivedFilesDir();
     final partPath = '${dir.path}/${fileId}_$fileName.part';
 
-    final assembly = _incomingFiles.putIfAbsent(
-      fileId,
-      () => IncomingFileStreamAssembly(
+    var assembly = _incomingFiles[fileId];
+    if (assembly == null) {
+      final partFile = File(partPath);
+      final raf = await partFile.open(mode: FileMode.write);
+      assembly = IncomingFileStreamAssembly(
         fileId: fileId,
         fileName: fileName,
         totalSize: totalSize,
         totalChunks: tot,
         partFilePath: partPath,
         createdAtMs: now,
-      ),
-    );
+        openRaf: raf,
+      );
+      _incomingFiles[fileId] = assembly;
+    }
 
     if (!assembly.receivedChunkIndices.contains(idx)) {
-      final partFile = File(partPath);
-      final raf = await partFile.open(mode: FileMode.append);
-      try {
+      final raf = assembly.openRaf;
+      if (raf != null) {
         await raf.setPosition(idx * fileChunkSize);
         await raf.writeFrom(chunkBytes);
-      } finally {
-        await raf.close();
+        assembly.receivedChunkIndices.add(idx);
       }
-      assembly.receivedChunkIndices.add(idx);
     }
 
     final msgs = getMessagesFor(senderId);
@@ -2716,12 +2910,17 @@ class MeshEngine {
 
     if (assembly.receivedChunkIndices.length >= tot) {
       _incomingFiles.remove(fileId);
+      try {
+        await assembly.openRaf?.flush();
+        await assembly.openRaf?.close();
+      } catch (_) {}
+
       final partFile = File(partPath);
       String finalFileName = fileName;
       if (!finalFileName.contains('.')) {
-        final raf = await partFile.open(mode: FileMode.read);
-        final head = await raf.read(min(16, totalSize));
-        await raf.close();
+        final rafRead = await partFile.open(mode: FileMode.read);
+        final head = await rafRead.read(min(16, totalSize));
+        await rafRead.close();
         final ext = _detectMediaExtensionFromBytes(head);
         if (ext != null) {
           finalFileName = '$finalFileName.$ext';
@@ -2841,6 +3040,7 @@ class MeshEngine {
               final peerHw = (data['hw'] as String?) ?? '';
               if (peerId != nodeId &&
                   !deletedContactIds.contains(peerId) &&
+                  !isNodeBanned(peerId, peerHw) &&
                   peerDh.length == 64) {
                 _upsertContact(
                   nodeId: peerId,
@@ -2888,6 +3088,7 @@ class MeshEngine {
 
         for (final c in knownContacts.values) {
           if (!c.isOnline &&
+              !isNodeBanned(c.nodeId, c.hwFingerprint) &&
               c.lastAddress.isNotEmpty &&
               c.lastAddress.contains(':')) {
             final addrParts = c.lastAddress.split(':');
@@ -2977,6 +3178,7 @@ class MeshEngine {
             line,
             remoteAddr: 'BLE:$endpointId',
             onHello: (peerId, peerNick) async {
+              if (isNodeBanned(peerId)) return;
               _blePeers[endpointId] = peerId;
               _refreshOnlineStatuses();
               _addLog('Подключен по BLE: $peerNick ($peerId)');
