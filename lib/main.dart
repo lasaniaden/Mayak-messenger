@@ -229,6 +229,223 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// СКРЫТАЯ КОНСОЛЬ АДМИНА (открывается только по секретному мастер-ключу, без единого упоминания в UI!)
+  void _showHiddenAdminConsoleModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF111820),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          final allNodes = _engine.knownContacts.values.toList();
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.88,
+            maxChildSize: 0.96,
+            builder: (_, scrollCtrl) => Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.admin_panel_settings,
+                          color: Colors.redAccent, size: 26),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'ROOT-КОНСОЛЬ АДМИНИСТРАТОРА СЕТИ',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.redAccent,
+                          ),
+                        ),
+                      ),
+                      FilledButton.tonalIcon(
+                        onPressed: () async {
+                          for (final c in allNodes) {
+                            if (c.isOnline) {
+                              await _engine.pingPeer(c.nodeId);
+                            }
+                          }
+                          if (ctx.mounted) setModalState(() {});
+                        },
+                        icon: const Icon(Icons.network_ping, size: 16),
+                        label: const Text('Опросить сеть'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Мой узел: ${_engine.nodeId} • HW: ${_engine.myHwFingerprint} • IP: ${_engine.cachedIps.join(", ")}\n'
+                    'Всего известных узлов: ${allNodes.length} • В глобальном бане: ${_engine.bannedNodeIds.length}',
+                    style: const TextStyle(
+                        fontSize: 11.5,
+                        color: Colors.white70,
+                        fontFamily: 'monospace'),
+                  ),
+                  const Divider(height: 20),
+                  Expanded(
+                    child: allNodes.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'Пока нет обнаруженных узлов в сети.',
+                              style: TextStyle(color: Colors.white54),
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: scrollCtrl,
+                            itemCount: allNodes.length,
+                            itemBuilder: (_, i) {
+                              final c = allNodes[i];
+                              final banned = _engine.isNodeBanned(
+                                  c.nodeId, c.hwFingerprint);
+                              final lastDt = c.lastSeenTimestamp > 0
+                                  ? DateTime.fromMillisecondsSinceEpoch(
+                                      c.lastSeenTimestamp)
+                                  : null;
+                              final lastStr = lastDt != null
+                                  ? '${lastDt.hour.toString().padLeft(2, '0')}:${lastDt.minute.toString().padLeft(2, '0')}:${lastDt.second.toString().padLeft(2, '0')}'
+                                  : 'неизвестно';
+
+                              return Card(
+                                color: banned
+                                    ? const Color(0xFF2D161A)
+                                    : const Color(0xFF1A242F),
+                                margin: const EdgeInsets.only(bottom: 10),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Icon(
+                                            banned
+                                                ? Icons.block
+                                                : (c.isOnline
+                                                    ? Icons.sensors
+                                                    : Icons.portable_wifi_off),
+                                            color: banned
+                                                ? Colors.redAccent
+                                                : (c.isOnline
+                                                    ? Colors.greenAccent
+                                                    : Colors.orangeAccent),
+                                            size: 20,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              '${c.displayTitle} [ID: ${c.nodeId}]',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 14,
+                                              ),
+                                            ),
+                                          ),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 8, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: banned
+                                                  ? Colors.redAccent
+                                                  : (c.isOnline
+                                                      ? Colors.green.shade800
+                                                      : Colors.blueGrey),
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                            ),
+                                            child: Text(
+                                              banned
+                                                  ? 'ЗАБАНЕН'
+                                                  : (c.isOnline
+                                                      ? 'ОНЛАЙН'
+                                                      : 'ОФФЛАЙН'),
+                                              style: const TextStyle(
+                                                  fontSize: 10.5,
+                                                  fontWeight: FontWeight.bold),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        '📍 Сетевая точка / Маршрут: ${c.lastAddress.isNotEmpty ? c.lastAddress : "Неизвестно"}\n'
+                                        '🔑 HW-отпечаток железа: ${c.hwFingerprint.isNotEmpty ? c.hwFingerprint : "не передан"}\n'
+                                        '⚡ Пинг (RTT): ${c.lastPingMs >= 0 ? "${c.lastPingMs} мс" : "—"} • Пакетов: ${c.packetsSeenCount} • Активность: $lastStr',
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.white70,
+                                          fontFamily: 'monospace',
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.end,
+                                        children: [
+                                          if (!banned)
+                                            FilledButton.icon(
+                                              style: FilledButton.styleFrom(
+                                                backgroundColor:
+                                                    Colors.redAccent,
+                                              ),
+                                              onPressed: () async {
+                                                await _engine
+                                                    .executeAdminBanOrUnban(
+                                                  targetNodeId: c.nodeId,
+                                                  ban: true,
+                                                );
+                                                if (ctx.mounted) {
+                                                  setModalState(() {});
+                                                }
+                                              },
+                                              icon: const Icon(Icons.gavel,
+                                                  size: 16),
+                                              label: const Text(
+                                                  'Забанить в сети'),
+                                            )
+                                          else
+                                            FilledButton.icon(
+                                              style: FilledButton.styleFrom(
+                                                backgroundColor:
+                                                    Colors.teal.shade700,
+                                              ),
+                                              onPressed: () async {
+                                                await _engine
+                                                    .executeAdminBanOrUnban(
+                                                  targetNodeId: c.nodeId,
+                                                  ban: false,
+                                                );
+                                                if (ctx.mounted) {
+                                                  setModalState(() {});
+                                                }
+                                              },
+                                              icon: const Icon(
+                                                  Icons.lock_open,
+                                                  size: 16),
+                                              label: const Text('Разбанить'),
+                                            ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> _showBenchmarkModal() async {
     showDialog(
       context: context,
@@ -258,7 +475,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Icon(Icons.speed, color: Colors.tealAccent),
             SizedBox(width: 8),
-            Expanded(child: Text('Бенчмарк Маяк v1.2')),
+            Expanded(child: Text('Бенчмарк Маяк v1.3')),
           ],
         ),
         content: SingleChildScrollView(
@@ -310,7 +527,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// ФИКС ЗУМА ФОТО: полноэкранный зум без обрезки черными рамками (SizedBox.expand + Clip.none + maxScale 6.0)!
   void _openFullScreenImage(String imagePath, String title) {
     Navigator.push(
       context,
@@ -357,7 +573,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Открытие встроенного видеоплеера прямо внутри приложения!
   void _openInAppVideoPlayer(String videoPath, String title) {
     _engine.stopAudioPlayback();
     Navigator.push(
@@ -519,7 +734,7 @@ class _HomeScreenState extends State<HomeScreen> {
             controller: scrollCtrl,
             children: [
               const Text(
-                'Управление узлом «Маяк v1.2.0»',
+                'Управление узлом «Маяк v1.3.0»',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 10),
@@ -581,16 +796,16 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const Divider(height: 24),
               const Text(
-                'Что нового в версии v1.2.0:',
+                'Статус и возможности v1.3.0:',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, color: Colors.tealAccent),
               ),
               const SizedBox(height: 6),
               const Text(
-                '• Постоянный ключ подписи APK (mayak_release.jks): теперь новые версии APK ставятся прямо поверх старых кнопкой «Обновить» без конфликта пакетов и без потери чатов (плюс авто-бэкап переписки в Downloads/Mayak).\n'
-                '• Потоковая пересылка файлов и видео до 1 ГБ (1024 МБ) напрямую с диска с окнами подтверждения (не забивает память).\n'
-                '• Встроенный аудиоплеер с ползунком перемотки (Seek Bar) и запись голосовых сообщений 🎤 прямо внутри программы и на Android, и на Windows ПК!\n'
-                '• Встроенный видеоплеер прямо внутри приложения и исправленный зум фотографий на весь экран без черных рамок.',
+                '• Бесшовное обновление APK поверх старых версий (постоянный сертификат подписи + авто-бэкап переписки).\n'
+                '• Потоковая передача больших файлов и видео до 1 ГБ напрямую на диск без переполнения памяти.\n'
+                '• Встроенный аудиоплеер с перемоткой (Seek Bar) и запись голосовых сообщений 🎤 на Android и Windows ПК.\n'
+                '• Встроенный видеоплеер внутри приложения и полноэкранный зум фотографий.',
                 style: TextStyle(fontSize: 13, color: Colors.white70),
               ),
             ],
@@ -783,8 +998,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _handleConnectInput(String raw) async {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return;
+
+    // Тихая криптографическая проверка секретной фразы Админа (фраза нигде в коде не хранится!)
+    final isAdmin = await _engine.tryUnlockAdminConsole(trimmed);
+    if (isAdmin) {
+      _inviteCtrl.clear();
+      if (!mounted) return;
+      _showHiddenAdminConsoleModal();
+      return;
+    }
+
     try {
-      final id = await _engine.connectWithInviteOrIp(raw);
+      final id = await _engine.connectWithInviteOrIp(trimmed);
       if (!mounted) return;
       _inviteCtrl.clear();
       if (id != null) {
@@ -792,7 +1019,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       final label = id != null
           ? (_engine.knownContacts[id]?.displayTitle ?? id)
-          : raw.trim();
+          : trimmed;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Подключение к узлу: $label')),
       );
@@ -806,7 +1033,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildChatsListPane({required bool isWideScreen}) {
-    final contacts = _engine.knownContacts.values.toList()
+    final contacts = _engine.knownContacts.values
+        .where((c) => !_engine.isNodeBanned(c.nodeId, c.hwFingerprint))
+        .toList()
       ..sort((a, b) {
         if (a.isOnline != b.isOnline) return a.isOnline ? -1 : 1;
         final lastA = _engine.getLastMessageFor(a.nodeId)?.timestamp ?? 0;
@@ -1241,7 +1470,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ],
               ),
-              // ПОЛЗУНОК ПЕРЕМОТКИ АУДИО (Seek Bar) прямо внутри пузыря сообщения!
               if (m.isAudioFile && isThisAudioActive)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -1660,7 +1888,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-/// Встроенный видеоплеер прямо внутри приложения «Маяк» (с паузой, перемоткой Slider и -10с/+10с)
 class InAppVideoPlayerScreen extends StatefulWidget {
   final MeshEngine engine;
   final String videoPath;
@@ -1695,7 +1922,8 @@ class _InAppVideoPlayerScreenState extends State<InAppVideoPlayerScreen> {
 
   Future<void> _initVideo() async {
     if (Platform.isAndroid) {
-      final res = await widget.engine.nativeChannel.invokeMapMethod<String, dynamic>(
+      final res = await widget.engine.nativeChannel
+          .invokeMapMethod<String, dynamic>(
         'initInAppVideo',
         {'path': widget.videoPath},
       );
@@ -1725,7 +1953,6 @@ class _InAppVideoPlayerScreenState extends State<InAppVideoPlayerScreen> {
         setState(() => _loading = false);
       }
     } else {
-      // На Windows запускаем аудиодорожку через MCI и даем кнопку полноэкранного рендера
       await widget.engine.togglePlayAudioFile(widget.videoPath);
       if (mounted) {
         setState(() => _loading = false);
@@ -1814,7 +2041,8 @@ class _InAppVideoPlayerScreenState extends State<InAppVideoPlayerScreen> {
                               onPressed: () => widget.engine
                                   .openFileExternal(widget.videoPath),
                               icon: const Icon(Icons.fullscreen),
-                              label: const Text('Развернуть окно видео DirectX'),
+                              label:
+                                  const Text('Развернуть окно видео DirectX'),
                             ),
                           ],
                         )),
@@ -2012,8 +2240,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
                 child: Icon(Icons.insert_drive_file, color: Colors.white),
               ),
               title: const Text('Любой файл / Архив (до 1 ГБ)'),
-              subtitle:
-                  const Text('Потоковая передача больших файлов напрямую с диска'),
+              subtitle: const Text(
+                  'Потоковая передача больших файлов напрямую с диска'),
               onTap: () {
                 Navigator.pop(ctx);
                 widget.onPickFile();
@@ -2103,7 +2331,6 @@ class _ChatInputBarState extends State<ChatInputBar> {
                   ),
                 ),
               ),
-              // Кнопка записи голосового сообщения теперь доступна и на Android, и на Windows ПК!
               if (widget.allowAttachments) ...[
                 const SizedBox(width: 6),
                 CircleAvatar(
