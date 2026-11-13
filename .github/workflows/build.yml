@@ -9,7 +9,7 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Private Repo
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -25,16 +25,16 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + In-App Video/Audio Bridge v1.2.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.3.0
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
           python3 -c '
           import base64, glob, os, re
 
-          # 0. Восстанавливаем ПОСТОЯННЫЙ ключ подписи mayak_release.jks, чтобы APK всегда обновлялся поверх старой версии без конфликта пакетов!
-          ks_b64 = "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"
-          with open("android/app/mayak_release.jks", "wb") as kf:
+          # 0. Восстанавливаем постоянный ключ подписи mayak_release.jks для бесшовного обновления APK поверх старых версий
+          ks_b64 = "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"
+          os.makedirs("android/app", exist_ok=True); kf = open("android/app/mayak_release.jks", "wb") as kf:
               kf.write(base64.b64decode(ks_b64))
 
           # 1. Настраиваем gradle.properties
@@ -117,8 +117,8 @@ jobs:
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 12
-                  versionName = "1.2.0"
+                  versionCode = 13
+                  versionName = "1.3.0"
               }
 
               packaging {
@@ -183,8 +183,8 @@ jobs:
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 12
-                  versionName "1.2.0"
+                  versionCode 13
+                  versionName "1.3.0"
               }
 
               packagingOptions {
@@ -313,7 +313,7 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем MainActivity.kt (Встроенный видеоплеер через TextureRegistry + Аудиоплеер с перемоткой seekTo + Авто-бэкап чатов)
+          # 6. Записываем MainActivity.kt
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -509,14 +509,12 @@ jobs:
               private var notifIdCounter = 1001
               private var isAppInForeground = true
 
-              // Аудио и запись голоса
               private var mediaRecorder: MediaRecorder? = null
               private var currentVoiceFilePath: String? = null
               private var voiceStartMs: Long = 0L
               private var audioPlayer: MediaPlayer? = null
               private var currentAudioPath: String? = null
 
-              // Встроенный нативный видеоплеер через текстуру Flutter
               private var videoTextureEntry: TextureRegistry.SurfaceTextureEntry? = null
               private var videoSurface: Surface? = null
               private var videoPlayer: MediaPlayer? = null
@@ -782,7 +780,6 @@ jobs:
                   }
               }
 
-              // Встроенный видеоплеер через текстуру Flutter (играет видео прямо внутри приложения без сторонних плееров!)
               private fun initInAppVideoInternal(path: String): Map<String, Any>? {
                   return try {
                       disposeInAppVideoInternal()
@@ -1420,8 +1417,8 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Release APK
-        run: flutter build apk --release
+      - name: Build Obfuscated Release APK
+        run: flutter build apk --release --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -1432,7 +1429,7 @@ jobs:
   build-windows:
     runs-on: windows-2022
     steps:
-      - name: Checkout Private Repo
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
       - name: Setup Flutter 3.27.1
@@ -1450,8 +1447,8 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Windows Release
-        run: flutter build windows --release
+      - name: Build Obfuscated Windows Release
+        run: flutter build windows --release --obfuscate --split-debug-info=build/symbols
 
       - name: Create 1-Click Firewall Script for Public Network inside Release folder
         shell: cmd
