@@ -88,6 +88,8 @@ class ChatMessage {
   String? filePath;
   String? fileName;
   int? fileSize;
+  String? thumbPath;
+  bool isMediaRevealed;
   double transferProgress;
   Map<String, String> reactions;
 
@@ -103,9 +105,12 @@ class ChatMessage {
     this.filePath,
     this.fileName,
     this.fileSize,
+    this.thumbPath,
+    bool? isMediaRevealed,
     this.transferProgress = 1.0,
     Map<String, String>? reactions,
-  }) : reactions = reactions ?? {};
+  })  : isMediaRevealed = isMediaRevealed ?? isMe,
+        reactions = reactions ?? {};
 
   bool get isImageFile {
     final name = (fileName ?? filePath ?? '').toLowerCase();
@@ -162,6 +167,8 @@ class ChatMessage {
         'fp': filePath,
         'fn': fileName,
         'fs': fileSize,
+        'tp': thumbPath,
+        'rev': isMediaRevealed,
         'pr': transferProgress,
         'rx': reactions,
       };
@@ -174,22 +181,119 @@ class ChatMessage {
         rxMap[k.toString()] = v.toString();
       });
     }
+    final isMeVal = (j['me'] as bool?) ?? false;
     return ChatMessage(
-      msgId: j['id'] as String,
-      peerId: j['p'] as String,
-      senderId: j['s'] as String,
-      senderName: j['sn'] as String,
-      text: j['txt'] as String,
-      timestamp: j['ts'] as int,
-      isMe: j['me'] as bool,
+      msgId: (j['id'] ?? '').toString(),
+      peerId: (j['p'] ?? '').toString(),
+      senderId: (j['s'] ?? '').toString(),
+      senderName: (j['sn'] ?? 'Узел').toString(),
+      text: (j['txt'] ?? '').toString(),
+      timestamp: (j['ts'] as num?)?.toInt() ?? 0,
+      isMe: isMeVal,
       isDelivered: (j['ack'] as bool?) ?? false,
       filePath: j['fp'] as String?,
       fileName: j['fn'] as String?,
-      fileSize: j['fs'] as int?,
+      fileSize: (j['fs'] as num?)?.toInt(),
+      thumbPath: j['tp'] as String?,
+      isMediaRevealed: (j['rev'] as bool?) ?? isMeVal,
       transferProgress: ((j['pr'] as num?) ?? 1.0).toDouble(),
       reactions: rxMap,
     );
   }
+}
+
+class TriggerHitRecord {
+  final String hitId;
+  final String chatId;
+  final String chatTitle;
+  final String triggerWord;
+  final String offenderNodeId;
+  final String offenderName;
+  final String triggerMsgId;
+  final int timestamp;
+  final List<String> beforeLines;
+  final String triggerLine;
+  final List<String> afterLines;
+
+  TriggerHitRecord({
+    required this.hitId,
+    required this.chatId,
+    required this.chatTitle,
+    required this.triggerWord,
+    required this.offenderNodeId,
+    required this.offenderName,
+    required this.triggerMsgId,
+    required this.timestamp,
+    required this.beforeLines,
+    required this.triggerLine,
+    required this.afterLines,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': hitId,
+        'cid': chatId,
+        'ct': chatTitle,
+        'tw': triggerWord,
+        'oid': offenderNodeId,
+        'on': offenderName,
+        'mid': triggerMsgId,
+        'ts': timestamp,
+        'bef': beforeLines,
+        'trg': triggerLine,
+        'aft': afterLines,
+      };
+
+  factory TriggerHitRecord.fromJson(Map<String, dynamic> j) => TriggerHitRecord(
+        hitId: (j['id'] ?? '').toString(),
+        chatId: (j['cid'] ?? '').toString(),
+        chatTitle: (j['ct'] ?? '').toString(),
+        triggerWord: (j['tw'] ?? '').toString(),
+        offenderNodeId: (j['oid'] ?? '').toString(),
+        offenderName: (j['on'] ?? '').toString(),
+        triggerMsgId: (j['mid'] ?? '').toString(),
+        timestamp: (j['ts'] as num?)?.toInt() ?? 0,
+        beforeLines:
+            ((j['bef'] as List?) ?? []).map((e) => e.toString()).toList(),
+        triggerLine: (j['trg'] ?? '').toString(),
+        afterLines:
+            ((j['aft'] as List?) ?? []).map((e) => e.toString()).toList(),
+      );
+}
+
+class BanAppealRecord {
+  final String appealId;
+  final String nodeId;
+  final String nickname;
+  final String hwFingerprint;
+  final String appealText;
+  final int timestamp;
+
+  BanAppealRecord({
+    required this.appealId,
+    required this.nodeId,
+    required this.nickname,
+    required this.hwFingerprint,
+    required this.appealText,
+    required this.timestamp,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': appealId,
+        'nid': nodeId,
+        'nick': nickname,
+        'hw': hwFingerprint,
+        'txt': appealText,
+        'ts': timestamp,
+      };
+
+  factory BanAppealRecord.fromJson(Map<String, dynamic> j) => BanAppealRecord(
+        appealId: (j['id'] ?? '').toString(),
+        nodeId: (j['nid'] ?? '').toString(),
+        nickname: (j['nick'] ?? '').toString(),
+        hwFingerprint: (j['hw'] ?? '').toString(),
+        appealText: (j['txt'] ?? '').toString(),
+        timestamp: (j['ts'] as num?)?.toInt() ?? 0,
+      );
 }
 
 class PendingFileJob {
@@ -197,7 +301,8 @@ class PendingFileJob {
   final String targetNodeId;
   final String filePath;
   final String fileName;
-  int nextChunkIndex;
+  String? thumbPath;
+  int confirmedChunkIndex;
   bool isSending;
 
   PendingFileJob({
@@ -205,7 +310,8 @@ class PendingFileJob {
     required this.targetNodeId,
     required this.filePath,
     required this.fileName,
-    this.nextChunkIndex = 0,
+    this.thumbPath,
+    this.confirmedChunkIndex = 0,
     this.isSending = false,
   });
 
@@ -214,19 +320,20 @@ class PendingFileJob {
         'dst': targetNodeId,
         'fp': filePath,
         'fn': fileName,
-        'nxt': nextChunkIndex,
+        'tp': thumbPath,
+        'nxt': confirmedChunkIndex,
       };
 
   factory PendingFileJob.fromJson(Map<String, dynamic> j) => PendingFileJob(
-        fileId: j['fid'] as String,
-        targetNodeId: j['dst'] as String,
-        filePath: j['fp'] as String,
-        fileName: j['fn'] as String,
-        nextChunkIndex: (j['nxt'] as int?) ?? 0,
+        fileId: (j['fid'] ?? '').toString(),
+        targetNodeId: (j['dst'] ?? '').toString(),
+        filePath: (j['fp'] ?? '').toString(),
+        fileName: (j['fn'] ?? '').toString(),
+        thumbPath: j['tp'] as String?,
+        confirmedChunkIndex: (j['nxt'] as num?)?.toInt() ?? 0,
       );
 }
 
-/// Потоковый сборщик больших файлов (до 1 ГБ) с единым открытым дескриптором RandomAccessFile!
 class IncomingFileStreamAssembly {
   final String fileId;
   final String fileName;
@@ -234,6 +341,7 @@ class IncomingFileStreamAssembly {
   final int totalChunks;
   final String partFilePath;
   final int createdAtMs;
+  String? thumbPath;
   RandomAccessFile? openRaf;
   final Set<int> receivedChunkIndices = {};
 
@@ -244,6 +352,7 @@ class IncomingFileStreamAssembly {
     required this.totalChunks,
     required this.partFilePath,
     required this.createdAtMs,
+    this.thumbPath,
     this.openRaf,
   });
 }
@@ -287,15 +396,17 @@ class ContactProfile {
         'nick': nickname,
         'hw': hwFingerprint,
         'addr': lastAddress,
+        'ls': lastSeenTimestamp,
       };
 
   factory ContactProfile.fromJson(Map<String, dynamic> j) => ContactProfile(
-        nodeId: j['id'] as String,
-        dhPubHex: j['dh'] as String,
-        signPubHex: j['sg'] as String,
+        nodeId: (j['id'] ?? '').toString(),
+        dhPubHex: (j['dh'] ?? '').toString(),
+        signPubHex: (j['sg'] ?? '').toString(),
         nickname: (j['nick'] as String?) ?? 'Узел ${j['id']}',
         hwFingerprint: (j['hw'] as String?) ?? '',
         lastAddress: (j['addr'] as String?) ?? '',
+        lastSeenTimestamp: (j['ls'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -350,20 +461,20 @@ class MeshPacket {
       };
 
   factory MeshPacket.fromJson(Map<String, dynamic> j) => MeshPacket(
-        type: j['t'] as String,
-        msgId: j['id'] as String,
-        dstNodeId: j['dst'] as String,
+        type: (j['t'] ?? '').toString(),
+        msgId: (j['id'] ?? '').toString(),
+        dstNodeId: (j['dst'] ?? '').toString(),
         srcNickname: (j['nick'] as String?) ?? '',
-        srcSignPubHex: j['sp'] as String,
-        srcDhPubHex: j['dp'] as String,
-        dstSignPubHex: j['dsp'] as String,
-        ephPubHex: j['ep'] as String,
-        nonceHex: j['n'] as String,
-        ciphertextHex: j['c'] as String,
-        macHex: j['m'] as String,
-        signatureHex: j['s'] as String,
-        expiresAt: j['exp'] as int,
-        ttl: j['ttl'] as int,
+        srcSignPubHex: (j['sp'] ?? '').toString(),
+        srcDhPubHex: (j['dp'] ?? '').toString(),
+        dstSignPubHex: (j['dsp'] ?? '').toString(),
+        ephPubHex: (j['ep'] ?? '').toString(),
+        nonceHex: (j['n'] ?? '').toString(),
+        ciphertextHex: (j['c'] ?? '').toString(),
+        macHex: (j['m'] ?? '').toString(),
+        signatureHex: (j['s'] ?? '').toString(),
+        expiresAt: (j['exp'] as num?)?.toInt() ?? 0,
+        ttl: (j['ttl'] as num?)?.toInt() ?? 1,
       );
 }
 
@@ -390,13 +501,13 @@ class MeshEngine {
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
   static const int maxBufferPackets = 400;
-  static const int maxLineLengthBytes = 220 * 1024;
+  static const int maxLineLengthBytes = 240 * 1024;
   static const int maxConcurrentIncomingFiles = 8;
   static const int fileChunkSize = 32 * 1024;
   static const String serviceId = 'com.p2pmesh.intercom';
   static const MethodChannel _nativeChannel = MethodChannel('mayak/native');
 
-  // КРИПТОГРАФИЧЕСКАЯ ЗАЩИТА КОНСОЛИ АДМИНА (сама секретная фраза в коде НЕ хранится!)
+  // КРИПТОГРАФИЧЕСКАЯ ЗАЩИТА КОНСОЛИ АДМИНА (секретная фраза в коде НЕ хранится!)
   static const String _adminAuthHashHex =
       'f6e05d33ffb089dd5dc55f21aac369b78f87cf2f6bdeceff4b90769fb9b7e4cb';
   static const String _adminMasterPubHex =
@@ -418,6 +529,7 @@ class MeshEngine {
   String dhPubHex = '';
   String signPubHex = '';
   String myHwFingerprint = '';
+  String _internalDataDirPath = '';
 
   ServerSocket? _tcpServer;
   RawDatagramSocket? _udpBeacon;
@@ -456,9 +568,20 @@ class MeshEngine {
   final Set<String> _seenPacketSet = {};
   final Set<String> deletedContactIds = {};
 
-  // Глобальный список забаненных администратором узлов и их аппаратных отпечатков
+  // Глобальный список забаненных узлов и аппаратных отпечатков
   final Set<String> bannedNodeIds = {};
   final Set<String> bannedHwFingerprints = {};
+
+  // Триггеры чатов для дебаг-консоли Админа (диапазон -5 : +5 сообщений)
+  final List<String> adminTriggerWords = [
+    'взлом',
+    'спам',
+    'опасн',
+    'террор',
+    'клад',
+  ];
+  final List<TriggerHitRecord> triggerHits = [];
+  final List<BanAppealRecord> banAppeals = [];
 
   final Map<String, List<int>> _staticSharedSecretCache = {};
   final Map<String, IncomingFileStreamAssembly> _incomingFiles = {};
@@ -489,8 +612,14 @@ class MeshEngine {
 
   MethodChannel get nativeChannel => _nativeChannel;
 
+  int get totalBufferedCount => transitBuffer.length + pendingFileJobs.length;
+
+  bool get isSelfBanned => isNodeBanned(nodeId, myHwFingerprint);
+
   bool isNodeBanned(String targetNodeId, [String hw = '']) {
-    if (bannedNodeIds.contains(targetNodeId)) return true;
+    if (targetNodeId.isNotEmpty && bannedNodeIds.contains(targetNodeId)) {
+      return true;
+    }
     if (hw.isNotEmpty && bannedHwFingerprints.contains(hw)) return true;
     final c = knownContacts[targetNodeId];
     if (c != null &&
@@ -501,7 +630,10 @@ class MeshEngine {
     return false;
   }
 
-  /// Проверка секретной фразы для открытия скрытой консоли Админа и генерации мастер-ключа Ed25519 в ОЗУ
+  bool isPeerDirectlyConnected(String peerId) {
+    return _tcpPeers.containsValue(peerId) || _blePeers.containsValue(peerId);
+  }
+
   Future<bool> tryUnlockAdminConsole(String candidatePhrase) async {
     final clean = candidatePhrase.trim();
     final digest =
@@ -514,11 +646,75 @@ class MeshEngine {
     _unlockedAdminMasterKeyPair =
         await _ed25519.newKeyPairFromSeed(seedDigest.bytes);
     isAdminUnlocked = true;
+    _refreshOnlineStatuses();
+    unawaited(pingAllKnownNodes());
     onStateChanged();
     return true;
   }
 
-  /// Подписанная мастер-ключом команда глобального Бана или Разбана узла по всей сети
+  Future<void> pingAllKnownNodes() async {
+    _refreshOnlineStatuses();
+    final peers = {..._tcpPeers.values, ..._blePeers.values};
+    for (final pid in peers) {
+      unawaited(pingPeer(pid).then((_) => onStateChanged()));
+    }
+    onStateChanged();
+  }
+
+  /// Добавление/удаление триггерного слова в Консоли Админа и синхронизация по сети
+  Future<void> addAdminTriggerWord(String word) async {
+    final clean = word.trim().toLowerCase();
+    if (clean.isEmpty || adminTriggerWords.contains(clean)) return;
+    adminTriggerWords.add(clean);
+    await _saveContactsAndChats();
+    await _broadcastSignedAdminTriggers();
+    onStateChanged();
+  }
+
+  Future<void> removeAdminTriggerWord(String word) async {
+    adminTriggerWords.remove(word.trim().toLowerCase());
+    await _saveContactsAndChats();
+    await _broadcastSignedAdminTriggers();
+    onStateChanged();
+  }
+
+  Future<void> _broadcastSignedAdminTriggers() async {
+    final masterKp = _unlockedAdminMasterKeyPair;
+    if (masterKp == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final pktId = _randomHex(12);
+    final expiresAt = now + 24 * 3600 * 1000;
+    final payloadJson = jsonEncode({
+      'act': 'SYNC_TRIGGERS',
+      'words': adminTriggerWords,
+      'ts': now,
+    });
+    final b64Payload = base64Encode(utf8.encode(payloadJson));
+    final sigBytes = utf8.encode('ADMIN_CMD|$pktId|$expiresAt|$b64Payload');
+    final adminSig = await _ed25519.sign(sigBytes, keyPair: masterKp);
+
+    final pkt = MeshPacket(
+      type: 'BROADCAST',
+      msgId: pktId,
+      dstNodeId: broadcastChannelId,
+      srcNickname: '',
+      srcSignPubHex: _adminMasterPubHex,
+      srcDhPubHex: dhPubHex,
+      dstSignPubHex: '',
+      ephPubHex: 'ADMIN_CMD',
+      nonceHex: '',
+      ciphertextHex: b64Payload,
+      macHex: '',
+      signatureHex: _toHex(adminSig.bytes),
+      expiresAt: expiresAt,
+      ttl: 7,
+    );
+    _markPacketSeen(pktId);
+    transitBuffer[pktId] = pkt;
+    _floodAllTransports(pkt);
+  }
+
+  /// Подписанная мастер-ключом команда глобального Бана или Разбана узла (сначала отправляет пакет жертве, чтобы она увидела экран бана!)
   Future<void> executeAdminBanOrUnban({
     required String targetNodeId,
     required bool ban,
@@ -531,13 +727,11 @@ class MeshEngine {
     if (ban) {
       bannedNodeIds.add(targetNodeId);
       if (targetHw.isNotEmpty) bannedHwFingerprints.add(targetHw);
-      _disconnectBannedPeerImmediately(targetNodeId);
     } else {
       bannedNodeIds.remove(targetNodeId);
       if (targetHw.isNotEmpty) bannedHwFingerprints.remove(targetHw);
+      banAppeals.removeWhere((a) => a.nodeId == targetNodeId);
     }
-    await _saveContactsAndChats();
-    onStateChanged();
 
     final now = DateTime.now().millisecondsSinceEpoch;
     final pktId = _randomHex(12);
@@ -549,8 +743,7 @@ class MeshEngine {
       'ts': now,
     });
     final b64Payload = base64Encode(utf8.encode(cmdPayloadJson));
-    final sigBytes =
-        utf8.encode('ADMIN_CMD|$pktId|$expiresAt|$b64Payload');
+    final sigBytes = utf8.encode('ADMIN_CMD|$pktId|$expiresAt|$b64Payload');
     final adminSig = await _ed25519.sign(sigBytes, keyPair: masterKp);
 
     final pkt = MeshPacket(
@@ -572,18 +765,160 @@ class MeshEngine {
 
     _markPacketSeen(pktId);
     transitBuffer[pktId] = pkt;
+    // СНАЧАЛА отправляем пакет всем пирам (включая банимого), чтобы его клиент гарантированно получил уведомление о бане!
     _floodAllTransports(pkt);
+    await _saveContactsAndChats();
+    onStateChanged();
   }
 
-  void _disconnectBannedPeerImmediately(String targetNodeId) {
-    for (final entry in _tcpPeers.entries.toList()) {
-      if (entry.value == targetNodeId) {
-        _cleanupSocket(entry.key);
+  /// Отправка записки-апелляции от забаненного пользователя в Консоль Админа
+  Future<void> sendBanAppealNote(String noteText) async {
+    final clean = noteText.trim();
+    if (clean.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final pktId = _randomHex(12);
+    final expiresAt = now + 24 * 3600 * 1000;
+
+    final appeal = BanAppealRecord(
+      appealId: pktId,
+      nodeId: nodeId,
+      nickname: nickname,
+      hwFingerprint: myHwFingerprint,
+      appealText: clean,
+      timestamp: now,
+    );
+    banAppeals.removeWhere((a) => a.nodeId == nodeId);
+    banAppeals.insert(0, appeal);
+
+    final b64Payload = base64Encode(utf8.encode(jsonEncode(appeal.toJson())));
+    final sigPayload = utf8.encode(
+        '$pktId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
+    final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
+
+    final pkt = MeshPacket(
+      type: 'BROADCAST',
+      msgId: pktId,
+      dstNodeId: broadcastChannelId,
+      srcNickname: nickname,
+      srcSignPubHex: signPubHex,
+      srcDhPubHex: dhPubHex,
+      dstSignPubHex: '',
+      ephPubHex: 'BAN_APPEAL',
+      nonceHex: '',
+      ciphertextHex: b64Payload,
+      macHex: '',
+      signatureHex: _toHex(sig.bytes),
+      expiresAt: expiresAt,
+      ttl: 7,
+    );
+    _markPacketSeen(pktId);
+    transitBuffer[pktId] = pkt;
+    _floodAllTransports(pkt);
+    await _saveContactsAndChats();
+    _addLog('Записка на разбан отправлена администратору сети');
+    onStateChanged();
+  }
+
+  /// Проверка любого сообщения в чате на триггерные слова и сбор контекста -5 : +5 сообщений
+  void _inspectMessageForTriggers(ChatMessage msg, String chatId) {
+    final lowerText = msg.text.toLowerCase();
+    final allMsgs = getMessagesFor(chatId);
+
+    // 1. Сначала проверяем, не нужно ли дописать это сообщение в "+5 после" для уже сработавших недавно триггеров в этом чате
+    bool updatedExisting = false;
+    for (final hit in triggerHits) {
+      if (hit.chatId == chatId &&
+          hit.triggerMsgId != msg.msgId &&
+          hit.afterLines.length < 5 &&
+          msg.timestamp >= hit.timestamp) {
+        final formatted = '[${msg.timeFormatted}] ${msg.senderName}: ${msg.text}';
+        if (!hit.afterLines.contains(formatted)) {
+          hit.afterLines.add(formatted);
+          updatedExisting = true;
+          unawaited(_broadcastTriggerHitReport(hit));
+        }
       }
     }
-    _blePeers.removeWhere((_, v) => v == targetNodeId);
-    transitBuffer.removeWhere((_, p) => p.dstNodeId == targetNodeId);
-    _refreshOnlineStatuses();
+
+    // 2. Проверяем само сообщение на наличие триггерных слов
+    String? matchedTrigger;
+    for (final w in adminTriggerWords) {
+      if (w.isNotEmpty && lowerText.contains(w.toLowerCase())) {
+        matchedTrigger = w;
+        break;
+      }
+    }
+
+    if (matchedTrigger != null) {
+      final idx = allMsgs.indexWhere((m) => m.msgId == msg.msgId);
+      final startIdx = max(0, (idx >= 0 ? idx : allMsgs.length) - 5);
+      final endBefore = idx >= 0 ? idx : allMsgs.length;
+      final beforeList = <String>[];
+      for (int i = startIdx; i < endBefore; i++) {
+        final m = allMsgs[i];
+        beforeList.add('[${m.timeFormatted}] ${m.senderName}: ${m.text}');
+      }
+      final chatTitle = chatId == broadcastChannelId
+          ? 'Общий эфир'
+          : (knownContacts[chatId]?.displayTitle ?? 'Чат $chatId');
+
+      final hit = TriggerHitRecord(
+        hitId: '${msg.msgId}_trig',
+        chatId: chatId,
+        chatTitle: chatTitle,
+        triggerWord: matchedTrigger,
+        offenderNodeId: msg.senderId,
+        offenderName: msg.senderName,
+        triggerMsgId: msg.msgId,
+        timestamp: msg.timestamp,
+        beforeLines: beforeList,
+        triggerLine: '[${msg.timeFormatted}] ${msg.senderName}: ${msg.text}',
+        afterLines: [],
+      );
+      triggerHits.removeWhere((h) => h.hitId == hit.hitId);
+      triggerHits.insert(0, hit);
+      if (triggerHits.length > 60) {
+        triggerHits.removeLast();
+      }
+      updatedExisting = true;
+      unawaited(_broadcastTriggerHitReport(hit));
+    }
+
+    if (updatedExisting) {
+      unawaited(_saveContactsAndChats());
+      onStateChanged();
+    }
+  }
+
+  Future<void> _broadcastTriggerHitReport(TriggerHitRecord hit) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final pktId = _randomHex(12);
+      final expiresAt = now + 12 * 3600 * 1000;
+      final b64Payload = base64Encode(utf8.encode(jsonEncode(hit.toJson())));
+      final sigPayload = utf8.encode(
+          '$pktId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
+      final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
+
+      final pkt = MeshPacket(
+        type: 'BROADCAST',
+        msgId: pktId,
+        dstNodeId: broadcastChannelId,
+        srcNickname: nickname,
+        srcSignPubHex: signPubHex,
+        srcDhPubHex: dhPubHex,
+        dstSignPubHex: '',
+        ephPubHex: 'TRIGGER_REPORT',
+        nonceHex: '',
+        ciphertextHex: b64Payload,
+        macHex: '',
+        signatureHex: _toHex(sig.bytes),
+        expiresAt: expiresAt,
+        ttl: 6,
+      );
+      _markPacketSeen(pktId);
+      _floodAllTransports(pkt);
+    } catch (_) {}
   }
 
   bool _markPacketSeen(String id) {
@@ -616,6 +951,54 @@ class MeshEngine {
       knownContacts[peerId]?.unreadCount = 0;
     }
     onStateChanged();
+  }
+
+  Future<void> revealMediaMessage(ChatMessage msg) async {
+    msg.isMediaRevealed = true;
+    if (msg.isVideoFile &&
+        (msg.thumbPath == null || !File(msg.thumbPath!).existsSync()) &&
+        msg.filePath != null &&
+        File(msg.filePath!).existsSync()) {
+      msg.thumbPath = await extractVideoThumbnail(msg.filePath!);
+    }
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<String> clearAllDownloadedMediaFromDevice() async {
+    await stopAudioPlayback();
+    int freedBytes = 0;
+    try {
+      if (Platform.isAndroid) {
+        final res =
+            await _nativeChannel.invokeMethod<int>('clearDownloadedMediaCache');
+        freedBytes += (res ?? 0);
+      } else {
+        final dir = await _getReceivedFilesDir();
+        if (await dir.exists()) {
+          await for (final entity in dir.list()) {
+            if (entity is File) {
+              try {
+                freedBytes += await entity.length();
+                await entity.delete();
+              } catch (_) {}
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    chatHistory.forEach((_, list) {
+      for (final m in list) {
+        if (m.fileName != null && m.fileName!.isNotEmpty) {
+          m.isMediaRevealed = false;
+        }
+      }
+    });
+    await _saveContactsAndChats();
+    onStateChanged();
+    final mb = (freedBytes / (1024 * 1024)).toStringAsFixed(2);
+    return 'Очищено $mb МБ скачанных медиа и файлов с устройства';
   }
 
   Future<void> clearChatHistoryOnly(String targetNodeId) async {
@@ -816,11 +1199,19 @@ class MeshEngine {
   }
 
   Future<void> init() async {
+    if (Platform.isAndroid) {
+      try {
+        _internalDataDirPath = await _nativeChannel
+                .invokeMethod<String>('getAppInternalDataDir') ??
+            '';
+      } catch (_) {}
+    }
+
     try {
       await _loadOrCreateIdentity();
       await _loadPersistedContactsAndChats();
     } catch (e) {
-      _addLog('Ошибка ключей: $e');
+      _addLog('Ошибка инициализации хранилища: $e');
     }
 
     if (Platform.isAndroid) {
@@ -852,9 +1243,53 @@ class MeshEngine {
 
     await refreshNetworkCache(force: true);
     await _startLanAutoDiscovery();
-    _addLog('Защищенный узел v1.3 готов (порт $listenPort)');
+    _addLog('Защищенный узел v1.4 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
+  }
+
+  /// Надежные файлы локальной БД (внутренняя память приложения на Android + папка пользователя на ПК)
+  Future<List<File>> _getLocalDatabaseFiles() async {
+    final files = <File>[];
+    try {
+      if (Platform.isAndroid) {
+        if (_internalDataDirPath.isNotEmpty) {
+          final d = Directory(_internalDataDirPath);
+          if (!await d.exists()) await d.create(recursive: true);
+          files.add(File('${d.path}/mayak_store_v14.json'));
+        }
+        final extDir = Directory('/storage/emulated/0/Download/Mayak');
+        if (await extDir.exists()) {
+          files.add(File('${extDir.path}/.mayak_backup_v14.json'));
+          files.add(File('${extDir.path}/.mayak_backup_v12.json'));
+        }
+      } else {
+        final home = Platform.environment['USERPROFILE'] ??
+            Platform.environment['HOME'] ??
+            '.';
+        final dir = Directory('$home/Downloads/Mayak');
+        if (!await dir.exists()) await dir.create(recursive: true);
+        files.add(File('${dir.path}/mayak_store_v14.json'));
+        files.add(File('${dir.path}/.mayak_backup_v12.json'));
+      }
+    } catch (_) {}
+    return files;
+  }
+
+  Future<Map<String, dynamic>> _readMasterStoreMap() async {
+    final dbFiles = await _getLocalDatabaseFiles();
+    for (final f in dbFiles) {
+      try {
+        if (await f.exists()) {
+          final content = await f.readAsString();
+          if (content.trim().isNotEmpty) {
+            final map = jsonDecode(content) as Map<String, dynamic>;
+            if (map.isNotEmpty) return map;
+          }
+        }
+      } catch (_) {}
+    }
+    return {};
   }
 
   Future<void> _loadOrCreateIdentity() async {
@@ -875,131 +1310,155 @@ class MeshEngine {
       myHwFingerprint = _toHex(hwHashBytes.sublist(0, 8));
     }
 
+    final storeMap = await _readMasterStoreMap();
+    String? savedSignSeed = storeMap['sign_seed'] as String?;
+    String? savedDhSeed = storeMap['dh_seed'] as String?;
+    String? savedNick = storeMap['nick'] as String?;
+
     try {
       final prefs = await SharedPreferences.getInstance();
-      String? savedSignSeed = prefs.getString('sign_seed');
-      String? savedDhSeed = prefs.getString('dh_seed');
+      savedSignSeed ??= prefs.getString('sign_seed');
+      savedDhSeed ??= prefs.getString('dh_seed');
+      savedNick ??= prefs.getString('user_nickname');
+    } catch (_) {}
 
-      if (savedSignSeed == null || savedDhSeed == null) {
-        if (rawHwId.isNotEmpty && rawHwId.length > 5) {
-          final signDigest =
-              await _sha256.hash(utf8.encode('MAYAK-SIGN-SEED-V1|$rawHwId'));
-          final dhDigest =
-              await _sha256.hash(utf8.encode('MAYAK-DH-SEED-V1|$rawHwId'));
-          savedSignSeed = _toHex(signDigest.bytes);
-          savedDhSeed = _toHex(dhDigest.bytes);
-        } else {
-          savedSignSeed = _toHex(_randomBytes(32));
-          savedDhSeed = _toHex(_randomBytes(32));
-        }
-        await prefs.setString('sign_seed', savedSignSeed);
-        await prefs.setString('dh_seed', savedDhSeed);
+    if (savedSignSeed == null ||
+        savedDhSeed == null ||
+        savedSignSeed.length != 64 ||
+        savedDhSeed.length != 64) {
+      if (rawHwId.isNotEmpty && rawHwId.length > 4) {
+        final signDigest =
+            await _sha256.hash(utf8.encode('MAYAK-SIGN-SEED-V1|$rawHwId'));
+        final dhDigest =
+            await _sha256.hash(utf8.encode('MAYAK-DH-SEED-V1|$rawHwId'));
+        savedSignSeed = _toHex(signDigest.bytes);
+        savedDhSeed = _toHex(dhDigest.bytes);
+      } else {
+        savedSignSeed = _toHex(_randomBytes(32));
+        savedDhSeed = _toHex(_randomBytes(32));
       }
-
-      _signKeyPair =
-          await _ed25519.newKeyPairFromSeed(_fromHex(savedSignSeed));
-      _dhKeyPair = await _x25519.newKeyPairFromSeed(_fromHex(savedDhSeed));
-
-      final dhPub = await _dhKeyPair.extractPublicKey();
-      final signPub = await _signKeyPair.extractPublicKey();
-      dhPubHex = _toHex(dhPub.bytes);
-      signPubHex = _toHex(signPub.bytes);
-      nodeId = await _calcNodeId(dhPub.bytes);
-
-      final defaultName =
-          Platform.isAndroid ? 'Android-$nodeId' : 'PC-$nodeId';
-      nickname = prefs.getString('user_nickname') ?? defaultName;
-    } catch (_) {
-      final signSeed = _randomBytes(32);
-      final dhSeed = _randomBytes(32);
-      _signKeyPair = await _ed25519.newKeyPairFromSeed(signSeed);
-      _dhKeyPair = await _x25519.newKeyPairFromSeed(dhSeed);
-      final dhPub = await _dhKeyPair.extractPublicKey();
-      final signPub = await _signKeyPair.extractPublicKey();
-      dhPubHex = _toHex(dhPub.bytes);
-      signPubHex = _toHex(signPub.bytes);
-      nodeId = await _calcNodeId(dhPub.bytes);
-      nickname = Platform.isAndroid ? 'Android-$nodeId' : 'PC-$nodeId';
     }
-  }
 
-  Future<File> _getExternalBackupFile() async {
-    if (Platform.isAndroid) {
-      final dir = Directory('/storage/emulated/0/Download/Mayak');
-      if (!await dir.exists()) {
-        await dir.create(recursive: true);
-      }
-      return File('${dir.path}/.mayak_backup_v12.json');
+    _signKeyPair = await _ed25519.newKeyPairFromSeed(_fromHex(savedSignSeed));
+    _dhKeyPair = await _x25519.newKeyPairFromSeed(_fromHex(savedDhSeed));
+
+    final dhPub = await _dhKeyPair.extractPublicKey();
+    final signPub = await _signKeyPair.extractPublicKey();
+    dhPubHex = _toHex(dhPub.bytes);
+    signPubHex = _toHex(signPub.bytes);
+    nodeId = await _calcNodeId(dhPub.bytes);
+
+    final defaultName = Platform.isAndroid ? 'Android-$nodeId' : 'PC-$nodeId';
+    if (savedNick != null && savedNick.trim().isNotEmpty) {
+      nickname = savedNick.trim();
     } else {
-      final home = Platform.environment['USERPROFILE'] ??
-          Platform.environment['HOME'] ??
-          '.';
-      final dir = Directory('$home/Downloads/Mayak');
-      if (!await dir.exists()) {
-        await dir.create(recursive: true);
-      }
-      return File('${dir.path}/.mayak_backup_v12.json');
+      nickname = defaultName;
     }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('sign_seed', savedSignSeed);
+      await prefs.setString('dh_seed', savedDhSeed);
+      await prefs.setString('user_nickname', nickname);
+    } catch (_) {}
   }
 
   Future<void> _loadPersistedContactsAndChats() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final deletedRaw = prefs.getStringList('deleted_contacts_v11') ?? [];
-      deletedContactIds.addAll(deletedRaw);
+    final storeMap = await _readMasterStoreMap();
 
-      final bannedIdsRaw = prefs.getStringList('banned_nodes_v13') ?? [];
-      bannedNodeIds.addAll(bannedIdsRaw);
+    String? contactsRaw = storeMap['contacts'] as String?;
+    String? chatsRaw = storeMap['chats'] as String?;
+    String? outboxRaw = storeMap['outbox'] as String?;
+    String? pendingFilesRaw = storeMap['pending_files'] as String?;
 
-      final bannedHwRaw = prefs.getStringList('banned_hw_v13') ?? [];
-      bannedHwFingerprints.addAll(bannedHwRaw);
-
-      String? contactsRaw = prefs.getString('saved_contacts_v7');
-      String? chatsRaw = prefs.getString('saved_chats_v7');
-
-      if ((contactsRaw == null || contactsRaw.isEmpty) &&
-          (chatsRaw == null || chatsRaw.isEmpty)) {
+    if (storeMap['deleted_contacts'] is List) {
+      deletedContactIds.addAll(
+          (storeMap['deleted_contacts'] as List).map((e) => e.toString()));
+    }
+    if (storeMap['banned_nodes'] is List) {
+      bannedNodeIds
+          .addAll((storeMap['banned_nodes'] as List).map((e) => e.toString()));
+    }
+    if (storeMap['banned_hw'] is List) {
+      bannedHwFingerprints
+          .addAll((storeMap['banned_hw'] as List).map((e) => e.toString()));
+    }
+    if (storeMap['admin_triggers'] is List) {
+      final words = (storeMap['admin_triggers'] as List)
+          .map((e) => e.toString().trim().toLowerCase())
+          .where((w) => w.isNotEmpty)
+          .toList();
+      if (words.isNotEmpty) {
+        adminTriggerWords
+          ..clear()
+          ..addAll(words);
+      }
+    }
+    if (storeMap['trigger_hits'] is List) {
+      for (final item in (storeMap['trigger_hits'] as List)) {
         try {
-          final bkpFile = await _getExternalBackupFile();
-          if (await bkpFile.exists()) {
-            final bkpMap = jsonDecode(await bkpFile.readAsString())
-                as Map<String, dynamic>;
-            contactsRaw = bkpMap['contacts'] as String?;
-            chatsRaw = bkpMap['chats'] as String?;
-            if (bkpMap['nick'] is String &&
-                (bkpMap['nick'] as String).isNotEmpty) {
-              nickname = bkpMap['nick'] as String;
-              await prefs.setString('user_nickname', nickname);
-            }
-          }
+          triggerHits.add(
+              TriggerHitRecord.fromJson(Map<String, dynamic>.from(item as Map)));
         } catch (_) {}
       }
+    }
+    if (storeMap['ban_appeals'] is List) {
+      for (final item in (storeMap['ban_appeals'] as List)) {
+        try {
+          banAppeals.add(
+              BanAppealRecord.fromJson(Map<String, dynamic>.from(item as Map)));
+        } catch (_) {}
+      }
+    }
 
-      if (contactsRaw != null && contactsRaw.isNotEmpty) {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      deletedContactIds
+          .addAll(prefs.getStringList('deleted_contacts_v11') ?? []);
+      bannedNodeIds.addAll(prefs.getStringList('banned_nodes_v13') ?? []);
+      bannedHwFingerprints.addAll(prefs.getStringList('banned_hw_v13') ?? []);
+      contactsRaw ??= prefs.getString('saved_contacts_v7');
+      chatsRaw ??= prefs.getString('saved_chats_v7');
+      outboxRaw ??= prefs.getString('saved_outbox_v9');
+      pendingFilesRaw ??= prefs.getString('saved_pending_files_v11');
+    } catch (_) {}
+
+    if (contactsRaw != null && contactsRaw.isNotEmpty) {
+      try {
         final list = jsonDecode(contactsRaw) as List;
         for (final item in list) {
           final c =
               ContactProfile.fromJson(Map<String, dynamic>.from(item as Map));
-          if (c.nodeId != nodeId && !deletedContactIds.contains(c.nodeId)) {
+          if (c.nodeId.isNotEmpty &&
+              c.nodeId != nodeId &&
+              !deletedContactIds.contains(c.nodeId)) {
             knownContacts[c.nodeId] = c;
           }
         }
-      }
+      } catch (_) {}
+    }
 
-      if (chatsRaw != null && chatsRaw.isNotEmpty) {
+    if (chatsRaw != null && chatsRaw.isNotEmpty) {
+      try {
         final map = jsonDecode(chatsRaw) as Map<String, dynamic>;
         map.forEach((peerId, msgsJson) {
           if (deletedContactIds.contains(peerId)) return;
-          final list = (msgsJson as List)
-              .map((m) =>
-                  ChatMessage.fromJson(Map<String, dynamic>.from(m as Map)))
-              .toList();
-          chatHistory[peerId] = list;
+          final list = <ChatMessage>[];
+          for (final m in (msgsJson as List)) {
+            try {
+              list.add(
+                  ChatMessage.fromJson(Map<String, dynamic>.from(m as Map)));
+            } catch (_) {}
+          }
+          if (list.isNotEmpty) {
+            chatHistory[peerId] = list;
+          }
         });
-      }
+      } catch (_) {}
+    }
 
-      final outboxRaw = prefs.getString('saved_outbox_v9');
-      if (outboxRaw != null && outboxRaw.isNotEmpty) {
+    if (outboxRaw != null && outboxRaw.isNotEmpty) {
+      try {
         final list = jsonDecode(outboxRaw) as List;
         final now = DateTime.now().millisecondsSinceEpoch;
         for (final item in list) {
@@ -1011,10 +1470,11 @@ class MeshEngine {
             transitBuffer[pkt.msgId] = pkt;
           }
         }
-      }
+      } catch (_) {}
+    }
 
-      final pendingFilesRaw = prefs.getString('saved_pending_files_v11');
-      if (pendingFilesRaw != null && pendingFilesRaw.isNotEmpty) {
+    if (pendingFilesRaw != null && pendingFilesRaw.isNotEmpty) {
+      try {
         final list = jsonDecode(pendingFilesRaw) as List;
         for (final item in list) {
           final job =
@@ -1024,47 +1484,66 @@ class MeshEngine {
             pendingFileJobs[job.fileId] = job;
           }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
+
+    await _saveContactsAndChats();
   }
 
   Future<void> _saveContactsAndChats() async {
+    final contactsJson =
+        jsonEncode(knownContacts.values.map((c) => c.toJson()).toList());
+
+    final chatsMap = <String, dynamic>{};
+    chatHistory.forEach((peerId, list) {
+      final trimmed =
+          list.length > 200 ? list.sublist(list.length - 200) : list;
+      chatsMap[peerId] = trimmed.map((m) => m.toJson()).toList();
+    });
+    final chatsJson = jsonEncode(chatsMap);
+
+    final outboxJson =
+        jsonEncode(myPersistentOutbox.values.map((p) => p.toJson()).toList());
+    final filesJson =
+        jsonEncode(pendingFileJobs.values.map((j) => j.toJson()).toList());
+
+    final signSeedBytes = await _signKeyPair.extractPrivateKeyBytes();
+    final dhSeedBytes = await _dhKeyPair.extractPrivateKeyBytes();
+
+    final fullStorePayload = jsonEncode({
+      'sign_seed': _toHex(signSeedBytes),
+      'dh_seed': _toHex(dhSeedBytes),
+      'nick': nickname,
+      'contacts': contactsJson,
+      'chats': chatsJson,
+      'outbox': outboxJson,
+      'pending_files': filesJson,
+      'deleted_contacts': deletedContactIds.toList(),
+      'banned_nodes': bannedNodeIds.toList(),
+      'banned_hw': bannedHwFingerprints.toList(),
+      'admin_triggers': adminTriggerWords,
+      'trigger_hits': triggerHits.map((h) => h.toJson()).toList(),
+      'ban_appeals': banAppeals.map((a) => a.toJson()).toList(),
+    });
+
+    final dbFiles = await _getLocalDatabaseFiles();
+    for (final f in dbFiles) {
+      try {
+        await f.writeAsString(fullStorePayload, flush: true);
+      } catch (_) {}
+    }
+
     try {
       final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('user_nickname', nickname);
       await prefs.setStringList(
           'deleted_contacts_v11', deletedContactIds.toList());
       await prefs.setStringList('banned_nodes_v13', bannedNodeIds.toList());
       await prefs.setStringList('banned_hw_v13', bannedHwFingerprints.toList());
-
-      final contactsJson =
-          jsonEncode(knownContacts.values.map((c) => c.toJson()).toList());
       await prefs.setString('saved_contacts_v7', contactsJson);
-
-      final chatsMap = <String, dynamic>{};
-      chatHistory.forEach((peerId, list) {
-        final trimmed =
-            list.length > 100 ? list.sublist(list.length - 100) : list;
-        chatsMap[peerId] = trimmed.map((m) => m.toJson()).toList();
-      });
-      final chatsJson = jsonEncode(chatsMap);
       await prefs.setString('saved_chats_v7', chatsJson);
-
-      final outboxList =
-          myPersistentOutbox.values.map((p) => p.toJson()).toList();
-      await prefs.setString('saved_outbox_v9', jsonEncode(outboxList));
-
-      final filesList =
-          pendingFileJobs.values.map((j) => j.toJson()).toList();
-      await prefs.setString('saved_pending_files_v11', jsonEncode(filesList));
-
-      try {
-        final bkpFile = await _getExternalBackupFile();
-        await bkpFile.writeAsString(jsonEncode({
-          'nick': nickname,
-          'contacts': contactsJson,
-          'chats': chatsJson,
-        }));
-      } catch (_) {}
+      await prefs.setString('saved_outbox_v9', outboxJson);
+      await prefs.setString('saved_pending_files_v11', filesJson);
     } catch (_) {}
   }
 
@@ -1072,11 +1551,7 @@ class MeshEngine {
     final clean = newName.trim();
     if (clean.isEmpty) return;
     nickname = clean;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('user_nickname', nickname);
-    } catch (_) {}
-
+    await _saveContactsAndChats();
     await refreshNetworkCache(force: true);
     final hello = _buildHelloJson();
     for (final s in _tcpPeers.keys.toList()) {
@@ -1098,7 +1573,6 @@ class MeshEngine {
 
   String _buildPeerSyncJson() {
     final peers = knownContacts.values
-        .where((c) => !isNodeBanned(c.nodeId, c.hwFingerprint))
         .map((c) => {
               'id': c.nodeId,
               'nick': c.nickname,
@@ -1107,7 +1581,11 @@ class MeshEngine {
               'hw': c.hwFingerprint,
             })
         .toList();
-    return jsonEncode({'peer_sync': peers});
+    return jsonEncode({
+      'peer_sync': peers,
+      'banned_ids': bannedNodeIds.toList(),
+      'banned_hw': bannedHwFingerprints.toList(),
+    });
   }
 
   Future<void> refreshNetworkCache({bool force = false}) async {
@@ -1406,6 +1884,78 @@ class MeshEngine {
     } catch (_) {}
   }
 
+  /// Извлечение превью-кадра (Thumbnail) из видеофайла на Android и Windows ПК
+  Future<String?> extractVideoThumbnail(String videoPath) async {
+    if (videoPath.isEmpty || !File(videoPath).existsSync()) return null;
+    final thumbCandidate = '$videoPath.thumb.jpg';
+    if (File(thumbCandidate).existsSync() &&
+        File(thumbCandidate).lengthSync() > 100) {
+      return thumbCandidate;
+    }
+    try {
+      if (Platform.isAndroid) {
+        final res = await _nativeChannel.invokeMethod<String>(
+          'extractVideoThumbnail',
+          {'path': videoPath},
+        );
+        if (res != null && res.isNotEmpty && File(res).existsSync()) {
+          return res;
+        }
+      } else if (Platform.isWindows) {
+        const psScript = r'''
+Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
+$vPath = $env:MAYAK_VIDEO_PATH
+$tPath = $env:MAYAK_THUMB_PATH
+try {
+  $mp = New-Object System.Windows.Media.MediaPlayer
+  $mp.Volume = 0
+  $mp.ScrubbingEnabled = $true
+  $mp.Open([Uri]::new($vPath))
+  $t0 = [DateTime]::Now
+  while (-not $mp.NaturalDuration.HasTimeSpan -and (([DateTime]::Now - $t0).TotalMilliseconds -lt 2500)) {
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+    Start-Sleep -Milliseconds 40
+  }
+  $mp.Position = [TimeSpan]::FromMilliseconds(400)
+  Start-Sleep -Milliseconds 180
+  [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+  $w = $mp.NaturalVideoWidth; if ($w -le 0) { $w = 480 }
+  $h = $mp.NaturalVideoHeight; if ($h -le 0) { $h = 270 }
+  if ($w -gt 480) { $h = [int]($h * (480.0 / $w)); $w = 480 }
+  $dv = New-Object System.Windows.Media.DrawingVisual
+  $dc = $dv.RenderOpen()
+  $dc.DrawVideo($mp, (New-Object System.Windows.Rect(0, 0, $w, $h)))
+  $dc.Close()
+  $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+  $rtb.Render($dv)
+  $enc = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
+  $enc.QualityLevel = 78
+  $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+  $fs = [System.IO.File]::Open($tPath, [System.IO.FileMode]::Create)
+  $enc.Save($fs)
+  $fs.Close()
+  $mp.Close()
+} catch {}
+''';
+        await Process.run(
+          'powershell',
+          ['-NoProfile', '-STA', '-Command', psScript],
+          environment: {
+            'MAYAK_VIDEO_PATH': videoPath.replaceAll('/', '\\'),
+            'MAYAK_THUMB_PATH': thumbCandidate.replaceAll('/', '\\'),
+          },
+        ).timeout(const Duration(seconds: 5), onTimeout: () {
+          return ProcessResult(0, 1, '', '');
+        });
+        if (File(thumbCandidate).existsSync() &&
+            File(thumbCandidate).lengthSync() > 100) {
+          return thumbCandidate;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
   Future<Map<String, dynamic>?> pickFileForChat({String mode = 'all'}) async {
     try {
       if (Platform.isAndroid) {
@@ -1441,10 +1991,20 @@ class MeshEngine {
           return null;
         }
         final name = selectedPath.split(RegExp(r'[\\/]')).last;
+        String? thumbPath;
+        final lower = name.toLowerCase();
+        if (lower.endsWith('.mp4') ||
+            lower.endsWith('.mkv') ||
+            lower.endsWith('.mov') ||
+            lower.endsWith('.avi') ||
+            lower.endsWith('.webm')) {
+          thumbPath = await extractVideoThumbnail(selectedPath);
+        }
         return {
           'path': selectedPath,
           'name': name,
           'size': await file.length(),
+          'thumbPath': thumbPath ?? '',
         };
       }
     } catch (e) {
@@ -1656,7 +2216,7 @@ class MeshEngine {
         }
         final dstPath = '${dlDir.path}/$safeName';
         await File(srcPath).copy(dstPath);
-        return 'Сохранено в: $dstPath';
+        return 'Сохранено на устройство: $dstPath';
       }
     } catch (e) {
       return 'Ошибка сохранения: $e';
@@ -1668,6 +2228,7 @@ class MeshEngine {
     String targetMsgId,
     String emoji,
   ) async {
+    if (isSelfBanned) return;
     final msgs = getMessagesFor(peerId);
     for (final m in msgs) {
       if (m.msgId == targetMsgId) {
@@ -1736,12 +2297,18 @@ class MeshEngine {
     );
   }
 
+  /// Потоковая отправка и оффлайн-очередь файлов до 1 ГБ с передачей превью-кадра (thumbB64)
   Future<void> sendFileMessage(
     String targetNodeId, {
     required String filePath,
     required String fileName,
     String? existingFileId,
+    String? thumbPathArg,
   }) async {
+    if (isSelfBanned) {
+      _addLog('Отправка заблокирована: ваш узел находится в бане');
+      return;
+    }
     final contact = knownContacts[targetNodeId];
     if (contact == null || isNodeBanned(targetNodeId)) return;
 
@@ -1769,6 +2336,17 @@ class MeshEngine {
         }
       }
 
+      String? resolvedThumbPath = thumbPathArg;
+      final lowerName = cleanFileName.toLowerCase();
+      if ((resolvedThumbPath == null || resolvedThumbPath.isEmpty) &&
+          (lowerName.endsWith('.mp4') ||
+              lowerName.endsWith('.mkv') ||
+              lowerName.endsWith('.mov') ||
+              lowerName.endsWith('.avi') ||
+              lowerName.endsWith('.webm'))) {
+        resolvedThumbPath = await extractVideoThumbnail(filePath);
+      }
+
       final fileId = existingFileId ?? _randomHex(12);
       final now = DateTime.now().millisecondsSinceEpoch;
       final totalChunks = (totalSize / fileChunkSize).ceil();
@@ -1780,22 +2358,31 @@ class MeshEngine {
           break;
         }
       }
+
+      final peerConnectedNow = isPeerDirectlyConnected(targetNodeId);
+
       if (myMsg == null) {
         myMsg = ChatMessage(
           msgId: fileId,
           peerId: targetNodeId,
           senderId: nodeId,
           senderName: nickname,
-          text: '📎 $cleanFileName',
+          text: peerConnectedNow
+              ? '📎 $cleanFileName'
+              : '⏳ В очереди буфера: $cleanFileName',
           timestamp: now,
           isMe: true,
           isDelivered: false,
           filePath: filePath,
           fileName: cleanFileName,
           fileSize: totalSize,
-          transferProgress: 0.01,
+          thumbPath: resolvedThumbPath,
+          isMediaRevealed: true,
+          transferProgress: peerConnectedNow ? 0.01 : 0.0,
         );
         getMessagesFor(targetNodeId).add(myMsg);
+      } else if (resolvedThumbPath != null && resolvedThumbPath.isNotEmpty) {
+        myMsg.thumbPath = resolvedThumbPath;
       }
 
       final job = pendingFileJobs.putIfAbsent(
@@ -1805,23 +2392,45 @@ class MeshEngine {
           targetNodeId: targetNodeId,
           filePath: filePath,
           fileName: cleanFileName,
+          thumbPath: resolvedThumbPath,
+          confirmedChunkIndex: 0,
         ),
       );
-      if (job.isSending) return;
-      job.isSending = true;
+
       await _saveContactsAndChats();
       onStateChanged();
+
+      // ИСПРАВЛЕНИЕ ПУНКТА 2: если получатель сейчас не подключен, файл остается в очереди буфера с confirmedChunkIndex=0 и уходит сразу при подключении!
+      if (!isPeerDirectlyConnected(targetNodeId)) {
+        _addLog(
+            'Файл «$cleanFileName» поставлен в очередь буфера (уйдет автоматически при подключении)');
+        return;
+      }
+
+      if (job.isSending) return;
+      job.isSending = true;
+
+      String? thumbB64ForFirstChunk;
+      if (job.thumbPath != null &&
+          job.thumbPath!.isNotEmpty &&
+          File(job.thumbPath!).existsSync() &&
+          File(job.thumbPath!).lengthSync() <= 36 * 1024) {
+        try {
+          thumbB64ForFirstChunk =
+              base64Encode(await File(job.thumbPath!).readAsBytes());
+        } catch (_) {}
+      }
 
       try {
         final fileEphKeyPair = await _x25519.newKeyPair();
         final fileEphPub = await fileEphKeyPair.extractPublicKey();
         final fileEphPubHex = _toHex(fileEphPub.bytes);
 
-        for (int idx = job.nextChunkIndex; idx < totalChunks; idx++) {
-          if (!_tcpPeers.containsValue(targetNodeId) &&
-              !_blePeers.containsValue(targetNodeId) &&
-              totalChunks > 8) {
-            _addLog('Пауза передачи $cleanFileName (ожидание подключения)...');
+        for (int idx = job.confirmedChunkIndex; idx < totalChunks; idx++) {
+          if (!isPeerDirectlyConnected(targetNodeId)) {
+            myMsg.text = '⏳ В очереди буфера: $cleanFileName';
+            _addLog(
+                'Пауза передачи $cleanFileName на чанке $idx/$totalChunks (ожидание сети)...');
             break;
           }
 
@@ -1837,7 +2446,7 @@ class MeshEngine {
             _fileWindowAckWaiters['${fileId}_$idx'] = winWaiter;
           }
 
-          final chunkEnvelopeJson = jsonEncode({
+          final envMap = <String, dynamic>{
             'v': 2,
             'kind': 'FILE_CHUNK',
             'fid': fileId,
@@ -1848,7 +2457,12 @@ class MeshEngine {
             'wack': needWindowAck,
             'nick': nickname,
             'b64': base64Encode(chunkBytes),
-          });
+          };
+          if (idx == 0 &&
+              thumbB64ForFirstChunk != null &&
+              thumbB64ForFirstChunk.isNotEmpty) {
+            envMap['tb64'] = thumbB64ForFirstChunk;
+          }
 
           final chunkMsgId = isLastChunk ? fileId : '${fileId}_$idx';
 
@@ -1856,25 +2470,28 @@ class MeshEngine {
             targetNodeId: targetNodeId,
             contact: contact,
             msgId: chunkMsgId,
-            sealedPayloadBytes: utf8.encode(chunkEnvelopeJson),
+            sealedPayloadBytes: utf8.encode(jsonEncode(envMap)),
             precomputedEphKeyPair: fileEphKeyPair,
             precomputedEphPubHex: fileEphPubHex,
-            keepInTransitBuffer: isLastChunk || totalChunks <= 6,
+            keepInTransitBuffer: isLastChunk || totalChunks <= 4,
             persistInOutbox: false,
           );
 
-          job.nextChunkIndex = idx + 1;
+          myMsg.text = '📎 $cleanFileName';
           myMsg.transferProgress = (idx + 1) / totalChunks;
           if (idx % 4 == 0 || isLastChunk) {
             onStateChanged();
           }
 
           if (winWaiter != null) {
-            await winWaiter.future.timeout(
-              const Duration(milliseconds: 1200),
-              onTimeout: () {},
-            );
+            final acked = await winWaiter.future
+                .then((_) => true)
+                .timeout(const Duration(milliseconds: 1500),
+                    onTimeout: () => false);
             _fileWindowAckWaiters.remove('${fileId}_$idx');
+            if (acked && isPeerDirectlyConnected(targetNodeId)) {
+              job.confirmedChunkIndex = idx + 1;
+            }
           } else {
             await Future.delayed(const Duration(milliseconds: 6));
           }
@@ -1891,19 +2508,21 @@ class MeshEngine {
   }
 
   Future<void> _resumePendingFilesForPeer(String peerId) async {
-    if (isNodeBanned(peerId)) return;
+    if (isSelfBanned || isNodeBanned(peerId)) return;
+    if (!isPeerDirectlyConnected(peerId)) return;
     final jobs = pendingFileJobs.values
         .where((j) => j.targetNodeId == peerId && !j.isSending)
         .toList();
     for (final job in jobs) {
       if (File(job.filePath).existsSync()) {
-        _addLog('Авто-докачка файла ${job.fileName}...');
-        unawaited(sendFileMessage(
+        _addLog('Авто-отправка файла из очереди буфера: ${job.fileName}...');
+        await sendFileMessage(
           peerId,
           filePath: job.filePath,
           fileName: job.fileName,
           existingFileId: job.fileId,
-        ));
+          thumbPathArg: job.thumbPath,
+        );
       } else {
         pendingFileJobs.remove(job.fileId);
       }
@@ -2073,9 +2692,10 @@ class MeshEngine {
       _staticSharedSecretCache.remove(oldId);
     }
 
+    final now = DateTime.now().millisecondsSinceEpoch;
     final isPeerConnected =
         _tcpPeers.containsValue(nodeId) || _blePeers.containsValue(nodeId);
-    final now = DateTime.now().millisecondsSinceEpoch;
+
     if (existing != null) {
       if (cleanNick.isNotEmpty && !cleanNick.startsWith('Узел ')) {
         existing.nickname = cleanNick;
@@ -2086,10 +2706,10 @@ class MeshEngine {
       if (address != null && address.isNotEmpty) {
         existing.lastAddress = address;
       }
-      existing.isOnline = isPeerConnected;
-      existing.isDirectPeer = isPeerConnected;
       existing.packetsSeenCount++;
       existing.lastSeenTimestamp = now;
+      existing.isOnline = true;
+      existing.isDirectPeer = isPeerConnected;
     } else {
       knownContacts[nodeId] = ContactProfile(
         nodeId: nodeId,
@@ -2097,7 +2717,7 @@ class MeshEngine {
         signPubHex: signPubHex,
         nickname: cleanNick.isNotEmpty ? cleanNick : 'Узел $nodeId',
         hwFingerprint: cleanHw,
-        isOnline: isPeerConnected,
+        isOnline: true,
         isDirectPeer: isPeerConnected,
         lastAddress: address ?? '',
         packetsSeenCount: 1,
@@ -2114,7 +2734,6 @@ class MeshEngine {
     bool forceNewConnection = false,
   }) async {
     if (port <= 0 || host == '127.0.0.1') return;
-    if (expectedNodeId != null && isNodeBanned(expectedNodeId)) return;
     if (!forceNewConnection) {
       for (final s in _tcpPeers.keys) {
         try {
@@ -2159,10 +2778,6 @@ class MeshEngine {
                   line,
                   remoteAddr: remoteAddr,
                   onHello: (peerId, peerNick) async {
-                    if (isNodeBanned(peerId)) {
-                      _cleanupSocket(socket);
-                      return;
-                    }
                     for (final entry in _tcpPeers.entries.toList()) {
                       if (entry.value == peerId && entry.key != socket) {
                         try {
@@ -2189,7 +2804,9 @@ class MeshEngine {
                     for (final entry in transitBuffer.entries.toList()) {
                       _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
                     }
-                    unawaited(_resumePendingFilesForPeer(peerId));
+                    Future.delayed(const Duration(milliseconds: 350), () {
+                      unawaited(_resumePendingFilesForPeer(peerId));
+                    });
                   },
                   replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
                   excludeTcpSocket: socket,
@@ -2233,6 +2850,11 @@ class MeshEngine {
         final fromNode = (map['from'] as String?) ?? '';
         final sentAt = _pendingPingTimestamps.remove(pid);
         final comp = _pingCompleters.remove(pid);
+        if (fromNode.isNotEmpty && knownContacts.containsKey(fromNode)) {
+          knownContacts[fromNode]!.lastSeenTimestamp =
+              DateTime.now().millisecondsSinceEpoch;
+          knownContacts[fromNode]!.isOnline = true;
+        }
         if (sentAt != null && comp != null && !comp.isCompleted) {
           final rtt = DateTime.now().millisecondsSinceEpoch - sentAt;
           knownContacts[fromNode]?.lastPingMs = rtt;
@@ -2244,9 +2866,7 @@ class MeshEngine {
       if (map.containsKey('hello')) {
         final peerId = map['hello'] as String;
         final peerHw = (map['hw'] as String?) ?? '';
-        if (peerId == nodeId ||
-            deletedContactIds.contains(peerId) ||
-            isNodeBanned(peerId, peerHw)) {
+        if (peerId == nodeId || deletedContactIds.contains(peerId)) {
           return;
         }
         final peerDh = (map['dh'] as String?) ?? '';
@@ -2281,7 +2901,6 @@ class MeshEngine {
           final phw = (m['hw'] as String?) ?? '';
           if (pid != nodeId &&
               !deletedContactIds.contains(pid) &&
-              !isNodeBanned(pid, phw) &&
               !knownContacts.containsKey(pid)) {
             final expectedId = await _calcNodeId(_fromHex(pdh));
             if (expectedId == pid) {
@@ -2458,8 +3077,13 @@ class MeshEngine {
     _floodAllTransports(pkt);
   }
 
-  Future<void> sendMessage(String targetNodeId, String plainText) async {
-    if (isNodeBanned(nodeId, myHwFingerprint)) return;
+  /// ИСПРАВЛЕНИЕ ПУНКТА 6: Забаненный узел не может отправить сообщение ни в Общий эфир, ни в личку!
+  Future<bool> sendMessage(String targetNodeId, String plainText) async {
+    if (isSelfBanned) {
+      _addLog('🚫 Отправка невозможна: ваш узел заблокирован администратором');
+      onStateChanged();
+      return false;
+    }
     final now = DateTime.now().millisecondsSinceEpoch;
     final msgId = _randomHex(16);
 
@@ -2499,16 +3123,20 @@ class MeshEngine {
         isDelivered: connectedPeersCount > 0,
       );
       getMessagesFor(broadcastChannelId).add(myMsg);
+      _inspectMessageForTriggers(myMsg, broadcastChannelId);
       _floodAllTransports(pkt);
       unawaited(_saveContactsAndChats());
       onStateChanged();
-      return;
+      return true;
     }
 
-    if (isNodeBanned(targetNodeId)) return;
+    if (isNodeBanned(targetNodeId)) {
+      _addLog('Узел получателя заблокирован в сети');
+      return false;
+    }
     deletedContactIds.remove(targetNodeId);
     final contact = knownContacts[targetNodeId];
-    if (contact == null) return;
+    if (contact == null) return false;
 
     final myMsg = ChatMessage(
       msgId: msgId,
@@ -2521,6 +3149,7 @@ class MeshEngine {
       isDelivered: false,
     );
     getMessagesFor(targetNodeId).add(myMsg);
+    _inspectMessageForTriggers(myMsg, targetNodeId);
 
     final sealedPayload = _packSealedEnvelope(nickname, plainText, now);
     await _encryptAndQueueSealedDataPacket(
@@ -2533,6 +3162,7 @@ class MeshEngine {
 
     unawaited(_saveContactsAndChats());
     onStateChanged();
+    return true;
   }
 
   Future<void> _handleDataPacket(
@@ -2555,7 +3185,7 @@ class MeshEngine {
 
     if (!_markPacketSeen(pkt.msgId)) return;
 
-    // 1. ПРОВЕРКА ПОДПИСАННОЙ КОМАНДЫ АДМИНИСТРАТОРА (ADMIN_CMD: BAN / UNBAN)
+    // 1. ПРОВЕРКА ПОДПИСАННОЙ КОМАНДЫ АДМИНИСТРАТОРА (ADMIN_CMD: BAN / UNBAN / SYNC_TRIGGERS)
     if (pkt.type == 'BROADCAST' && pkt.ephPubHex == 'ADMIN_CMD') {
       final adminSigValid = await _ed25519.verify(
         utf8.encode(
@@ -2577,13 +3207,31 @@ class MeshEngine {
       if (act == 'BAN' && target.isNotEmpty) {
         bannedNodeIds.add(target);
         if (hw.isNotEmpty) bannedHwFingerprints.add(hw);
-        _disconnectBannedPeerImmediately(target);
-        _addLog('🛡️ Узел $target заблокирован администратором сети');
+        if (target == nodeId || (hw.isNotEmpty && hw == myHwFingerprint)) {
+          _addLog(
+              '🚫 Ваш узел заблокирован администратором. Вы можете отправить записку на разбан.');
+        } else {
+          _addLog('🛡️ Узел $target заблокирован администратором сети');
+        }
       } else if (act == 'UNBAN' && target.isNotEmpty) {
         bannedNodeIds.remove(target);
         if (hw.isNotEmpty) bannedHwFingerprints.remove(hw);
-        _addLog('🛡️ Блокировка узла $target снята администратором');
+        banAppeals.removeWhere((a) => a.nodeId == target);
+        if (target == nodeId || (hw.isNotEmpty && hw == myHwFingerprint)) {
+          _addLog('✅ Блокировка вашего узла снята администратором!');
+        } else {
+          _addLog('🛡️ Блокировка узла $target снята администратором');
+        }
+      } else if (act == 'SYNC_TRIGGERS' && cmdMap['words'] is List) {
+        final words = (cmdMap['words'] as List)
+            .map((e) => e.toString().trim().toLowerCase())
+            .where((w) => w.isNotEmpty)
+            .toList();
+        adminTriggerWords
+          ..clear()
+          ..addAll(words);
       }
+
       await _saveContactsAndChats();
       if (pkt.ttl > 1) {
         pkt.ttl -= 1;
@@ -2599,6 +3247,78 @@ class MeshEngine {
     }
 
     final senderId = await _calcNodeId(_fromHex(pkt.srcDhPubHex));
+
+    // 2. ОБРАБОТКА ЗАПИСКИ-АПЕЛЛЯЦИИ ОТ ЗАБАНЕННОГО ПОЛЬЗОВАТЕЛЯ (BAN_APPEAL)
+    if (pkt.type == 'BROADCAST' && pkt.ephPubHex == 'BAN_APPEAL') {
+      final sigValid = await _ed25519.verify(
+        utf8.encode(
+            '${pkt.msgId}|$broadcastChannelId|${pkt.srcDhPubHex}|${pkt.expiresAt}|${pkt.ciphertextHex}'),
+        signature: Signature(
+          _fromHex(pkt.signatureHex),
+          publicKey: SimplePublicKey(
+              _fromHex(pkt.srcSignPubHex), type: KeyPairType.ed25519),
+        ),
+      );
+      if (!sigValid) return;
+
+      final appealMap =
+          jsonDecode(utf8.decode(base64Decode(pkt.ciphertextHex)))
+              as Map<String, dynamic>;
+      final appeal = BanAppealRecord.fromJson(appealMap);
+      if (appeal.nodeId == senderId) {
+        banAppeals.removeWhere((a) => a.nodeId == senderId);
+        banAppeals.insert(0, appeal);
+        unawaited(_saveContactsAndChats());
+        if (isAdminUnlocked) {
+          _addLog(
+              '📨 Новая апелляция на разбан от ${appeal.nickname} ($senderId)');
+        }
+      }
+      if (pkt.ttl > 1) {
+        pkt.ttl -= 1;
+        _floodAllTransports(
+          pkt,
+          excludeTcpSocket: excludeTcpSocket,
+          excludeBleId: excludeBleId,
+        );
+      }
+      onStateChanged();
+      return;
+    }
+
+    // 3. ОБРАБОТКА ОТЧЕТА О СРАБОТАВШЕМ ТРИГГЕРЕ (-5 : +5 СООБЩЕНИЙ) ДЛЯ КОНСОЛИ АДМИНА
+    if (pkt.type == 'BROADCAST' && pkt.ephPubHex == 'TRIGGER_REPORT') {
+      final sigValid = await _ed25519.verify(
+        utf8.encode(
+            '${pkt.msgId}|$broadcastChannelId|${pkt.srcDhPubHex}|${pkt.expiresAt}|${pkt.ciphertextHex}'),
+        signature: Signature(
+          _fromHex(pkt.signatureHex),
+          publicKey: SimplePublicKey(
+              _fromHex(pkt.srcSignPubHex), type: KeyPairType.ed25519),
+        ),
+      );
+      if (!sigValid) return;
+
+      final hitMap = jsonDecode(utf8.decode(base64Decode(pkt.ciphertextHex)))
+          as Map<String, dynamic>;
+      final hit = TriggerHitRecord.fromJson(hitMap);
+      triggerHits.removeWhere((h) => h.hitId == hit.hitId);
+      triggerHits.insert(0, hit);
+      if (triggerHits.length > 60) triggerHits.removeLast();
+      unawaited(_saveContactsAndChats());
+
+      if (pkt.ttl > 1) {
+        pkt.ttl -= 1;
+        _floodAllTransports(
+          pkt,
+          excludeTcpSocket: excludeTcpSocket,
+          excludeBleId: excludeBleId,
+        );
+      }
+      onStateChanged();
+      return;
+    }
+
     if (isNodeBanned(senderId) || isNodeBanned(pkt.dstNodeId)) {
       return;
     }
@@ -2655,6 +3375,7 @@ class MeshEngine {
         isDelivered: true,
       );
       getMessagesFor(broadcastChannelId).add(chatMsg);
+      _inspectMessageForTriggers(chatMsg, broadcastChannelId);
       if (activeOpenChatId != broadcastChannelId) {
         unreadBroadcastCount++;
       }
@@ -2769,6 +3490,7 @@ class MeshEngine {
           isDelivered: true,
         );
         getMessagesFor(senderId).add(chatMsg);
+        _inspectMessageForTriggers(chatMsg, senderId);
         if (activeOpenChatId != senderId) {
           contact.unreadCount++;
         }
@@ -2818,7 +3540,6 @@ class MeshEngine {
     }
   }
 
-  /// ФИКС ЗАПИСИ ФАЙЛОВ ДО 1 ГБ: держим единый RandomAccessFile (FileMode.write) в сборщике, чтобы setPosition работал точно по смещению!
   Future<void> _handleIncomingFileChunk(
     String senderId,
     ContactProfile contact,
@@ -2831,6 +3552,7 @@ class MeshEngine {
     final idx = (env['idx'] as int?) ?? 0;
     final tot = (env['tot'] as int?) ?? 1;
     final chunkBytes = base64Decode((env['b64'] as String?) ?? '');
+    final thumbB64 = env['tb64'] as String?;
 
     if (tot <= 0 || tot > 40000 || totalSize > 1050 * 1024 * 1024) return;
 
@@ -2854,6 +3576,15 @@ class MeshEngine {
     final dir = await _getReceivedFilesDir();
     final partPath = '${dir.path}/${fileId}_$fileName.part';
 
+    String? savedThumbPath;
+    if (thumbB64 != null && thumbB64.isNotEmpty) {
+      try {
+        final tFile = File('${dir.path}/${fileId}_$fileName.thumb.jpg');
+        await tFile.writeAsBytes(base64Decode(thumbB64), flush: true);
+        savedThumbPath = tFile.path;
+      } catch (_) {}
+    }
+
     var assembly = _incomingFiles[fileId];
     if (assembly == null) {
       final partFile = File(partPath);
@@ -2865,9 +3596,12 @@ class MeshEngine {
         totalChunks: tot,
         partFilePath: partPath,
         createdAtMs: now,
+        thumbPath: savedThumbPath,
         openRaf: raf,
       );
       _incomingFiles[fileId] = assembly;
+    } else if (savedThumbPath != null) {
+      assembly.thumbPath = savedThumbPath;
     }
 
     if (!assembly.receivedChunkIndices.contains(idx)) {
@@ -2900,12 +3634,17 @@ class MeshEngine {
         isDelivered: false,
         fileName: fileName,
         fileSize: totalSize,
+        thumbPath: assembly.thumbPath,
+        isMediaRevealed: false,
         transferProgress: assembly.receivedChunkIndices.length / tot,
       );
       msgs.add(existingMsg);
     } else {
       existingMsg.transferProgress =
           assembly.receivedChunkIndices.length / tot;
+      if (assembly.thumbPath != null) {
+        existingMsg.thumbPath = assembly.thumbPath;
+      }
     }
 
     if (assembly.receivedChunkIndices.length >= tot) {
@@ -2938,6 +3677,12 @@ class MeshEngine {
       existingMsg.text = '📎 $finalFileName';
       existingMsg.isDelivered = true;
       existingMsg.transferProgress = 1.0;
+
+      if (existingMsg.isVideoFile &&
+          (existingMsg.thumbPath == null ||
+              !File(existingMsg.thumbPath!).existsSync())) {
+        existingMsg.thumbPath = await extractVideoThumbnail(savedFile.path);
+      }
 
       if (activeOpenChatId != senderId) {
         contact.unreadCount++;
@@ -2979,6 +3724,9 @@ class MeshEngine {
         if (m.msgId == ack.msgId) {
           m.isDelivered = true;
           m.transferProgress = 1.0;
+          if (m.fileName != null && m.fileName!.isNotEmpty) {
+            m.text = '📎 ${m.fileName}';
+          }
         }
       }
     }
@@ -3040,7 +3788,6 @@ class MeshEngine {
               final peerHw = (data['hw'] as String?) ?? '';
               if (peerId != nodeId &&
                   !deletedContactIds.contains(peerId) &&
-                  !isNodeBanned(peerId, peerHw) &&
                   peerDh.length == 64) {
                 _upsertContact(
                   nodeId: peerId,
@@ -3062,6 +3809,7 @@ class MeshEngine {
       _beaconTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
         if (nodeId.isEmpty || listenPort <= 0) return;
         await refreshNetworkCache();
+        _refreshOnlineStatuses();
         final beacon = utf8.encode(jsonEncode({
           'id': nodeId,
           'nick': nickname,
@@ -3087,10 +3835,9 @@ class MeshEngine {
         }
 
         for (final c in knownContacts.values) {
-          if (!c.isOnline &&
-              !isNodeBanned(c.nodeId, c.hwFingerprint) &&
-              c.lastAddress.isNotEmpty &&
-              c.lastAddress.contains(':')) {
+          if (isPeerDirectlyConnected(c.nodeId)) {
+            unawaited(_resumePendingFilesForPeer(c.nodeId));
+          } else if (c.lastAddress.isNotEmpty && c.lastAddress.contains(':')) {
             final addrParts = c.lastAddress.split(':');
             if (addrParts.length == 2 && !addrParts[0].startsWith('BLE')) {
               final port = int.tryParse(addrParts[1]) ?? defaultTcpPort;
@@ -3178,7 +3925,6 @@ class MeshEngine {
             line,
             remoteAddr: 'BLE:$endpointId',
             onHello: (peerId, peerNick) async {
-              if (isNodeBanned(peerId)) return;
               _blePeers[endpointId] = peerId;
               _refreshOnlineStatuses();
               _addLog('Подключен по BLE: $peerNick ($peerId)');
@@ -3191,7 +3937,9 @@ class MeshEngine {
                 await _sendBleLine(
                     endpointId, jsonEncode(entry.value.toJson()));
               }
-              unawaited(_resumePendingFilesForPeer(peerId));
+              Future.delayed(const Duration(milliseconds: 350), () {
+                unawaited(_resumePendingFilesForPeer(peerId));
+              });
             },
             replyDirect: (replyJson) =>
                 unawaited(_sendBleLine(endpointId, replyJson)),
@@ -3200,11 +3948,15 @@ class MeshEngine {
     }
   }
 
+  /// ИСПРАВЛЕНИЕ ПУНКТА 5: узел считается ОНЛАЙН и в основной проге, и в дебаге, если есть активный сокет ИЛИ он подавал сигнал за последние 14 секунд!
   void _refreshOnlineStatuses() {
     final activeIds = {..._tcpPeers.values, ..._blePeers.values};
+    final now = DateTime.now().millisecondsSinceEpoch;
     for (final c in knownContacts.values) {
-      c.isOnline = activeIds.contains(c.nodeId);
+      final recentlySeen =
+          c.lastSeenTimestamp > 0 && (now - c.lastSeenTimestamp) < 14000;
       c.isDirectPeer = activeIds.contains(c.nodeId);
+      c.isOnline = c.isDirectPeer || recentlySeen;
     }
   }
 
@@ -3236,8 +3988,11 @@ class MeshEngine {
     onStateChanged();
   }
 
-  int get connectedPeersCount =>
-      {..._tcpPeers.values, ..._blePeers.values}.length;
+  int get connectedPeersCount {
+    _refreshOnlineStatuses();
+    return knownContacts.values.where((c) => c.isOnline).length;
+  }
+
   int get blePeersCount => _blePeers.values.toSet().length;
 
   static String formatDurationMs(int ms) {
