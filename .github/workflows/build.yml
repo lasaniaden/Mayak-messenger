@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.3.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.4.0
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
@@ -33,7 +33,7 @@ jobs:
           import base64, glob, os, re
 
           # 0. Восстанавливаем постоянный ключ подписи mayak_release.jks для бесшовного обновления APK поверх старых версий
-          ks_b64 = "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"
+          ks_b64 = "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"
           os.makedirs("android/app", exist_ok=True)
           with open("android/app/mayak_release.jks", "wb") as kf:
               kf.write(base64.b64decode(ks_b64))
@@ -118,8 +118,8 @@ jobs:
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 13
-                  versionName = "1.3.0"
+                  versionCode = 14
+                  versionName = "1.4.0"
               }
 
               packaging {
@@ -184,8 +184,8 @@ jobs:
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 13
-                  versionName "1.3.0"
+                  versionCode 14
+                  versionName "1.4.0"
               }
 
               packagingOptions {
@@ -230,6 +230,7 @@ jobs:
           """)
 
           manifest_path = "android/app/src/main/AndroidManifest.xml"
+          os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
           with open(manifest_path, "w") as f:
               f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -314,7 +315,7 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем MainActivity.kt
+          # 6. Записываем MainActivity.kt (с MediaMetadataRetriever для превью видео и надежным хранилищем)
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -334,8 +335,10 @@ jobs:
           import android.content.pm.PackageManager
           import android.content.pm.ServiceInfo
           import android.database.Cursor
+          import android.graphics.Bitmap
           import android.location.LocationManager
           import android.media.AudioAttributes
+          import android.media.MediaMetadataRetriever
           import android.media.MediaPlayer
           import android.media.MediaRecorder
           import android.media.RingtoneManager
@@ -519,6 +522,7 @@ jobs:
               private var videoTextureEntry: TextureRegistry.SurfaceTextureEntry? = null
               private var videoSurface: Surface? = null
               private var videoPlayer: MediaPlayer? = null
+              private var videoCompletedFlag: Boolean = false
 
               private val connectedBleEndpoints = mutableSetOf<String>()
               private val mainHandler = Handler(Looper.getMainLooper())
@@ -599,6 +603,19 @@ jobs:
                               "getPersistentStorageDir" -> {
                                   val dir = File(filesDir, "mayak_received").apply { mkdirs() }
                                   result.success(dir.absolutePath)
+                              }
+                              "getAppInternalDataDir" -> {
+                                  val dir = File(filesDir, "mayak_data").apply { mkdirs() }
+                                  result.success(dir.absolutePath)
+                              }
+                              "extractVideoThumbnail" -> {
+                                  val path = call.argument<String>("path") ?: ""
+                                  val thumb = extractVideoThumbnailInternal(path)
+                                  result.success(thumb)
+                              }
+                              "clearDownloadedMediaCache" -> {
+                                  val freedBytes = clearDownloadedMediaCacheInternal()
+                                  result.success(freedBytes)
                               }
                               "startBackgroundService" -> {
                                   startBgServiceSafe()
@@ -781,6 +798,52 @@ jobs:
                   }
               }
 
+              private fun extractVideoThumbnailInternal(videoPath: String): String? {
+                  if (videoPath.isBlank()) return null
+                  val thumbFile = File("$videoPath.thumb.jpg")
+                  if (thumbFile.exists() && thumbFile.length() > 100) {
+                      return thumbFile.absolutePath
+                  }
+                  val retriever = MediaMetadataRetriever()
+                  return try {
+                      retriever.setDataSource(videoPath)
+                      val bmp = retriever.getFrameAtTime(300_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                          ?: retriever.getFrameAtTime(0L)
+                          ?: return null
+                      val maxW = 480
+                      val scale = if (bmp.width > maxW) maxW.toFloat() / bmp.width.toFloat() else 1.0f
+                      val outW = (bmp.width * scale).toInt().coerceAtLeast(64)
+                      val outH = (bmp.height * scale).toInt().coerceAtLeast(64)
+                      val scaled = Bitmap.createScaledBitmap(bmp, outW, outH, true)
+                      FileOutputStream(thumbFile).use { out ->
+                          scaled.compress(Bitmap.CompressFormat.JPEG, 78, out)
+                      }
+                      thumbFile.absolutePath
+                  } catch (_: Throwable) {
+                      null
+                  } finally {
+                      try { retriever.release() } catch (_: Throwable) {}
+                  }
+              }
+
+              private fun clearDownloadedMediaCacheInternal(): Long {
+                  var freed = 0L
+                  for (folderName in listOf("mayak_received", "picked_files", "voice_notes")) {
+                      val dir = File(filesDir, folderName)
+                      if (dir.exists() && dir.isDirectory) {
+                          dir.listFiles()?.forEach { f ->
+                              try {
+                                  if (f.isFile) {
+                                      freed += f.length()
+                                      f.delete()
+                                  }
+                              } catch (_: Throwable) {}
+                          }
+                      }
+                  }
+                  return freed
+              }
+
               private fun initInAppVideoInternal(path: String): Map<String, Any>? {
                   return try {
                       disposeInAppVideoInternal()
@@ -788,12 +851,16 @@ jobs:
                       val entry = engine.renderer.createSurfaceTexture()
                       val surface = Surface(entry.surfaceTexture())
                       val mp = MediaPlayer()
+                      videoCompletedFlag = false
                       mp.setDataSource(path)
                       mp.setSurface(surface)
                       mp.prepare()
                       val w = mp.videoWidth.coerceAtLeast(320)
                       val h = mp.videoHeight.coerceAtLeast(240)
                       entry.surfaceTexture().setDefaultBufferSize(w, h)
+                      mp.setOnCompletionListener {
+                          videoCompletedFlag = true
+                      }
                       mp.start()
 
                       videoTextureEntry = entry
@@ -816,12 +883,22 @@ jobs:
                   val mp = videoPlayer ?: return null
                   return try {
                       when (action) {
-                          "play" -> if (!mp.isPlaying) mp.start()
+                          "play" -> {
+                              if (videoCompletedFlag) {
+                                  mp.seekTo(0)
+                                  videoCompletedFlag = false
+                              }
+                              if (!mp.isPlaying) mp.start()
+                          }
                           "pause" -> if (mp.isPlaying) mp.pause()
-                          "seek" -> mp.seekTo(posMs.coerceIn(0, mp.duration.coerceAtLeast(1)))
+                          "seek" -> {
+                              videoCompletedFlag = false
+                              mp.seekTo(posMs.coerceIn(0, mp.duration.coerceAtLeast(1)))
+                          }
                       }
                       mapOf(
                           "isPlaying" to mp.isPlaying,
+                          "isCompleted" to videoCompletedFlag,
                           "positionMs" to mp.currentPosition,
                           "durationMs" to mp.duration.coerceAtLeast(1)
                       )
@@ -831,6 +908,7 @@ jobs:
               }
 
               private fun disposeInAppVideoInternal() {
+                  videoCompletedFlag = false
                   try { videoPlayer?.stop() } catch (_: Throwable) {}
                   try { videoPlayer?.release() } catch (_: Throwable) {}
                   videoPlayer = null
@@ -1014,12 +1092,18 @@ jobs:
                               res.success(null)
                               return
                           }
+                          val lower = displayName.lowercase(Locale.US)
+                          var thumbPath: String? = null
+                          if (lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".mov") || lower.endsWith(".webm") || lower.endsWith(".avi")) {
+                              thumbPath = extractVideoThumbnailInternal(outFile.absolutePath)
+                          }
                           res.success(
                               mapOf(
                                   "path" to outFile.absolutePath,
                                   "name" to displayName,
                                   "size" to outFile.length(),
-                                  "mime" to mime
+                                  "mime" to mime,
+                                  "thumbPath" to (thumbPath ?: "")
                               )
                           )
                       } catch (t: Throwable) {
