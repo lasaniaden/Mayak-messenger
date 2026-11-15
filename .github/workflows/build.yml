@@ -25,18 +25,24 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.4.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.5.0
+        env:
+          GH_RUN_NUM: ${{ github.run_number }}
         run: |
           rm -rf android
           flutter create --platforms=android --org com.mayak.mesh --project-name=p2p_mesh .
           python3 -c '
           import base64, glob, os, re
 
-          # 0. Восстанавливаем постоянный ключ подписи mayak_release.jks для бесшовного обновления APK поверх старых версий
+          # 0. Восстанавливаем фиксированный ключ подписи mayak_release.jks (100% идентичный v1.4.0)
           ks_b64 = "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"
           os.makedirs("android/app", exist_ok=True)
           with open("android/app/mayak_release.jks", "wb") as kf:
               kf.write(base64.b64decode(ks_b64))
+
+          # Автоинкремент versionCode от номера сборки GitHub Actions, чтобы каждый новый APK всегда имел больший versionCode и обновлялся поверх старого без конфликта!
+          run_num = int(os.environ.get("GH_RUN_NUM", "1") or "1")
+          ver_code = 1500 + run_num
 
           # 1. Настраиваем gradle.properties
           gp_path = "android/gradle.properties"
@@ -80,144 +86,148 @@ jobs:
               with open(gw, "w") as f:
                   f.write(gwc)
 
-          # 4. Переписываем android/app/build.gradle(.kts) с фиксированной подписью mayak_release.jks
+          # 4. Переписываем android/app/build.gradle(.kts) с фиксированной подписью mayak_release.jks и растущим versionCode
           kts_path = "android/app/build.gradle.kts"
           groovy_path = "android/app/build.gradle"
 
           if os.path.exists(kts_path):
               with open(kts_path, "w") as f:
-                  f.write("""plugins {
+                  f.write(f"""plugins {{
               id("com.android.application")
               id("kotlin-android")
               id("dev.flutter.flutter-gradle-plugin")
-          }
+          }}
 
-          android {
+          android {{
               namespace = "com.mayak.mesh.p2p_mesh"
               compileSdk = 36
 
-              compileOptions {
+              compileOptions {{
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
-              }
+              }}
 
-              kotlinOptions {
+              kotlinOptions {{
                   jvmTarget = "17"
-              }
+              }}
 
-              signingConfigs {
-                  create("mayakFixed") {
+              signingConfigs {{
+                  create("mayakFixed") {{
                       storeFile = file("mayak_release.jks")
                       storePassword = "mayak2026"
                       keyAlias = "mayak_key"
                       keyPassword = "mayak2026"
-                  }
-              }
+                      enableV1Signing = true
+                      enableV2Signing = true
+                  }}
+              }}
 
-              defaultConfig {
+              defaultConfig {{
                   applicationId = "com.mayak.mesh.p2p_mesh"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 14
-                  versionName = "1.4.0"
-              }
+                  versionCode = {ver_code}
+                  versionName = "1.5.0"
+              }}
 
-              packaging {
-                  jniLibs {
+              packaging {{
+                  jniLibs {{
                       useLegacyPackaging = true
-                  }
-              }
+                  }}
+              }}
 
-              buildTypes {
-                  getByName("debug") {
+              buildTypes {{
+                  getByName("debug") {{
                       signingConfig = signingConfigs.getByName("mayakFixed")
-                  }
-                  getByName("release") {
+                  }}
+                  getByName("release") {{
                       signingConfig = signingConfigs.getByName("mayakFixed")
                       isMinifyEnabled = false
                       isShrinkResources = false
-                  }
-              }
-          }
+                  }}
+              }}
+          }}
 
-          flutter {
+          flutter {{
               source = "../.."
-          }
+          }}
 
-          dependencies {
+          dependencies {{
               implementation("com.google.android.gms:play-services-nearby:19.3.0")
               implementation("androidx.core:core-ktx:1.13.1")
               implementation("androidx.appcompat:appcompat:1.7.0")
-          }
+          }}
           """)
           elif os.path.exists(groovy_path):
               with open(groovy_path, "w") as f:
-                  f.write("""plugins {
+                  f.write(f"""plugins {{
               id "com.android.application"
               id "kotlin-android"
               id "dev.flutter.flutter-gradle-plugin"
-          }
+          }}
 
-          android {
+          android {{
               namespace "com.mayak.mesh.p2p_mesh"
               compileSdk 36
 
-              compileOptions {
+              compileOptions {{
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
-              }
+              }}
 
-              kotlinOptions {
+              kotlinOptions {{
                   jvmTarget = "17"
-              }
+              }}
 
-              signingConfigs {
-                  mayakFixed {
+              signingConfigs {{
+                  mayakFixed {{
                       storeFile file("mayak_release.jks")
                       storePassword "mayak2026"
                       keyAlias "mayak_key"
                       keyPassword "mayak2026"
-                  }
-              }
+                      v1SigningEnabled true
+                      v2SigningEnabled true
+                  }}
+              }}
 
-              defaultConfig {
+              defaultConfig {{
                   applicationId "com.mayak.mesh.p2p_mesh"
                   minSdkVersion 23
                   targetSdkVersion 34
-                  versionCode 14
-                  versionName "1.4.0"
-              }
+                  versionCode {ver_code}
+                  versionName "1.5.0"
+              }}
 
-              packagingOptions {
-                  jniLibs {
+              packagingOptions {{
+                  jniLibs {{
                       useLegacyPackaging true
-                  }
-              }
+                  }}
+              }}
 
-              buildTypes {
-                  debug {
+              buildTypes {{
+                  debug {{
                       signingConfig signingConfigs.mayakFixed
-                  }
-                  release {
+                  }}
+                  release {{
                       signingConfig signingConfigs.mayakFixed
                       minifyEnabled false
                       shrinkResources false
-                  }
-              }
-          }
+                  }}
+              }}
+          }}
 
-          flutter {
+          flutter {{
               source "../.."
-          }
+          }}
 
-          dependencies {
+          dependencies {{
               implementation "com.google.android.gms:play-services-nearby:19.3.0"
               implementation "androidx.core:core-ktx:1.13.1"
               implementation "androidx.appcompat:appcompat:1.7.0"
-          }
+          }}
           """)
 
-          # 5. Записываем AndroidManifest.xml
+          # 5. Записываем AndroidManifest.xml (с allowBackup=true)
           res_xml_dir = "android/app/src/main/res/xml"
           os.makedirs(res_xml_dir, exist_ok=True)
           with open(os.path.join(res_xml_dir, "file_paths.xml"), "w") as f:
@@ -268,6 +278,8 @@ jobs:
                   android:label="Маяк P2P"
                   android:name="${applicationName}"
                   android:icon="@mipmap/ic_launcher"
+                  android:allowBackup="true"
+                  android:fullBackupContent="true"
                   android:usesCleartextTraffic="true"
                   android:enableOnBackInvokedCallback="true">
 
@@ -315,7 +327,7 @@ jobs:
           </manifest>
           """)
 
-          # 6. Записываем MainActivity.kt (с MediaMetadataRetriever для превью видео и надежным хранилищем)
+          # 6. Записываем MainActivity.kt (с синхронным нативным хранилищем БД и генерацией превью в памяти без мусорных файлов)
           kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
           kt_path = kt_files[0] if kt_files else "android/app/src/main/kotlin/com/mayak/mesh/p2p_mesh/MainActivity.kt"
           os.makedirs(os.path.dirname(kt_path), exist_ok=True)
@@ -336,6 +348,7 @@ jobs:
           import android.content.pm.ServiceInfo
           import android.database.Cursor
           import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
           import android.location.LocationManager
           import android.media.AudioAttributes
           import android.media.MediaMetadataRetriever
@@ -358,6 +371,7 @@ jobs:
           import android.provider.MediaStore
           import android.provider.OpenableColumns
           import android.provider.Settings
+          import android.util.Base64
           import android.view.Surface
           import android.webkit.MimeTypeMap
           import androidx.core.app.ActivityCompat
@@ -380,6 +394,7 @@ jobs:
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
           import io.flutter.view.TextureRegistry
+          import java.io.ByteArrayOutputStream
           import java.io.File
           import java.io.FileOutputStream
           import java.util.Locale
@@ -600,6 +615,18 @@ jobs:
                                   val model = "${Build.MANUFACTURER}_${Build.MODEL}"
                                   result.success("${androidId}_$model")
                               }
+                              "getDeviceOsInfo" -> {
+                                  result.success("Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) • ${Build.MANUFACTURER} ${Build.MODEL}")
+                              }
+                              "saveNativeDbJson" -> {
+                                  val jsonStr = call.argument<String>("json") ?: ""
+                                  val ok = saveNativeDbSynchronously(jsonStr)
+                                  result.success(ok)
+                              }
+                              "loadNativeDbJson" -> {
+                                  val loaded = loadNativeDbSynchronously()
+                                  result.success(loaded)
+                              }
                               "getPersistentStorageDir" -> {
                                   val dir = File(filesDir, "mayak_received").apply { mkdirs() }
                                   result.success(dir.absolutePath)
@@ -608,10 +635,11 @@ jobs:
                                   val dir = File(filesDir, "mayak_data").apply { mkdirs() }
                                   result.success(dir.absolutePath)
                               }
-                              "extractVideoThumbnail" -> {
+                              "extractPreviewBase64" -> {
                                   val path = call.argument<String>("path") ?: ""
-                                  val thumb = extractVideoThumbnailInternal(path)
-                                  result.success(thumb)
+                                  val isVideo = call.argument<Boolean>("isVideo") ?: false
+                                  val b64 = extractPreviewBase64Internal(path, isVideo)
+                                  result.success(b64)
                               }
                               "clearDownloadedMediaCache" -> {
                                   val freedBytes = clearDownloadedMediaCacheInternal()
@@ -798,37 +826,91 @@ jobs:
                   }
               }
 
-              private fun extractVideoThumbnailInternal(videoPath: String): String? {
-                  if (videoPath.isBlank()) return null
-                  val thumbFile = File("$videoPath.thumb.jpg")
-                  if (thumbFile.exists() && thumbFile.length() > 100) {
-                      return thumbFile.absolutePath
-                  }
-                  val retriever = MediaMetadataRetriever()
+              // Синхронное атомарное сохранение БД чатов и контактов (SharedPreferences.commit() + атомарный файл)
+              @Synchronized
+              private fun saveNativeDbSynchronously(jsonStr: String): Boolean {
+                  if (jsonStr.isBlank()) return false
                   return try {
-                      retriever.setDataSource(videoPath)
-                      val bmp = retriever.getFrameAtTime(300_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                          ?: retriever.getFrameAtTime(0L)
-                          ?: return null
-                      val maxW = 480
-                      val scale = if (bmp.width > maxW) maxW.toFloat() / bmp.width.toFloat() else 1.0f
-                      val outW = (bmp.width * scale).toInt().coerceAtLeast(64)
-                      val outH = (bmp.height * scale).toInt().coerceAtLeast(64)
-                      val scaled = Bitmap.createScaledBitmap(bmp, outW, outH, true)
-                      FileOutputStream(thumbFile).use { out ->
-                          scaled.compress(Bitmap.CompressFormat.JPEG, 78, out)
+                      val sp = applicationContext.getSharedPreferences("mayak_native_db_v15", Context.MODE_PRIVATE)
+                      sp.edit().putString("master_json", jsonStr).commit()
+
+                      val dataDir = File(filesDir, "mayak_data").apply { mkdirs() }
+                      val tmpFile = File(dataDir, "mayak_store_v15.json.tmp")
+                      val targetFile = File(dataDir, "mayak_store_v15.json")
+                      val bakFile = File(dataDir, "mayak_store_v15.bak.json")
+                      tmpFile.writeText(jsonStr, Charsets.UTF_8)
+                      if (targetFile.exists() && targetFile.length() > 20) {
+                          targetFile.copyTo(bakFile, overwrite = true)
                       }
-                      thumbFile.absolutePath
+                      tmpFile.copyTo(targetFile, overwrite = true)
+                      tmpFile.delete()
+                      true
+                  } catch (_: Throwable) {
+                      false
+                  }
+              }
+
+              @Synchronized
+              private fun loadNativeDbSynchronously(): String? {
+                  try {
+                      val sp = applicationContext.getSharedPreferences("mayak_native_db_v15", Context.MODE_PRIVATE)
+                      val fromSp = sp.getString("master_json", null)
+                      if (!fromSp.isNullOrBlank() && fromSp.length > 10) {
+                          return fromSp
+                      }
+                  } catch (_: Throwable) {}
+
+                  val dataDir = File(filesDir, "mayak_data")
+                  for (name in listOf("mayak_store_v15.json", "mayak_store_v15.bak.json", "mayak_store_v14.json")) {
+                      try {
+                          val f = File(dataDir, name)
+                          if (f.exists() && f.length() > 10) {
+                              return f.readText(Charsets.UTF_8)
+                          }
+                      } catch (_: Throwable) {}
+                  }
+                  return null
+              }
+
+              // Извлечение мини-превью (JPEG в Base64 в памяти, БЕЗ сохранения каких-либо картинок в Загрузки!)
+              private fun extractPreviewBase64Internal(path: String, isVideo: Boolean): String? {
+                  if (path.isBlank() || !File(path).exists()) return null
+                  return try {
+                      val bmp: Bitmap? = if (isVideo) {
+                          val retriever = MediaMetadataRetriever()
+                          try {
+                              retriever.setDataSource(path)
+                              retriever.getFrameAtTime(300_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                  ?: retriever.getFrameAtTime(0L)
+                          } finally {
+                              try { retriever.release() } catch (_: Throwable) {}
+                          }
+                      } else {
+                          val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                          BitmapFactory.decodeFile(path, opts)
+                          var sample = 1
+                          while (opts.outWidth / sample > 360 || opts.outHeight / sample > 360) {
+                              sample *= 2
+                          }
+                          BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+                      }
+                      if (bmp == null) return null
+                      val maxW = 320
+                      val scale = if (bmp.width > maxW) maxW.toFloat() / bmp.width.toFloat() else 1.0f
+                      val outW = (bmp.width * scale).toInt().coerceAtLeast(48)
+                      val outH = (bmp.height * scale).toInt().coerceAtLeast(48)
+                      val scaled = Bitmap.createScaledBitmap(bmp, outW, outH, true)
+                      val baos = ByteArrayOutputStream()
+                      scaled.compress(Bitmap.CompressFormat.JPEG, 68, baos)
+                      Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
                   } catch (_: Throwable) {
                       null
-                  } finally {
-                      try { retriever.release() } catch (_: Throwable) {}
                   }
               }
 
               private fun clearDownloadedMediaCacheInternal(): Long {
                   var freed = 0L
-                  for (folderName in listOf("mayak_received", "picked_files", "voice_notes")) {
+                  for (folderName in listOf("mayak_received")) {
                       val dir = File(filesDir, folderName)
                       if (dir.exists() && dir.isDirectory) {
                           dir.listFiles()?.forEach { f ->
@@ -1093,9 +1175,11 @@ jobs:
                               return
                           }
                           val lower = displayName.lowercase(Locale.US)
-                          var thumbPath: String? = null
-                          if (lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".mov") || lower.endsWith(".webm") || lower.endsWith(".avi")) {
-                              thumbPath = extractVideoThumbnailInternal(outFile.absolutePath)
+                          val isVid = lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".mov") || lower.endsWith(".webm") || lower.endsWith(".avi")
+                          val isImg = lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".gif")
+                          var thumbB64 = ""
+                          if (isVid || isImg) {
+                              thumbB64 = extractPreviewBase64Internal(outFile.absolutePath, isVid) ?: ""
                           }
                           res.success(
                               mapOf(
@@ -1103,7 +1187,7 @@ jobs:
                                   "name" to displayName,
                                   "size" to outFile.length(),
                                   "mime" to mime,
-                                  "thumbPath" to (thumbPath ?: "")
+                                  "thumbB64" to thumbB64
                               )
                           )
                       } catch (t: Throwable) {
@@ -1503,7 +1587,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=1.5.0 --build-number=$((1500 + ${ github.run_number })) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
