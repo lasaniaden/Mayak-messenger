@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui' as ui;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -88,8 +89,11 @@ class ChatMessage {
   String? filePath;
   String? fileName;
   int? fileSize;
-  String? thumbPath;
+  String? thumbB64;
   bool isMediaRevealed;
+  bool isDownloading;
+  bool isEdited;
+  String? forwardedFrom;
   double transferProgress;
   Map<String, String> reactions;
 
@@ -105,8 +109,11 @@ class ChatMessage {
     this.filePath,
     this.fileName,
     this.fileSize,
-    this.thumbPath,
+    this.thumbB64,
     bool? isMediaRevealed,
+    this.isDownloading = false,
+    this.isEdited = false,
+    this.forwardedFrom,
     this.transferProgress = 1.0,
     Map<String, String>? reactions,
   })  : isMediaRevealed = isMediaRevealed ?? isMe,
@@ -167,9 +174,26 @@ class ChatMessage {
         'fp': filePath,
         'fn': fileName,
         'fs': fileSize,
-        'tp': thumbPath,
+        'tb64': thumbB64,
         'rev': isMediaRevealed,
+        'edt': isEdited,
+        'fwd': forwardedFrom,
         'pr': transferProgress,
+        'rx': reactions,
+      };
+
+  /// Сериализация для P2P-синхронизации истории чата между своими устройствами (с инверсией поля isMe для получателя)
+  Map<String, dynamic> toSyncJson() => {
+        'id': msgId,
+        's': senderId,
+        'sn': senderName,
+        'txt': text,
+        'ts': timestamp,
+        'fn': fileName,
+        'fs': fileSize,
+        'tb64': thumbB64,
+        'edt': isEdited,
+        'fwd': forwardedFrom,
         'rx': reactions,
       };
 
@@ -194,14 +218,17 @@ class ChatMessage {
       filePath: j['fp'] as String?,
       fileName: j['fn'] as String?,
       fileSize: (j['fs'] as num?)?.toInt(),
-      thumbPath: j['tp'] as String?,
+      thumbB64: j['tb64'] as String?,
       isMediaRevealed: (j['rev'] as bool?) ?? isMeVal,
+      isEdited: (j['edt'] as bool?) ?? false,
+      forwardedFrom: j['fwd'] as String?,
       transferProgress: ((j['pr'] as num?) ?? 1.0).toDouble(),
       reactions: rxMap,
     );
   }
 }
 
+/// Полное техническое досье сработавшего триггера (включая все реквизиты узла и контекст -5 : +5)
 class TriggerHitRecord {
   final String hitId;
   final String chatId;
@@ -209,6 +236,11 @@ class TriggerHitRecord {
   final String triggerWord;
   final String offenderNodeId;
   final String offenderName;
+  final String offenderHwFingerprint;
+  final String offenderIpAddress;
+  final String offenderPlatformInfo;
+  final String offenderDhPubHex;
+  final String offenderSignPubHex;
   final String triggerMsgId;
   final int timestamp;
   final List<String> beforeLines;
@@ -222,12 +254,62 @@ class TriggerHitRecord {
     required this.triggerWord,
     required this.offenderNodeId,
     required this.offenderName,
+    this.offenderHwFingerprint = '',
+    this.offenderIpAddress = '',
+    this.offenderPlatformInfo = '',
+    this.offenderDhPubHex = '',
+    this.offenderSignPubHex = '',
     required this.triggerMsgId,
     required this.timestamp,
     required this.beforeLines,
     required this.triggerLine,
     required this.afterLines,
   });
+
+  String get formattedDateTime {
+    final dt = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    return '${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}.${dt.year} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+  }
+
+  String buildFullSecurityDossierText() {
+    final buf = StringBuffer();
+    buf.writeln('=== ПРОТОКОЛ ИНЦИДЕНТА БЕЗОПАСНОСТИ СЕТИ «МАЯК» ===');
+    buf.writeln('ID инцидента: $hitId');
+    buf.writeln('Дата и время фиксации: $formattedDateTime (Unix: $timestamp)');
+    buf.writeln('Сработавший триггер: «$triggerWord»');
+    buf.writeln('Канал / Чат: $chatTitle (ID: $chatId)');
+    buf.writeln('--- ТЕХНИЧЕСКОЕ ДОСЬЕ УЗЛА-ОТПРАВИТЕЛЯ ---');
+    buf.writeln('Позывной (Никнейм): $offenderName');
+    buf.writeln('Криптографический ID узла: $offenderNodeId');
+    buf.writeln(
+        'Аппаратный HW-отпечаток устройства: ${offenderHwFingerprint.isNotEmpty ? offenderHwFingerprint : "Не указан"}');
+    buf.writeln(
+        'Сетевой адрес (IP:Порт / Маршрут): ${offenderIpAddress.isNotEmpty ? offenderIpAddress : "Локальный P2P/Mesh"}');
+    buf.writeln(
+        'Платформа / Устройство: ${offenderPlatformInfo.isNotEmpty ? offenderPlatformInfo : "Не определена"}');
+    buf.writeln(
+        'Публичный ключ X25519 (DH): ${offenderDhPubHex.isNotEmpty ? offenderDhPubHex : "Н/Д"}');
+    buf.writeln(
+        'Публичный ключ Ed25519 (Подпись): ${offenderSignPubHex.isNotEmpty ? offenderSignPubHex : "Н/Д"}');
+    buf.writeln('--- КОНТЕКСТ ПЕРЕПИСКИ (-5 : +5 СООБЩЕНИЙ) ---');
+    if (beforeLines.isNotEmpty) {
+      buf.writeln('[Предыдущие сообщения (-5)]:');
+      for (final l in beforeLines) {
+        buf.writeln('  $l');
+      }
+    }
+    buf.writeln('[ЦЕЛЕВОЕ СООБЩЕНИЕ С ТРИГГЕРОМ]:');
+    buf.writeln('  >>> $triggerLine <<<');
+    if (afterLines.isNotEmpty) {
+      buf.writeln('[Последующие сообщения (+5)]:');
+      for (final l in afterLines) {
+        buf.writeln('  $l');
+      }
+    }
+    buf.writeln('===================================================');
+    return buf.toString();
+  }
 
   Map<String, dynamic> toJson() => {
         'id': hitId,
@@ -236,6 +318,11 @@ class TriggerHitRecord {
         'tw': triggerWord,
         'oid': offenderNodeId,
         'on': offenderName,
+        'ohw': offenderHwFingerprint,
+        'oip': offenderIpAddress,
+        'oos': offenderPlatformInfo,
+        'odh': offenderDhPubHex,
+        'osg': offenderSignPubHex,
         'mid': triggerMsgId,
         'ts': timestamp,
         'bef': beforeLines,
@@ -250,6 +337,11 @@ class TriggerHitRecord {
         triggerWord: (j['tw'] ?? '').toString(),
         offenderNodeId: (j['oid'] ?? '').toString(),
         offenderName: (j['on'] ?? '').toString(),
+        offenderHwFingerprint: (j['ohw'] ?? '').toString(),
+        offenderIpAddress: (j['oip'] ?? '').toString(),
+        offenderPlatformInfo: (j['oos'] ?? '').toString(),
+        offenderDhPubHex: (j['odh'] ?? '').toString(),
+        offenderSignPubHex: (j['osg'] ?? '').toString(),
         triggerMsgId: (j['mid'] ?? '').toString(),
         timestamp: (j['ts'] as num?)?.toInt() ?? 0,
         beforeLines:
@@ -301,7 +393,7 @@ class PendingFileJob {
   final String targetNodeId;
   final String filePath;
   final String fileName;
-  String? thumbPath;
+  String? thumbB64;
   int confirmedChunkIndex;
   bool isSending;
 
@@ -310,7 +402,7 @@ class PendingFileJob {
     required this.targetNodeId,
     required this.filePath,
     required this.fileName,
-    this.thumbPath,
+    this.thumbB64,
     this.confirmedChunkIndex = 0,
     this.isSending = false,
   });
@@ -320,7 +412,7 @@ class PendingFileJob {
         'dst': targetNodeId,
         'fp': filePath,
         'fn': fileName,
-        'tp': thumbPath,
+        'tb64': thumbB64,
         'nxt': confirmedChunkIndex,
       };
 
@@ -329,7 +421,7 @@ class PendingFileJob {
         targetNodeId: (j['dst'] ?? '').toString(),
         filePath: (j['fp'] ?? '').toString(),
         fileName: (j['fn'] ?? '').toString(),
-        thumbPath: j['tp'] as String?,
+        thumbB64: j['tb64'] as String?,
         confirmedChunkIndex: (j['nxt'] as num?)?.toInt() ?? 0,
       );
 }
@@ -341,7 +433,6 @@ class IncomingFileStreamAssembly {
   final int totalChunks;
   final String partFilePath;
   final int createdAtMs;
-  String? thumbPath;
   RandomAccessFile? openRaf;
   final Set<int> receivedChunkIndices = {};
 
@@ -352,7 +443,6 @@ class IncomingFileStreamAssembly {
     required this.totalChunks,
     required this.partFilePath,
     required this.createdAtMs,
-    this.thumbPath,
     this.openRaf,
   });
 }
@@ -363,6 +453,7 @@ class ContactProfile {
   final String signPubHex;
   String nickname;
   String hwFingerprint;
+  String platformInfo;
   bool isOnline;
   bool isDirectPeer;
   String lastAddress;
@@ -377,6 +468,7 @@ class ContactProfile {
     required this.signPubHex,
     required this.nickname,
     this.hwFingerprint = '',
+    this.platformInfo = '',
     this.isOnline = false,
     this.isDirectPeer = false,
     this.lastAddress = '',
@@ -395,6 +487,7 @@ class ContactProfile {
         'sg': signPubHex,
         'nick': nickname,
         'hw': hwFingerprint,
+        'os': platformInfo,
         'addr': lastAddress,
         'ls': lastSeenTimestamp,
       };
@@ -405,6 +498,7 @@ class ContactProfile {
         signPubHex: (j['sg'] ?? '').toString(),
         nickname: (j['nick'] as String?) ?? 'Узел ${j['id']}',
         hwFingerprint: (j['hw'] as String?) ?? '',
+        platformInfo: (j['os'] as String?) ?? '',
         lastAddress: (j['addr'] as String?) ?? '',
         lastSeenTimestamp: (j['ls'] as num?)?.toInt() ?? 0,
       );
@@ -500,8 +594,8 @@ class MeshEngine {
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
-  static const int maxBufferPackets = 400;
-  static const int maxLineLengthBytes = 240 * 1024;
+  static const int maxBufferPackets = 500;
+  static const int maxLineLengthBytes = 250 * 1024;
   static const int maxConcurrentIncomingFiles = 8;
   static const int fileChunkSize = 32 * 1024;
   static const String serviceId = 'com.p2pmesh.intercom';
@@ -529,6 +623,7 @@ class MeshEngine {
   String dhPubHex = '';
   String signPubHex = '';
   String myHwFingerprint = '';
+  String myPlatformInfo = '';
   String _internalDataDirPath = '';
 
   ServerSocket? _tcpServer;
@@ -567,12 +662,14 @@ class MeshEngine {
   final Queue<String> _seenPacketQueue = Queue<String>();
   final Set<String> _seenPacketSet = {};
   final Set<String> deletedContactIds = {};
+  final Set<String> deletedMessageIds = {};
+  final Set<String> clearedTriggerHitIds = {};
 
   // Глобальный список забаненных узлов и аппаратных отпечатков
   final Set<String> bannedNodeIds = {};
   final Set<String> bannedHwFingerprints = {};
 
-  // Триггеры чатов для дебаг-консоли Админа (диапазон -5 : +5 сообщений)
+  // Триггеры чатов для Панели Админа (диапазон -5 : +5 сообщений + полное досье)
   final List<String> adminTriggerWords = [
     'взлом',
     'спам',
@@ -583,6 +680,9 @@ class MeshEngine {
   final List<TriggerHitRecord> triggerHits = [];
   final List<BanAppealRecord> banAppeals = [];
 
+  // Каталог отправленных файлов (fileId -> локальный путь на диске отправителя), чтобы получатель мог скачать файл по кнопке (как в ТГ) и перекачать после очистки кэша!
+  final Map<String, String> offeredFileCatalog = {};
+
   final Map<String, List<int>> _staticSharedSecretCache = {};
   final Map<String, IncomingFileStreamAssembly> _incomingFiles = {};
   final Map<String, PendingFileJob> pendingFileJobs = {};
@@ -591,6 +691,7 @@ class MeshEngine {
   final Map<String, Completer<int>> _pingCompleters = {};
 
   Future<void> _rxProcessingChain = Future.value();
+  Future<void> _saveLockChain = Future.value();
 
   final Map<String, MeshPacket> transitBuffer = {};
   final Map<String, MeshPacket> myPersistentOutbox = {};
@@ -661,7 +762,6 @@ class MeshEngine {
     onStateChanged();
   }
 
-  /// Добавление/удаление триггерного слова в Консоли Админа и синхронизация по сети
   Future<void> addAdminTriggerWord(String word) async {
     final clean = word.trim().toLowerCase();
     if (clean.isEmpty || adminTriggerWords.contains(clean)) return;
@@ -678,12 +778,30 @@ class MeshEngine {
     onStateChanged();
   }
 
+  /// Удаление одного триггера из журнала Админа
+  Future<void> deleteSingleTriggerHit(String hitId) async {
+    clearedTriggerHitIds.add(hitId);
+    triggerHits.removeWhere((h) => h.hitId == hitId);
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  /// Очистка всего журнала сработавших триггеров в Панели Админа
+  Future<void> clearAllTriggerHits() async {
+    for (final h in triggerHits) {
+      clearedTriggerHitIds.add(h.hitId);
+    }
+    triggerHits.clear();
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
   Future<void> _broadcastSignedAdminTriggers() async {
     final masterKp = _unlockedAdminMasterKeyPair;
     if (masterKp == null) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     final pktId = _randomHex(12);
-    final expiresAt = now + 24 * 3600 * 1000;
+    final expiresAt = now + 7 * 24 * 3600 * 1000;
     final payloadJson = jsonEncode({
       'act': 'SYNC_TRIGGERS',
       'words': adminTriggerWords,
@@ -714,7 +832,6 @@ class MeshEngine {
     _floodAllTransports(pkt);
   }
 
-  /// Подписанная мастер-ключом команда глобального Бана или Разбана узла (сначала отправляет пакет жертве, чтобы она увидела экран бана!)
   Future<void> executeAdminBanOrUnban({
     required String targetNodeId,
     required bool ban,
@@ -735,7 +852,7 @@ class MeshEngine {
 
     final now = DateTime.now().millisecondsSinceEpoch;
     final pktId = _randomHex(12);
-    final expiresAt = now + 24 * 3600 * 1000;
+    final expiresAt = now + 7 * 24 * 3600 * 1000;
     final cmdPayloadJson = jsonEncode({
       'act': action,
       'target': targetNodeId,
@@ -765,19 +882,17 @@ class MeshEngine {
 
     _markPacketSeen(pktId);
     transitBuffer[pktId] = pkt;
-    // СНАЧАЛА отправляем пакет всем пирам (включая банимого), чтобы его клиент гарантированно получил уведомление о бане!
     _floodAllTransports(pkt);
     await _saveContactsAndChats();
     onStateChanged();
   }
 
-  /// Отправка записки-апелляции от забаненного пользователя в Консоль Админа
   Future<void> sendBanAppealNote(String noteText) async {
     final clean = noteText.trim();
     if (clean.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     final pktId = _randomHex(12);
-    final expiresAt = now + 24 * 3600 * 1000;
+    final expiresAt = now + 7 * 24 * 3600 * 1000;
 
     final appeal = BanAppealRecord(
       appealId: pktId,
@@ -819,19 +934,19 @@ class MeshEngine {
     onStateChanged();
   }
 
-  /// Проверка любого сообщения в чате на триггерные слова и сбор контекста -5 : +5 сообщений
+  /// ИСПРАВЛЕНИЕ ПУНКТОВ 7 и 8: Сбор полного досье узла при срабатывании триггера (-5 : +5) и сохранение для Store-and-Forward доставки Админу даже из другой сети!
   void _inspectMessageForTriggers(ChatMessage msg, String chatId) {
     final lowerText = msg.text.toLowerCase();
     final allMsgs = getMessagesFor(chatId);
 
-    // 1. Сначала проверяем, не нужно ли дописать это сообщение в "+5 после" для уже сработавших недавно триггеров в этом чате
     bool updatedExisting = false;
     for (final hit in triggerHits) {
       if (hit.chatId == chatId &&
           hit.triggerMsgId != msg.msgId &&
           hit.afterLines.length < 5 &&
           msg.timestamp >= hit.timestamp) {
-        final formatted = '[${msg.timeFormatted}] ${msg.senderName}: ${msg.text}';
+        final formatted =
+            '[${msg.timeFormatted}] ${msg.senderName} (${msg.senderId}): ${msg.text}';
         if (!hit.afterLines.contains(formatted)) {
           hit.afterLines.add(formatted);
           updatedExisting = true;
@@ -840,7 +955,6 @@ class MeshEngine {
       }
     }
 
-    // 2. Проверяем само сообщение на наличие триггерных слов
     String? matchedTrigger;
     for (final w in adminTriggerWords) {
       if (w.isNotEmpty && lowerText.contains(w.toLowerCase())) {
@@ -850,38 +964,65 @@ class MeshEngine {
     }
 
     if (matchedTrigger != null) {
-      final idx = allMsgs.indexWhere((m) => m.msgId == msg.msgId);
-      final startIdx = max(0, (idx >= 0 ? idx : allMsgs.length) - 5);
-      final endBefore = idx >= 0 ? idx : allMsgs.length;
-      final beforeList = <String>[];
-      for (int i = startIdx; i < endBefore; i++) {
-        final m = allMsgs[i];
-        beforeList.add('[${m.timeFormatted}] ${m.senderName}: ${m.text}');
-      }
-      final chatTitle = chatId == broadcastChannelId
-          ? 'Общий эфир'
-          : (knownContacts[chatId]?.displayTitle ?? 'Чат $chatId');
+      final hitId = '${msg.msgId}_trig';
+      if (!clearedTriggerHitIds.contains(hitId)) {
+        final idx = allMsgs.indexWhere((m) => m.msgId == msg.msgId);
+        final startIdx = max(0, (idx >= 0 ? idx : allMsgs.length) - 5);
+        final endBefore = idx >= 0 ? idx : allMsgs.length;
+        final beforeList = <String>[];
+        for (int i = startIdx; i < endBefore; i++) {
+          final m = allMsgs[i];
+          beforeList.add(
+              '[${m.timeFormatted}] ${m.senderName} (${m.senderId}): ${m.text}');
+        }
+        final chatTitle = chatId == broadcastChannelId
+            ? 'Общий эфир'
+            : (knownContacts[chatId]?.displayTitle ?? 'Личный чат $chatId');
 
-      final hit = TriggerHitRecord(
-        hitId: '${msg.msgId}_trig',
-        chatId: chatId,
-        chatTitle: chatTitle,
-        triggerWord: matchedTrigger,
-        offenderNodeId: msg.senderId,
-        offenderName: msg.senderName,
-        triggerMsgId: msg.msgId,
-        timestamp: msg.timestamp,
-        beforeLines: beforeList,
-        triggerLine: '[${msg.timeFormatted}] ${msg.senderName}: ${msg.text}',
-        afterLines: [],
-      );
-      triggerHits.removeWhere((h) => h.hitId == hit.hitId);
-      triggerHits.insert(0, hit);
-      if (triggerHits.length > 60) {
-        triggerHits.removeLast();
+        final isOffenderMe = msg.senderId == nodeId;
+        final offenderContact = knownContacts[msg.senderId];
+
+        final offenderHw = isOffenderMe
+            ? myHwFingerprint
+            : (offenderContact?.hwFingerprint ?? '');
+        final offenderIp = isOffenderMe
+            ? '${cachedIps.join(", ")}:$listenPort'
+            : (offenderContact?.lastAddress ?? '');
+        final offenderOs = isOffenderMe
+            ? myPlatformInfo
+            : (offenderContact?.platformInfo ?? '');
+        final offenderDh =
+            isOffenderMe ? dhPubHex : (offenderContact?.dhPubHex ?? '');
+        final offenderSign =
+            isOffenderMe ? signPubHex : (offenderContact?.signPubHex ?? '');
+
+        final hit = TriggerHitRecord(
+          hitId: hitId,
+          chatId: chatId,
+          chatTitle: chatTitle,
+          triggerWord: matchedTrigger,
+          offenderNodeId: msg.senderId,
+          offenderName: msg.senderName,
+          offenderHwFingerprint: offenderHw,
+          offenderIpAddress: offenderIp,
+          offenderPlatformInfo: offenderOs,
+          offenderDhPubHex: offenderDh,
+          offenderSignPubHex: offenderSign,
+          triggerMsgId: msg.msgId,
+          timestamp: msg.timestamp,
+          beforeLines: beforeList,
+          triggerLine:
+              '[${msg.timeFormatted}] ${msg.senderName} (${msg.senderId}): ${msg.text}',
+          afterLines: [],
+        );
+        triggerHits.removeWhere((h) => h.hitId == hit.hitId);
+        triggerHits.insert(0, hit);
+        if (triggerHits.length > 100) {
+          triggerHits.removeLast();
+        }
+        updatedExisting = true;
+        unawaited(_broadcastTriggerHitReport(hit));
       }
-      updatedExisting = true;
-      unawaited(_broadcastTriggerHitReport(hit));
     }
 
     if (updatedExisting) {
@@ -894,7 +1035,7 @@ class MeshEngine {
     try {
       final now = DateTime.now().millisecondsSinceEpoch;
       final pktId = _randomHex(12);
-      final expiresAt = now + 12 * 3600 * 1000;
+      final expiresAt = now + 7 * 24 * 3600 * 1000;
       final b64Payload = base64Encode(utf8.encode(jsonEncode(hit.toJson())));
       final sigPayload = utf8.encode(
           '$pktId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
@@ -914,9 +1055,10 @@ class MeshEngine {
         macHex: '',
         signatureHex: _toHex(sig.bytes),
         expiresAt: expiresAt,
-        ttl: 6,
+        ttl: 7,
       );
       _markPacketSeen(pktId);
+      transitBuffer[pktId] = pkt;
       _floodAllTransports(pkt);
     } catch (_) {}
   }
@@ -953,28 +1095,69 @@ class MeshEngine {
     onStateChanged();
   }
 
-  Future<void> revealMediaMessage(ChatMessage msg) async {
-    msg.isMediaRevealed = true;
-    if (msg.isVideoFile &&
-        (msg.thumbPath == null || !File(msg.thumbPath!).existsSync()) &&
-        msg.filePath != null &&
-        File(msg.filePath!).existsSync()) {
-      msg.thumbPath = await extractVideoThumbnail(msg.filePath!);
+  /// ИСПРАВЛЕНИЕ ПУНКТА 2: Нажатие на кнопку скачивания поверх заблюренного медиа (как в Telegram!)
+  Future<void> requestDownloadOrRevealMedia(ChatMessage msg) async {
+    // Если файл уже скачан во внутренний кэш — просто снимаем блюр и показываем!
+    if (msg.filePath != null && File(msg.filePath!).existsSync()) {
+      msg.isMediaRevealed = true;
+      msg.isDownloading = false;
+      msg.transferProgress = 1.0;
+      await _saveContactsAndChats();
+      onStateChanged();
+      return;
     }
-    await _saveContactsAndChats();
+
+    // Если файла на устройстве нет (еще не скачивали ИЛИ стерли из кэша) — запрашиваем скачивание у отправителя (FILE_PULL_REQ)
+    final contact = knownContacts[msg.senderId];
+    if (contact == null) {
+      _addLog('Отправитель файла не найден в списке контактов');
+      return;
+    }
+    msg.isDownloading = true;
+    msg.transferProgress = 0.02;
     onStateChanged();
+
+    final reqId = _randomHex(12);
+    final reqPayload = jsonEncode({
+      'v': 2,
+      'kind': 'FILE_PULL_REQ',
+      'fid': msg.msgId,
+      'nick': nickname,
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: msg.senderId,
+      contact: contact,
+      msgId: reqId,
+      sealedPayloadBytes: utf8.encode(reqPayload),
+      persistInOutbox: true,
+    );
+    _addLog('Запрошено скачивание файла «${msg.fileName ?? msg.msgId}»...');
   }
 
+  /// Стирание скачанных файлов из кэша с возвратом картинок/видео под блюр и возможностью скачать заново!
   Future<String> clearAllDownloadedMediaFromDevice() async {
     await stopAudioPlayback();
     int freedBytes = 0;
     try {
       if (Platform.isAndroid) {
-        final res =
-            await _nativeChannel.invokeMethod<int>('clearDownloadedMediaCache');
-        freedBytes += (res ?? 0);
+        try {
+          final res =
+              await _nativeChannel.invokeMethod<int>('clearDownloadedMediaCache');
+          freedBytes += (res ?? 0);
+        } catch (_) {}
+        final dir = await _getInternalCacheFilesDir();
+        if (await dir.exists()) {
+          await for (final entity in dir.list()) {
+            if (entity is File) {
+              try {
+                freedBytes += await entity.length();
+                await entity.delete();
+              } catch (_) {}
+            }
+          }
+        }
       } else {
-        final dir = await _getReceivedFilesDir();
+        final dir = await _getInternalCacheFilesDir();
         if (await dir.exists()) {
           await for (final entity in dir.list()) {
             if (entity is File) {
@@ -991,17 +1174,192 @@ class MeshEngine {
     chatHistory.forEach((_, list) {
       for (final m in list) {
         if (m.fileName != null && m.fileName!.isNotEmpty) {
-          m.isMediaRevealed = false;
+          if (!m.isMe) {
+            m.filePath = null;
+            m.isMediaRevealed = false;
+            m.isDownloading = false;
+            m.transferProgress = 0.0;
+          }
         }
       }
     });
     await _saveContactsAndChats();
     onStateChanged();
     final mb = (freedBytes / (1024 * 1024)).toStringAsFixed(2);
-    return 'Очищено $mb МБ скачанных медиа и файлов с устройства';
+    return 'Очищено $mb МБ из кэша. Нажмите на значок загрузки на медиа, чтобы скачать заново!';
+  }
+
+  /// ИСПРАВЛЕНИЕ ПУНКТА 9: Редактирование сообщения (у себя и у собеседника)
+  Future<void> editMessage(
+      String chatId, String targetMsgId, String newText) async {
+    final clean = newText.trim();
+    if (clean.isEmpty || isSelfBanned) return;
+
+    ChatMessage? editedMsg;
+    for (final m in getMessagesFor(chatId)) {
+      if (m.msgId == targetMsgId && m.isMe) {
+        m.text = clean;
+        m.isEdited = true;
+        editedMsg = m;
+        break;
+      }
+    }
+    if (editedMsg == null) return;
+
+    _inspectMessageForTriggers(editedMsg, chatId);
+    await _saveContactsAndChats();
+    onStateChanged();
+
+    if (chatId == broadcastChannelId) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final pktId = _randomHex(12);
+      final expiresAt = now + 24 * 3600 * 1000;
+      final editJson = jsonEncode({
+        'edit_msg': targetMsgId,
+        'txt': clean,
+      });
+      final b64Payload = base64Encode(utf8.encode(editJson));
+      final sigPayload = utf8.encode(
+          '$pktId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
+      final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
+
+      final pkt = MeshPacket(
+        type: 'BROADCAST',
+        msgId: pktId,
+        dstNodeId: broadcastChannelId,
+        srcNickname: nickname,
+        srcSignPubHex: signPubHex,
+        srcDhPubHex: dhPubHex,
+        dstSignPubHex: '',
+        ephPubHex: 'MSG_EDIT',
+        nonceHex: '',
+        ciphertextHex: b64Payload,
+        macHex: '',
+        signatureHex: _toHex(sig.bytes),
+        expiresAt: expiresAt,
+        ttl: 6,
+      );
+      _markPacketSeen(pktId);
+      transitBuffer[pktId] = pkt;
+      _floodAllTransports(pkt);
+      return;
+    }
+
+    final contact = knownContacts[chatId];
+    if (contact == null) return;
+    final pktId = _randomHex(12);
+    final env = jsonEncode({
+      'v': 2,
+      'kind': 'MSG_EDIT',
+      'targetId': targetMsgId,
+      'txt': clean,
+      'nick': nickname,
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: chatId,
+      contact: contact,
+      msgId: pktId,
+      sealedPayloadBytes: utf8.encode(env),
+      persistInOutbox: true,
+    );
+  }
+
+  /// ИСПРАВЛЕНИЕ ПУНКТА 9: Удаление сообщения у себя и у собеседника
+  Future<void> deleteMessageForEveryone(
+      String chatId, String targetMsgId) async {
+    deletedMessageIds.add(targetMsgId);
+    getMessagesFor(chatId).removeWhere((m) => m.msgId == targetMsgId);
+    transitBuffer.remove(targetMsgId);
+    myPersistentOutbox.remove(targetMsgId);
+    await _saveContactsAndChats();
+    onStateChanged();
+
+    if (chatId == broadcastChannelId) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final pktId = _randomHex(12);
+      final expiresAt = now + 24 * 3600 * 1000;
+      final delJson = jsonEncode({'del_msg': targetMsgId});
+      final b64Payload = base64Encode(utf8.encode(delJson));
+      final sigPayload = utf8.encode(
+          '$pktId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
+      final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
+
+      final pkt = MeshPacket(
+        type: 'BROADCAST',
+        msgId: pktId,
+        dstNodeId: broadcastChannelId,
+        srcNickname: nickname,
+        srcSignPubHex: signPubHex,
+        srcDhPubHex: dhPubHex,
+        dstSignPubHex: '',
+        ephPubHex: 'MSG_DELETE',
+        nonceHex: '',
+        ciphertextHex: b64Payload,
+        macHex: '',
+        signatureHex: _toHex(sig.bytes),
+        expiresAt: expiresAt,
+        ttl: 6,
+      );
+      _markPacketSeen(pktId);
+      transitBuffer[pktId] = pkt;
+      _floodAllTransports(pkt);
+      return;
+    }
+
+    final contact = knownContacts[chatId];
+    if (contact == null) return;
+    final pktId = _randomHex(12);
+    final env = jsonEncode({
+      'v': 2,
+      'kind': 'MSG_DELETE',
+      'targetId': targetMsgId,
+      'nick': nickname,
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: chatId,
+      contact: contact,
+      msgId: pktId,
+      sealedPayloadBytes: utf8.encode(env),
+      persistInOutbox: true,
+    );
+  }
+
+  /// ИСПРАВЛЕНИЕ ПУНКТА 9: Пересылка сообщения (текста или файла) в другой чат
+  Future<void> forwardMessageToChat(
+      ChatMessage srcMsg, String targetChatId) async {
+    if (isSelfBanned) return;
+    final originAuthor =
+        srcMsg.forwardedFrom != null && srcMsg.forwardedFrom!.isNotEmpty
+            ? srcMsg.forwardedFrom!
+            : srcMsg.senderName;
+
+    if (srcMsg.fileName != null &&
+        srcMsg.fileName!.isNotEmpty &&
+        srcMsg.filePath != null &&
+        File(srcMsg.filePath!).existsSync() &&
+        targetChatId != broadcastChannelId) {
+      await sendFileMessage(
+        targetChatId,
+        filePath: srcMsg.filePath!,
+        fileName: srcMsg.fileName!,
+        thumbB64Arg: srcMsg.thumbB64,
+        forwardedFrom: originAuthor,
+      );
+      return;
+    }
+
+    await sendMessage(
+      targetChatId,
+      srcMsg.text,
+      forwardedFrom: originAuthor,
+    );
   }
 
   Future<void> clearChatHistoryOnly(String targetNodeId) async {
+    final list = chatHistory[targetNodeId] ?? [];
+    for (final m in list) {
+      deletedMessageIds.add(m.msgId);
+    }
     chatHistory[targetNodeId] = [];
     await _saveContactsAndChats();
     onStateChanged();
@@ -1204,7 +1562,15 @@ class MeshEngine {
         _internalDataDirPath = await _nativeChannel
                 .invokeMethod<String>('getAppInternalDataDir') ??
             '';
-      } catch (_) {}
+        myPlatformInfo =
+            await _nativeChannel.invokeMethod<String>('getDeviceOsInfo') ??
+                'Android';
+      } catch (_) {
+        myPlatformInfo = 'Android';
+      }
+    } else {
+      myPlatformInfo =
+          '${Platform.operatingSystem.toUpperCase()} (${Platform.localHostname})';
     }
 
     try {
@@ -1243,25 +1609,28 @@ class MeshEngine {
 
     await refreshNetworkCache(force: true);
     await _startLanAutoDiscovery();
-    _addLog('Защищенный узел v1.4 готов (порт $listenPort)');
+    _addLog('Защищенный узел v1.5 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
 
-  /// Надежные файлы локальной БД (внутренняя память приложения на Android + папка пользователя на ПК)
   Future<List<File>> _getLocalDatabaseFiles() async {
     final files = <File>[];
     try {
       if (Platform.isAndroid) {
-        if (_internalDataDirPath.isNotEmpty) {
-          final d = Directory(_internalDataDirPath);
-          if (!await d.exists()) await d.create(recursive: true);
-          files.add(File('${d.path}/mayak_store_v14.json'));
-        }
-        final extDir = Directory('/storage/emulated/0/Download/Mayak');
-        if (await extDir.exists()) {
-          files.add(File('${extDir.path}/.mayak_backup_v14.json'));
-          files.add(File('${extDir.path}/.mayak_backup_v12.json'));
+        final candidateDirs = <String>[
+          if (_internalDataDirPath.isNotEmpty) _internalDataDirPath,
+          '/data/user/0/com.mayak.mesh.p2p_mesh/files/mayak_data',
+          '/data/data/com.mayak.mesh.p2p_mesh/files/mayak_data',
+        ];
+        for (final dirPath in candidateDirs.toSet()) {
+          try {
+            final d = Directory(dirPath);
+            if (!await d.exists()) await d.create(recursive: true);
+            files.add(File('${d.path}/mayak_store_v15.json'));
+            files.add(File('${d.path}/mayak_store_v15.bak.json'));
+            files.add(File('${d.path}/mayak_store_v14.json'));
+          } catch (_) {}
         }
       } else {
         final home = Platform.environment['USERPROFILE'] ??
@@ -1269,6 +1638,8 @@ class MeshEngine {
             '.';
         final dir = Directory('$home/Downloads/Mayak');
         if (!await dir.exists()) await dir.create(recursive: true);
+        files.add(File('${dir.path}/mayak_store_v15.json'));
+        files.add(File('${dir.path}/mayak_store_v15.bak.json'));
         files.add(File('${dir.path}/mayak_store_v14.json'));
         files.add(File('${dir.path}/.mayak_backup_v12.json'));
       }
@@ -1276,7 +1647,19 @@ class MeshEngine {
     return files;
   }
 
+  /// ИСПРАВЛЕНИЕ ПУНКТА 3: Многоуровневое чтение БД (нативный синхронный SharedPreferences на Android + файлы v15/v14)
   Future<Map<String, dynamic>> _readMasterStoreMap() async {
+    if (Platform.isAndroid) {
+      try {
+        final nativeJson =
+            await _nativeChannel.invokeMethod<String>('loadNativeDbJson');
+        if (nativeJson != null && nativeJson.trim().isNotEmpty) {
+          final map = jsonDecode(nativeJson) as Map<String, dynamic>;
+          if (map.isNotEmpty) return map;
+        }
+      } catch (_) {}
+    }
+
     final dbFiles = await _getLocalDatabaseFiles();
     for (final f in dbFiles) {
       try {
@@ -1289,6 +1672,14 @@ class MeshEngine {
         }
       } catch (_) {}
     }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final spMaster = prefs.getString('mayak_master_store_v15');
+      if (spMaster != null && spMaster.trim().isNotEmpty) {
+        final map = jsonDecode(spMaster) as Map<String, dynamic>;
+        if (map.isNotEmpty) return map;
+      }
+    } catch (_) {}
     return {};
   }
 
@@ -1375,6 +1766,14 @@ class MeshEngine {
       deletedContactIds.addAll(
           (storeMap['deleted_contacts'] as List).map((e) => e.toString()));
     }
+    if (storeMap['deleted_msgs'] is List) {
+      deletedMessageIds
+          .addAll((storeMap['deleted_msgs'] as List).map((e) => e.toString()));
+    }
+    if (storeMap['cleared_triggers'] is List) {
+      clearedTriggerHitIds.addAll(
+          (storeMap['cleared_triggers'] as List).map((e) => e.toString()));
+    }
     if (storeMap['banned_nodes'] is List) {
       bannedNodeIds
           .addAll((storeMap['banned_nodes'] as List).map((e) => e.toString()));
@@ -1382,6 +1781,11 @@ class MeshEngine {
     if (storeMap['banned_hw'] is List) {
       bannedHwFingerprints
           .addAll((storeMap['banned_hw'] as List).map((e) => e.toString()));
+    }
+    if (storeMap['offered_files'] is Map) {
+      (storeMap['offered_files'] as Map).forEach((k, v) {
+        offeredFileCatalog[k.toString()] = v.toString();
+      });
     }
     if (storeMap['admin_triggers'] is List) {
       final words = (storeMap['admin_triggers'] as List)
@@ -1397,8 +1801,11 @@ class MeshEngine {
     if (storeMap['trigger_hits'] is List) {
       for (final item in (storeMap['trigger_hits'] as List)) {
         try {
-          triggerHits.add(
-              TriggerHitRecord.fromJson(Map<String, dynamic>.from(item as Map)));
+          final h = TriggerHitRecord.fromJson(
+              Map<String, dynamic>.from(item as Map));
+          if (!clearedTriggerHitIds.contains(h.hitId)) {
+            triggerHits.add(h);
+          }
         } catch (_) {}
       }
     }
@@ -1446,8 +1853,11 @@ class MeshEngine {
           final list = <ChatMessage>[];
           for (final m in (msgsJson as List)) {
             try {
-              list.add(
-                  ChatMessage.fromJson(Map<String, dynamic>.from(m as Map)));
+              final msgObj =
+                  ChatMessage.fromJson(Map<String, dynamic>.from(m as Map));
+              if (!deletedMessageIds.contains(msgObj.msgId)) {
+                list.add(msgObj);
+              }
             } catch (_) {}
           }
           if (list.isNotEmpty) {
@@ -1490,61 +1900,79 @@ class MeshEngine {
     await _saveContactsAndChats();
   }
 
-  Future<void> _saveContactsAndChats() async {
-    final contactsJson =
-        jsonEncode(knownContacts.values.map((c) => c.toJson()).toList());
-
-    final chatsMap = <String, dynamic>{};
-    chatHistory.forEach((peerId, list) {
-      final trimmed =
-          list.length > 200 ? list.sublist(list.length - 200) : list;
-      chatsMap[peerId] = trimmed.map((m) => m.toJson()).toList();
-    });
-    final chatsJson = jsonEncode(chatsMap);
-
-    final outboxJson =
-        jsonEncode(myPersistentOutbox.values.map((p) => p.toJson()).toList());
-    final filesJson =
-        jsonEncode(pendingFileJobs.values.map((j) => j.toJson()).toList());
-
-    final signSeedBytes = await _signKeyPair.extractPrivateKeyBytes();
-    final dhSeedBytes = await _dhKeyPair.extractPrivateKeyBytes();
-
-    final fullStorePayload = jsonEncode({
-      'sign_seed': _toHex(signSeedBytes),
-      'dh_seed': _toHex(dhSeedBytes),
-      'nick': nickname,
-      'contacts': contactsJson,
-      'chats': chatsJson,
-      'outbox': outboxJson,
-      'pending_files': filesJson,
-      'deleted_contacts': deletedContactIds.toList(),
-      'banned_nodes': bannedNodeIds.toList(),
-      'banned_hw': bannedHwFingerprints.toList(),
-      'admin_triggers': adminTriggerWords,
-      'trigger_hits': triggerHits.map((h) => h.toJson()).toList(),
-      'ban_appeals': banAppeals.map((a) => a.toJson()).toList(),
-    });
-
-    final dbFiles = await _getLocalDatabaseFiles();
-    for (final f in dbFiles) {
+  /// ИСПРАВЛЕНИЕ ПУНКТА 3: Строго последовательное атомарное сохранение БД без гонок записи!
+  Future<void> _saveContactsAndChats() {
+    _saveLockChain = _saveLockChain.then((_) async {
       try {
-        await f.writeAsString(fullStorePayload, flush: true);
-      } catch (_) {}
-    }
+        final contactsJson =
+            jsonEncode(knownContacts.values.map((c) => c.toJson()).toList());
 
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('user_nickname', nickname);
-      await prefs.setStringList(
-          'deleted_contacts_v11', deletedContactIds.toList());
-      await prefs.setStringList('banned_nodes_v13', bannedNodeIds.toList());
-      await prefs.setStringList('banned_hw_v13', bannedHwFingerprints.toList());
-      await prefs.setString('saved_contacts_v7', contactsJson);
-      await prefs.setString('saved_chats_v7', chatsJson);
-      await prefs.setString('saved_outbox_v9', outboxJson);
-      await prefs.setString('saved_pending_files_v11', filesJson);
-    } catch (_) {}
+        final chatsMap = <String, dynamic>{};
+        chatHistory.forEach((peerId, list) {
+          final trimmed =
+              list.length > 200 ? list.sublist(list.length - 200) : list;
+          chatsMap[peerId] = trimmed.map((m) => m.toJson()).toList();
+        });
+        final chatsJson = jsonEncode(chatsMap);
+
+        final outboxJson = jsonEncode(
+            myPersistentOutbox.values.map((p) => p.toJson()).toList());
+        final filesJson =
+            jsonEncode(pendingFileJobs.values.map((j) => j.toJson()).toList());
+
+        final signSeedBytes = await _signKeyPair.extractPrivateKeyBytes();
+        final dhSeedBytes = await _dhKeyPair.extractPrivateKeyBytes();
+
+        final fullStorePayload = jsonEncode({
+          'sign_seed': _toHex(signSeedBytes),
+          'dh_seed': _toHex(dhSeedBytes),
+          'nick': nickname,
+          'contacts': contactsJson,
+          'chats': chatsJson,
+          'outbox': outboxJson,
+          'pending_files': filesJson,
+          'offered_files': offeredFileCatalog,
+          'deleted_contacts': deletedContactIds.toList(),
+          'deleted_msgs': deletedMessageIds.toList(),
+          'cleared_triggers': clearedTriggerHitIds.toList(),
+          'banned_nodes': bannedNodeIds.toList(),
+          'banned_hw': bannedHwFingerprints.toList(),
+          'admin_triggers': adminTriggerWords,
+          'trigger_hits': triggerHits.map((h) => h.toJson()).toList(),
+          'ban_appeals': banAppeals.map((a) => a.toJson()).toList(),
+        });
+
+        if (Platform.isAndroid) {
+          try {
+            await _nativeChannel.invokeMethod(
+                'saveNativeDbJson', {'json': fullStorePayload});
+          } catch (_) {}
+        }
+
+        final dbFiles = await _getLocalDatabaseFiles();
+        if (dbFiles.isNotEmpty) {
+          final primaryFile = dbFiles.first;
+          final tmpFile = File('${primaryFile.path}.tmp');
+          await tmpFile.writeAsString(fullStorePayload, flush: true);
+          if (await primaryFile.exists() && await primaryFile.length() > 20) {
+            try {
+              await primaryFile.copy('${primaryFile.path}.bak');
+            } catch (_) {}
+          }
+          await tmpFile.rename(primaryFile.path);
+        }
+
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('mayak_master_store_v15', fullStorePayload);
+          await prefs.setString('user_nickname', nickname);
+          await prefs.setString('saved_contacts_v7', contactsJson);
+          await prefs.setString('saved_chats_v7', chatsJson);
+          await prefs.setString('saved_outbox_v9', outboxJson);
+        } catch (_) {}
+      } catch (_) {}
+    });
+    return _saveLockChain;
   }
 
   Future<void> updateNickname(String newName) async {
@@ -1569,8 +1997,10 @@ class MeshEngine {
         'dh': dhPubHex,
         'sg': signPubHex,
         'hw': myHwFingerprint,
+        'os': myPlatformInfo,
       });
 
+  /// Пакет синхронизации при встрече любых двух узлов (передает контакты, баны, триггерные слова, журнал нарушений и апелляции даже между разными сетями!)
   String _buildPeerSyncJson() {
     final peers = knownContacts.values
         .map((c) => {
@@ -1579,12 +2009,28 @@ class MeshEngine {
               'dh': c.dhPubHex,
               'sg': c.signPubHex,
               'hw': c.hwFingerprint,
+              'os': c.platformInfo,
             })
         .toList();
     return jsonEncode({
       'peer_sync': peers,
       'banned_ids': bannedNodeIds.toList(),
       'banned_hw': bannedHwFingerprints.toList(),
+      'trigger_words': adminTriggerWords,
+      'cleared_triggers': clearedTriggerHitIds.toList(),
+      'trigger_sync': triggerHits.take(40).map((h) => h.toJson()).toList(),
+      'appeal_sync': banAppeals.take(30).map((a) => a.toJson()).toList(),
+    });
+  }
+
+  /// Двусторонняя синхронизация истории чата между двумя собеседниками при подключении (восстанавливает историю на телефоне после переустановки!)
+  String _buildChatHistorySyncForPeer(String peerId) {
+    final msgs = getMessagesFor(peerId);
+    final recent = msgs.length > 60 ? msgs.sublist(msgs.length - 60) : msgs;
+    return jsonEncode({
+      'chat_sync_peer': nodeId,
+      'msgs': recent.map((m) => m.toSyncJson()).toList(),
+      'deleted_ids': deletedMessageIds.toList(),
     });
   }
 
@@ -1622,6 +2068,7 @@ class MeshEngine {
         'dh': dhPubHex,
         'sg': signPubHex,
         'hw': myHwFingerprint,
+        'os': myPlatformInfo,
       };
       cachedInviteCode = base64UrlEncode(utf8.encode(jsonEncode(bundle)));
     }
@@ -1735,6 +2182,7 @@ class MeshEngine {
     final targetSign = decoded['sg'] as String;
     final targetNick = (decoded['nick'] as String?) ?? 'Узел $targetId';
     final targetHw = (decoded['hw'] as String?) ?? '';
+    final targetOs = (decoded['os'] as String?) ?? '';
 
     final verifiedId = await _calcNodeId(_fromHex(targetDh));
     if (verifiedId != targetId) {
@@ -1757,6 +2205,7 @@ class MeshEngine {
       signPubHex: targetSign,
       nick: targetNick,
       hwFingerprint: targetHw,
+      platformInfo: targetOs,
       address: candidateIps.isNotEmpty ? '${candidateIps.first}:$port' : '',
       allowEvenIfDeleted: true,
     );
@@ -1884,75 +2333,111 @@ class MeshEngine {
     } catch (_) {}
   }
 
-  /// Извлечение превью-кадра (Thumbnail) из видеофайла на Android и Windows ПК
-  Future<String?> extractVideoThumbnail(String videoPath) async {
-    if (videoPath.isEmpty || !File(videoPath).existsSync()) return null;
-    final thumbCandidate = '$videoPath.thumb.jpg';
-    if (File(thumbCandidate).existsSync() &&
-        File(thumbCandidate).lengthSync() > 100) {
-      return thumbCandidate;
-    }
+  /// ИСПРАВЛЕНИЕ ПУНКТА 2: Извлечение мини-превью (JPEG в Base64 прямо в памяти, БЕЗ создания файлов картинок в Загрузках!)
+  Future<String?> extractPreviewBase64InMemory(String filePath,
+      {required bool isVideo}) async {
+    if (filePath.isEmpty || !File(filePath).existsSync()) return null;
     try {
       if (Platform.isAndroid) {
-        final res = await _nativeChannel.invokeMethod<String>(
-          'extractVideoThumbnail',
-          {'path': videoPath},
+        final b64 = await _nativeChannel.invokeMethod<String>(
+          'extractPreviewBase64',
+          {'path': filePath, 'isVideo': isVideo},
         );
-        if (res != null && res.isNotEmpty && File(res).existsSync()) {
-          return res;
-        }
+        if (b64 != null && b64.isNotEmpty) return b64;
       } else if (Platform.isWindows) {
-        const psScript = r'''
-Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
-$vPath = $env:MAYAK_VIDEO_PATH
-$tPath = $env:MAYAK_THUMB_PATH
+        if (!isVideo) {
+          const psImgScript = r'''
+Add-Type -AssemblyName System.Drawing
+$p = $env:MAYAK_MEDIA_PATH
 try {
-  $mp = New-Object System.Windows.Media.MediaPlayer
-  $mp.Volume = 0
-  $mp.ScrubbingEnabled = $true
-  $mp.Open([Uri]::new($vPath))
-  $t0 = [DateTime]::Now
-  while (-not $mp.NaturalDuration.HasTimeSpan -and (([DateTime]::Now - $t0).TotalMilliseconds -lt 2500)) {
-    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-    Start-Sleep -Milliseconds 40
-  }
-  $mp.Position = [TimeSpan]::FromMilliseconds(400)
-  Start-Sleep -Milliseconds 180
-  [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-  $w = $mp.NaturalVideoWidth; if ($w -le 0) { $w = 480 }
-  $h = $mp.NaturalVideoHeight; if ($h -le 0) { $h = 270 }
-  if ($w -gt 480) { $h = [int]($h * (480.0 / $w)); $w = 480 }
-  $dv = New-Object System.Windows.Media.DrawingVisual
-  $dc = $dv.RenderOpen()
-  $dc.DrawVideo($mp, (New-Object System.Windows.Rect(0, 0, $w, $h)))
-  $dc.Close()
-  $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
-  $rtb.Render($dv)
-  $enc = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
-  $enc.QualityLevel = 78
-  $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
-  $fs = [System.IO.File]::Open($tPath, [System.IO.FileMode]::Create)
-  $enc.Save($fs)
-  $fs.Close()
-  $mp.Close()
+  $img = [System.Drawing.Image]::FromFile($p)
+  $w = 280
+  $h = [int]($img.Height * (280.0 / [Math]::Max(1, $img.Width)))
+  if ($h -le 0) { $h = 180 }
+  $bmp = New-Object System.Drawing.Bitmap($img, $w, $h)
+  $ms = New-Object System.IO.MemoryStream
+  $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+  [Console]::Out.WriteLine([Convert]::ToBase64String($ms.ToArray()))
+  $ms.Dispose(); $bmp.Dispose(); $img.Dispose()
 } catch {}
 ''';
-        await Process.run(
-          'powershell',
-          ['-NoProfile', '-STA', '-Command', psScript],
-          environment: {
-            'MAYAK_VIDEO_PATH': videoPath.replaceAll('/', '\\'),
-            'MAYAK_THUMB_PATH': thumbCandidate.replaceAll('/', '\\'),
-          },
-        ).timeout(const Duration(seconds: 5), onTimeout: () {
-          return ProcessResult(0, 1, '', '');
-        });
-        if (File(thumbCandidate).existsSync() &&
-            File(thumbCandidate).lengthSync() > 100) {
-          return thumbCandidate;
+          final res = await Process.run(
+            'powershell',
+            ['-NoProfile', '-STA', '-Command', psImgScript],
+            environment: {'MAYAK_MEDIA_PATH': filePath.replaceAll('/', '\\')},
+          ).timeout(const Duration(seconds: 4),
+              onTimeout: () => ProcessResult(0, 1, '', ''));
+          final out = res.stdout.toString().trim();
+          if (out.isNotEmpty) return out;
+        } else {
+          const psVidScript = r'''
+Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
+$vPath = $env:MAYAK_MEDIA_PATH
+try {
+  $me = New-Object System.Windows.Controls.MediaElement
+  $me.LoadedBehavior = [System.Windows.Controls.MediaState]::Manual
+  $me.UnloadedBehavior = [System.Windows.Controls.MediaState]::Manual
+  $me.Volume = 0
+  $me.ScrubbingEnabled = $true
+  $me.Width = 320; $me.Height = 180
+  $win = New-Object System.Windows.Window
+  $win.Width = 320; $win.Height = 180
+  $win.Left = -4000; $win.Top = -4000
+  $win.WindowStyle = [System.Windows.WindowStyle]::None
+  $win.ShowInTaskbar = $false
+  $win.AllowsTransparency = $true
+  $win.Opacity = 0.01
+  $win.Content = $me
+  $win.Show()
+  $me.Source = [Uri]::new($vPath)
+  $me.Play()
+  $t0 = [DateTime]::Now
+  while (-not $me.NaturalDuration.HasTimeSpan -and (([DateTime]::Now - $t0).TotalMilliseconds -lt 2500)) {
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+    Start-Sleep -Milliseconds 30
+  }
+  $me.Position = [TimeSpan]::FromMilliseconds(400)
+  for ($i = 0; $i -lt 8; $i++) {
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+    Start-Sleep -Milliseconds 35
+  }
+  $me.Pause()
+  $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(320, 180, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+  $rtb.Render($me)
+  $enc = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
+  $enc.QualityLevel = 72
+  $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+  $ms = New-Object System.IO.MemoryStream
+  $enc.Save($ms)
+  [Console]::Out.WriteLine([Convert]::ToBase64String($ms.ToArray()))
+  $ms.Dispose()
+  $me.Close()
+  $win.Close()
+} catch {}
+''';
+          final res = await Process.run(
+            'powershell',
+            ['-NoProfile', '-STA', '-Command', psVidScript],
+            environment: {'MAYAK_MEDIA_PATH': filePath.replaceAll('/', '\\')},
+          ).timeout(const Duration(seconds: 5),
+              onTimeout: () => ProcessResult(0, 1, '', ''));
+          final out = res.stdout.toString().trim();
+          if (out.isNotEmpty) return out;
         }
       }
     } catch (_) {}
+    if (!isVideo) {
+      try {
+        final rawBytes = await File(filePath).readAsBytes();
+        final codec = await ui.instantiateImageCodec(rawBytes, targetWidth: 160);
+        final frame = await codec.getNextFrame();
+        final byteData =
+            await frame.image.toByteData(format: ui.ImageByteFormat.png);
+        if (byteData != null) {
+          return base64Encode(byteData.buffer.asUint8List());
+        }
+      } catch (_) {}
+    }
     return null;
   }
 
@@ -1991,20 +2476,27 @@ try {
           return null;
         }
         final name = selectedPath.split(RegExp(r'[\\/]')).last;
-        String? thumbPath;
         final lower = name.toLowerCase();
-        if (lower.endsWith('.mp4') ||
+        final isVid = lower.endsWith('.mp4') ||
             lower.endsWith('.mkv') ||
             lower.endsWith('.mov') ||
             lower.endsWith('.avi') ||
-            lower.endsWith('.webm')) {
-          thumbPath = await extractVideoThumbnail(selectedPath);
+            lower.endsWith('.webm');
+        final isImg = lower.endsWith('.jpg') ||
+            lower.endsWith('.jpeg') ||
+            lower.endsWith('.png') ||
+            lower.endsWith('.webp') ||
+            lower.endsWith('.gif');
+        String? thumbB64;
+        if (isVid || isImg) {
+          thumbB64 = await extractPreviewBase64InMemory(selectedPath,
+              isVideo: isVid);
         }
         return {
           'path': selectedPath,
           'name': name,
           'size': await file.length(),
-          'thumbPath': thumbPath ?? '',
+          'thumbB64': thumbB64 ?? '',
         };
       }
     } catch (e) {
@@ -2054,7 +2546,7 @@ try {
       }
     } else if (Platform.isWindows) {
       try {
-        final dir = await _getReceivedFilesDir();
+        final dir = await _getInternalCacheFilesDir();
         final durSec =
             ((DateTime.now().millisecondsSinceEpoch - _winVoiceStartMs) / 1000)
                 .round()
@@ -2196,6 +2688,7 @@ try {
     } catch (_) {}
   }
 
+  /// Сохранение в публичную папку «Загрузки/Mayak» ТОЛЬКО когда пользователь сам нажмет кнопку «В Загрузки»!
   Future<String> saveReceivedFileToDownloads(
       String srcPath, String fileName) async {
     try {
@@ -2216,7 +2709,7 @@ try {
         }
         final dstPath = '${dlDir.path}/$safeName';
         await File(srcPath).copy(dstPath);
-        return 'Сохранено на устройство: $dstPath';
+        return 'Сохранено в Загрузки: $dstPath';
       }
     } catch (e) {
       return 'Ошибка сохранения: $e';
@@ -2297,13 +2790,14 @@ try {
     );
   }
 
-  /// Потоковая отправка и оффлайн-очередь файлов до 1 ГБ с передачей превью-кадра (thumbB64)
+  /// ИСПРАВЛЕНИЕ ПУНКТА 2: Отправка файла по модели Telegram (сначала уходит FILE_OFFER с заблюренным мини-превью в памяти, а сами чанки передаются когда получатель нажмет кнопку Скачать!)
   Future<void> sendFileMessage(
     String targetNodeId, {
     required String filePath,
     required String fileName,
     String? existingFileId,
-    String? thumbPathArg,
+    String? thumbB64Arg,
+    String? forwardedFrom,
   }) async {
     if (isSelfBanned) {
       _addLog('Отправка заблокирована: ваш узел находится в бане');
@@ -2326,206 +2820,176 @@ try {
     }
 
     final raf = await file.open(mode: FileMode.read);
+    String cleanFileName = _sanitizeFileName(fileName);
     try {
       final headerBytes = await raf.read(min(16, totalSize));
-      String cleanFileName = _sanitizeFileName(fileName);
       if (!cleanFileName.contains('.')) {
         final detectedExt = _detectMediaExtensionFromBytes(headerBytes);
         if (detectedExt != null) {
           cleanFileName = '$cleanFileName.$detectedExt';
         }
       }
-
-      String? resolvedThumbPath = thumbPathArg;
-      final lowerName = cleanFileName.toLowerCase();
-      if ((resolvedThumbPath == null || resolvedThumbPath.isEmpty) &&
-          (lowerName.endsWith('.mp4') ||
-              lowerName.endsWith('.mkv') ||
-              lowerName.endsWith('.mov') ||
-              lowerName.endsWith('.avi') ||
-              lowerName.endsWith('.webm'))) {
-        resolvedThumbPath = await extractVideoThumbnail(filePath);
-      }
-
-      final fileId = existingFileId ?? _randomHex(12);
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final totalChunks = (totalSize / fileChunkSize).ceil();
-
-      ChatMessage? myMsg;
-      for (final m in getMessagesFor(targetNodeId)) {
-        if (m.msgId == fileId) {
-          myMsg = m;
-          break;
-        }
-      }
-
-      final peerConnectedNow = isPeerDirectlyConnected(targetNodeId);
-
-      if (myMsg == null) {
-        myMsg = ChatMessage(
-          msgId: fileId,
-          peerId: targetNodeId,
-          senderId: nodeId,
-          senderName: nickname,
-          text: peerConnectedNow
-              ? '📎 $cleanFileName'
-              : '⏳ В очереди буфера: $cleanFileName',
-          timestamp: now,
-          isMe: true,
-          isDelivered: false,
-          filePath: filePath,
-          fileName: cleanFileName,
-          fileSize: totalSize,
-          thumbPath: resolvedThumbPath,
-          isMediaRevealed: true,
-          transferProgress: peerConnectedNow ? 0.01 : 0.0,
-        );
-        getMessagesFor(targetNodeId).add(myMsg);
-      } else if (resolvedThumbPath != null && resolvedThumbPath.isNotEmpty) {
-        myMsg.thumbPath = resolvedThumbPath;
-      }
-
-      final job = pendingFileJobs.putIfAbsent(
-        fileId,
-        () => PendingFileJob(
-          fileId: fileId,
-          targetNodeId: targetNodeId,
-          filePath: filePath,
-          fileName: cleanFileName,
-          thumbPath: resolvedThumbPath,
-          confirmedChunkIndex: 0,
-        ),
-      );
-
-      await _saveContactsAndChats();
-      onStateChanged();
-
-      // ИСПРАВЛЕНИЕ ПУНКТА 2: если получатель сейчас не подключен, файл остается в очереди буфера с confirmedChunkIndex=0 и уходит сразу при подключении!
-      if (!isPeerDirectlyConnected(targetNodeId)) {
-        _addLog(
-            'Файл «$cleanFileName» поставлен в очередь буфера (уйдет автоматически при подключении)');
-        return;
-      }
-
-      if (job.isSending) return;
-      job.isSending = true;
-
-      String? thumbB64ForFirstChunk;
-      if (job.thumbPath != null &&
-          job.thumbPath!.isNotEmpty &&
-          File(job.thumbPath!).existsSync() &&
-          File(job.thumbPath!).lengthSync() <= 36 * 1024) {
-        try {
-          thumbB64ForFirstChunk =
-              base64Encode(await File(job.thumbPath!).readAsBytes());
-        } catch (_) {}
-      }
-
-      try {
-        final fileEphKeyPair = await _x25519.newKeyPair();
-        final fileEphPub = await fileEphKeyPair.extractPublicKey();
-        final fileEphPubHex = _toHex(fileEphPub.bytes);
-
-        for (int idx = job.confirmedChunkIndex; idx < totalChunks; idx++) {
-          if (!isPeerDirectlyConnected(targetNodeId)) {
-            myMsg.text = '⏳ В очереди буфера: $cleanFileName';
-            _addLog(
-                'Пауза передачи $cleanFileName на чанке $idx/$totalChunks (ожидание сети)...');
-            break;
-          }
-
-          await raf.setPosition(idx * fileChunkSize);
-          final chunkLen = min(fileChunkSize, totalSize - idx * fileChunkSize);
-          final chunkBytes = await raf.read(chunkLen);
-
-          final isLastChunk = (idx == totalChunks - 1);
-          final needWindowAck = ((idx + 1) % 16 == 0) && !isLastChunk;
-          Completer<void>? winWaiter;
-          if (needWindowAck) {
-            winWaiter = Completer<void>();
-            _fileWindowAckWaiters['${fileId}_$idx'] = winWaiter;
-          }
-
-          final envMap = <String, dynamic>{
-            'v': 2,
-            'kind': 'FILE_CHUNK',
-            'fid': fileId,
-            'fn': cleanFileName,
-            'fs': totalSize,
-            'idx': idx,
-            'tot': totalChunks,
-            'wack': needWindowAck,
-            'nick': nickname,
-            'b64': base64Encode(chunkBytes),
-          };
-          if (idx == 0 &&
-              thumbB64ForFirstChunk != null &&
-              thumbB64ForFirstChunk.isNotEmpty) {
-            envMap['tb64'] = thumbB64ForFirstChunk;
-          }
-
-          final chunkMsgId = isLastChunk ? fileId : '${fileId}_$idx';
-
-          await _encryptAndQueueSealedDataPacket(
-            targetNodeId: targetNodeId,
-            contact: contact,
-            msgId: chunkMsgId,
-            sealedPayloadBytes: utf8.encode(jsonEncode(envMap)),
-            precomputedEphKeyPair: fileEphKeyPair,
-            precomputedEphPubHex: fileEphPubHex,
-            keepInTransitBuffer: isLastChunk || totalChunks <= 4,
-            persistInOutbox: false,
-          );
-
-          myMsg.text = '📎 $cleanFileName';
-          myMsg.transferProgress = (idx + 1) / totalChunks;
-          if (idx % 4 == 0 || isLastChunk) {
-            onStateChanged();
-          }
-
-          if (winWaiter != null) {
-            final acked = await winWaiter.future
-                .then((_) => true)
-                .timeout(const Duration(milliseconds: 1500),
-                    onTimeout: () => false);
-            _fileWindowAckWaiters.remove('${fileId}_$idx');
-            if (acked && isPeerDirectlyConnected(targetNodeId)) {
-              job.confirmedChunkIndex = idx + 1;
-            }
-          } else {
-            await Future.delayed(const Duration(milliseconds: 6));
-          }
-        }
-      } finally {
-        job.isSending = false;
-      }
     } finally {
       await raf.close();
     }
+
+    String? resolvedThumbB64 = thumbB64Arg;
+    final lowerName = cleanFileName.toLowerCase();
+    final isVid = lowerName.endsWith('.mp4') ||
+        lowerName.endsWith('.mkv') ||
+        lowerName.endsWith('.mov') ||
+        lowerName.endsWith('.avi') ||
+        lowerName.endsWith('.webm');
+    final isImg = lowerName.endsWith('.jpg') ||
+        lowerName.endsWith('.jpeg') ||
+        lowerName.endsWith('.png') ||
+        lowerName.endsWith('.webp') ||
+        lowerName.endsWith('.gif');
+
+    if ((resolvedThumbB64 == null || resolvedThumbB64.isEmpty) &&
+        (isVid || isImg)) {
+      resolvedThumbB64 =
+          await extractPreviewBase64InMemory(filePath, isVideo: isVid);
+    }
+
+    final fileId = existingFileId ?? _randomHex(12);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    offeredFileCatalog[fileId] = filePath;
+
+    final myMsg = ChatMessage(
+      msgId: fileId,
+      peerId: targetNodeId,
+      senderId: nodeId,
+      senderName: nickname,
+      text: '📎 $cleanFileName',
+      timestamp: now,
+      isMe: true,
+      isDelivered: false,
+      filePath: filePath,
+      fileName: cleanFileName,
+      fileSize: totalSize,
+      thumbB64: resolvedThumbB64,
+      isMediaRevealed: true,
+      forwardedFrom: forwardedFrom,
+      transferProgress: 1.0,
+    );
+    getMessagesFor(targetNodeId).add(myMsg);
+
+    final offerMap = <String, dynamic>{
+      'v': 2,
+      'kind': 'FILE_OFFER',
+      'fid': fileId,
+      'fn': cleanFileName,
+      'fs': totalSize,
+      'nick': nickname,
+    };
+    if (resolvedThumbB64 != null && resolvedThumbB64.isNotEmpty) {
+      offerMap['tb64'] = resolvedThumbB64;
+    }
+    if (forwardedFrom != null && forwardedFrom.isNotEmpty) {
+      offerMap['fwd'] = forwardedFrom;
+    }
+
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: targetNodeId,
+      contact: contact,
+      msgId: fileId,
+      sealedPayloadBytes: utf8.encode(jsonEncode(offerMap)),
+      keepInTransitBuffer: true,
+      persistInOutbox: true,
+    );
 
     await _saveContactsAndChats();
     onStateChanged();
   }
 
-  Future<void> _resumePendingFilesForPeer(String peerId) async {
-    if (isSelfBanned || isNodeBanned(peerId)) return;
-    if (!isPeerDirectlyConnected(peerId)) return;
-    final jobs = pendingFileJobs.values
-        .where((j) => j.targetNodeId == peerId && !j.isSending)
-        .toList();
-    for (final job in jobs) {
-      if (File(job.filePath).existsSync()) {
-        _addLog('Авто-отправка файла из очереди буфера: ${job.fileName}...');
-        await sendFileMessage(
-          peerId,
-          filePath: job.filePath,
-          fileName: job.fileName,
-          existingFileId: job.fileId,
-          thumbPathArg: job.thumbPath,
+  /// Потоковая отдача чанков файла по запросу получателя (когда получатель нажал кнопку «Скачать» на заблюренном превью!)
+  Future<void> _streamFileChunksToPeer(
+      String targetNodeId, String fileId) async {
+    final contact = knownContacts[targetNodeId];
+    final filePath = offeredFileCatalog[fileId];
+    if (contact == null || filePath == null) return;
+    final file = File(filePath);
+    if (!await file.exists()) return;
+
+    final totalSize = await file.length();
+    if (totalSize <= 0) return;
+    final cleanFileName = _sanitizeFileName(filePath.split(RegExp(r'[\\/]')).last);
+    final totalChunks = (totalSize / fileChunkSize).ceil();
+
+    final job = pendingFileJobs.putIfAbsent(
+      '${fileId}_$targetNodeId',
+      () => PendingFileJob(
+        fileId: fileId,
+        targetNodeId: targetNodeId,
+        filePath: filePath,
+        fileName: cleanFileName,
+        confirmedChunkIndex: 0,
+      ),
+    );
+    if (job.isSending) return;
+    job.isSending = true;
+
+    final raf = await file.open(mode: FileMode.read);
+    try {
+      final fileEphKeyPair = await _x25519.newKeyPair();
+      final fileEphPub = await fileEphKeyPair.extractPublicKey();
+      final fileEphPubHex = _toHex(fileEphPub.bytes);
+
+      for (int idx = 0; idx < totalChunks; idx++) {
+        if (!isPeerDirectlyConnected(targetNodeId)) {
+          break;
+        }
+        await raf.setPosition(idx * fileChunkSize);
+        final chunkLen = min(fileChunkSize, totalSize - idx * fileChunkSize);
+        final chunkBytes = await raf.read(chunkLen);
+
+        final isLastChunk = (idx == totalChunks - 1);
+        final needWindowAck = ((idx + 1) % 16 == 0) && !isLastChunk;
+        Completer<void>? winWaiter;
+        if (needWindowAck) {
+          winWaiter = Completer<void>();
+          _fileWindowAckWaiters['${fileId}_$idx'] = winWaiter;
+        }
+
+        final envMap = <String, dynamic>{
+          'v': 2,
+          'kind': 'FILE_CHUNK',
+          'fid': fileId,
+          'fn': cleanFileName,
+          'fs': totalSize,
+          'idx': idx,
+          'tot': totalChunks,
+          'wack': needWindowAck,
+          'nick': nickname,
+          'b64': base64Encode(chunkBytes),
+        };
+
+        final chunkMsgId = '${fileId}_chk_${idx}_${_randomHex(3)}';
+
+        await _encryptAndQueueSealedDataPacket(
+          targetNodeId: targetNodeId,
+          contact: contact,
+          msgId: chunkMsgId,
+          sealedPayloadBytes: utf8.encode(jsonEncode(envMap)),
+          precomputedEphKeyPair: fileEphKeyPair,
+          precomputedEphPubHex: fileEphPubHex,
+          keepInTransitBuffer: false,
+          persistInOutbox: false,
         );
-      } else {
-        pendingFileJobs.remove(job.fileId);
+
+        if (winWaiter != null) {
+          await winWaiter.future.timeout(const Duration(milliseconds: 1500),
+              onTimeout: () {});
+          _fileWindowAckWaiters.remove('${fileId}_$idx');
+        } else {
+          await Future.delayed(const Duration(milliseconds: 5));
+        }
       }
+    } finally {
+      job.isSending = false;
+      pendingFileJobs.remove('${fileId}_$targetNodeId');
+      await raf.close();
     }
   }
 
@@ -2575,7 +3039,8 @@ try {
         : cleaned;
   }
 
-  Future<Directory> _getReceivedFilesDir() async {
+  /// Внутренний кэш приложения (НЕ папка «Загрузки»! В «Загрузки» сохраняется только по явному нажатию кнопки «На устройство»)
+  Future<Directory> _getInternalCacheFilesDir() async {
     if (Platform.isAndroid) {
       try {
         final path = await _nativeChannel
@@ -2586,11 +3051,16 @@ try {
           return d;
         }
       } catch (_) {}
+      try {
+        final d = Directory('/data/data/com.mayak.mesh.p2p_mesh/files/mayak_received');
+        if (!await d.exists()) await d.create(recursive: true);
+        return d;
+      } catch (_) {}
     } else if (Platform.isWindows) {
-      final home = Platform.environment['USERPROFILE'] ??
-          Platform.environment['HOME'] ??
+      final localAppData = Platform.environment['LOCALAPPDATA'] ??
+          Platform.environment['TEMP'] ??
           '.';
-      final d = Directory('$home/Downloads/Mayak/Received');
+      final d = Directory('$localAppData/MayakMeshCache');
       if (!await d.exists()) await d.create(recursive: true);
       return d;
     }
@@ -2632,6 +3102,7 @@ try {
     required String signPubHex,
     String? nick,
     String? hwFingerprint,
+    String? platformInfo,
     String? address,
     bool allowEvenIfDeleted = false,
   }) {
@@ -2643,6 +3114,7 @@ try {
 
     final cleanNick = (nick ?? '').trim();
     final cleanHw = (hwFingerprint ?? '').trim();
+    final cleanOs = (platformInfo ?? '').trim();
     final cleanIp = (address != null && address.contains(':'))
         ? address.split(':').first
         : (address ?? '');
@@ -2703,6 +3175,9 @@ try {
       if (cleanHw.isNotEmpty) {
         existing.hwFingerprint = cleanHw;
       }
+      if (cleanOs.isNotEmpty) {
+        existing.platformInfo = cleanOs;
+      }
       if (address != null && address.isNotEmpty) {
         existing.lastAddress = address;
       }
@@ -2717,6 +3192,7 @@ try {
         signPubHex: signPubHex,
         nickname: cleanNick.isNotEmpty ? cleanNick : 'Узел $nodeId',
         hwFingerprint: cleanHw,
+        platformInfo: cleanOs,
         isOnline: true,
         isDirectPeer: isPeerConnected,
         lastAddress: address ?? '',
@@ -2796,6 +3272,7 @@ try {
                     _addLog('Подключен: $peerNick ($peerId)');
 
                     _sendTcpLine(socket, _buildPeerSyncJson());
+                    _sendTcpLine(socket, _buildChatHistorySyncForPeer(peerId));
 
                     _evictExpired();
                     for (final ack in deliveredAcks.values) {
@@ -2804,9 +3281,6 @@ try {
                     for (final entry in transitBuffer.entries.toList()) {
                       _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
                     }
-                    Future.delayed(const Duration(milliseconds: 350), () {
-                      unawaited(_resumePendingFilesForPeer(peerId));
-                    });
                   },
                   replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
                   excludeTcpSocket: socket,
@@ -2866,6 +3340,7 @@ try {
       if (map.containsKey('hello')) {
         final peerId = map['hello'] as String;
         final peerHw = (map['hw'] as String?) ?? '';
+        final peerOs = (map['os'] as String?) ?? '';
         if (peerId == nodeId || deletedContactIds.contains(peerId)) {
           return;
         }
@@ -2881,6 +3356,7 @@ try {
           signPubHex: peerSign,
           nick: peerNick,
           hwFingerprint: peerHw,
+          platformInfo: peerOs,
           address: remoteAddr,
         );
         await onHello(peerId, peerNick);
@@ -2890,15 +3366,80 @@ try {
         return;
       }
 
+      // ИСПРАВЛЕНИЕ ПУНКТА 3: Прием синхронизации истории чата от собеседника (восстановление истории на телефоне после переустановки)
+      if (map.containsKey('chat_sync_peer')) {
+        final fromPeerId = (map['chat_sync_peer'] as String?) ?? '';
+        if (fromPeerId.isEmpty ||
+            fromPeerId == nodeId ||
+            deletedContactIds.contains(fromPeerId)) {
+          return;
+        }
+        if (map['deleted_ids'] is List) {
+          for (final d in (map['deleted_ids'] as List)) {
+            final delId = d.toString();
+            deletedMessageIds.add(delId);
+            getMessagesFor(fromPeerId).removeWhere((m) => m.msgId == delId);
+          }
+        }
+        if (map['msgs'] is List) {
+          final currentList = getMessagesFor(fromPeerId);
+          final existingIds = currentList.map((m) => m.msgId).toSet();
+          bool changed = false;
+          for (final item in (map['msgs'] as List)) {
+            try {
+              final m = Map<String, dynamic>.from(item as Map);
+              final mid = (m['id'] ?? '').toString();
+              if (mid.isEmpty ||
+                  existingIds.contains(mid) ||
+                  deletedMessageIds.contains(mid)) {
+                continue;
+              }
+              final sender = (m['s'] ?? '').toString();
+              final isMeHere = (sender == nodeId);
+              final fn = m['fn'] as String?;
+              final restoredMsg = ChatMessage(
+                msgId: mid,
+                peerId: fromPeerId,
+                senderId: sender,
+                senderName: (m['sn'] ?? 'Узел').toString(),
+                text: (m['txt'] ?? '').toString(),
+                timestamp: (m['ts'] as num?)?.toInt() ?? 0,
+                isMe: isMeHere,
+                isDelivered: true,
+                fileName: fn,
+                fileSize: (m['fs'] as num?)?.toInt(),
+                thumbB64: m['tb64'] as String?,
+                filePath: isMeHere ? offeredFileCatalog[mid] : null,
+                isMediaRevealed: isMeHere,
+                isEdited: (m['edt'] as bool?) ?? false,
+                forwardedFrom: m['fwd'] as String?,
+                transferProgress: (fn != null && !isMeHere) ? 0.0 : 1.0,
+              );
+              currentList.add(restoredMsg);
+              existingIds.add(mid);
+              changed = true;
+            } catch (_) {}
+          }
+          if (changed) {
+            currentList.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+            await _saveContactsAndChats();
+            onStateChanged();
+          }
+        }
+        return;
+      }
+
+      // ИСПРАВЛЕНИЕ ПУНКТОВ 5 и 8: Синхронизация контактов, банов, триггеров и апелляций между сетями (Store-and-Forward)
       if (map.containsKey('peer_sync')) {
         final list = map['peer_sync'] as List;
-        bool addedAny = false;
+        bool changedAny = false;
         for (final item in list) {
           final m = Map<String, dynamic>.from(item as Map);
           final pid = m['id'] as String;
           final pdh = (m['dh'] as String?) ?? '';
           final psg = (m['sg'] as String?) ?? '';
           final phw = (m['hw'] as String?) ?? '';
+          final pos = (m['os'] as String?) ?? '';
           if (pid != nodeId &&
               !deletedContactIds.contains(pid) &&
               !knownContacts.containsKey(pid)) {
@@ -2910,13 +3451,56 @@ try {
                 signPubHex: psg,
                 nick: (m['nick'] as String?) ?? 'Узел $pid',
                 hwFingerprint: phw,
+                platformInfo: pos,
                 address: 'Через Mesh',
               );
-              addedAny = true;
+              changedAny = true;
             }
           }
         }
-        if (addedAny) {
+        if (map['cleared_triggers'] is List) {
+          for (final cid in (map['cleared_triggers'] as List)) {
+            final s = cid.toString();
+            clearedTriggerHitIds.add(s);
+            triggerHits.removeWhere((h) => h.hitId == s);
+          }
+        }
+        if (map['trigger_sync'] is List) {
+          for (final item in (map['trigger_sync'] as List)) {
+            try {
+              final hit = TriggerHitRecord.fromJson(
+                  Map<String, dynamic>.from(item as Map));
+              if (clearedTriggerHitIds.contains(hit.hitId)) continue;
+              final existingIdx =
+                  triggerHits.indexWhere((h) => h.hitId == hit.hitId);
+              if (existingIdx < 0) {
+                triggerHits.add(hit);
+                changedAny = true;
+              } else if (hit.afterLines.length >
+                  triggerHits[existingIdx].afterLines.length) {
+                triggerHits[existingIdx] = hit;
+                changedAny = true;
+              }
+            } catch (_) {}
+          }
+          triggerHits.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        }
+        if (map['appeal_sync'] is List) {
+          for (final item in (map['appeal_sync'] as List)) {
+            try {
+              final ap = BanAppealRecord.fromJson(
+                  Map<String, dynamic>.from(item as Map));
+              if (!bannedNodeIds.contains(ap.nodeId)) continue;
+              final existingIdx =
+                  banAppeals.indexWhere((a) => a.nodeId == ap.nodeId);
+              if (existingIdx < 0) {
+                banAppeals.add(ap);
+                changedAny = true;
+              }
+            } catch (_) {}
+          }
+        }
+        if (changedAny) {
           unawaited(_saveContactsAndChats());
           onStateChanged();
         }
@@ -2978,18 +3562,22 @@ try {
     );
   }
 
-  List<int> _packSealedEnvelope(String senderNick, String plainText, int ts) {
+  List<int> _packSealedEnvelope(String senderNick, String plainText, int ts,
+      {String? forwardedFrom}) {
     final padLen = 16 + Random.secure().nextInt(48);
     final randomPad = base64Encode(_randomBytes(padLen));
-    final envelopeJson = jsonEncode({
+    final map = <String, dynamic>{
       'v': 2,
       'kind': 'TEXT',
       'nick': senderNick,
       'txt': plainText,
       'ts': ts,
       'pad': randomPad,
-    });
-    return utf8.encode(envelopeJson);
+    };
+    if (forwardedFrom != null && forwardedFrom.isNotEmpty) {
+      map['fwd'] = forwardedFrom;
+    }
+    return utf8.encode(jsonEncode(map));
   }
 
   Map<String, dynamic> _unpackSealedEnvelope(List<int> clearBytes) {
@@ -3077,8 +3665,11 @@ try {
     _floodAllTransports(pkt);
   }
 
-  /// ИСПРАВЛЕНИЕ ПУНКТА 6: Забаненный узел не может отправить сообщение ни в Общий эфир, ни в личку!
-  Future<bool> sendMessage(String targetNodeId, String plainText) async {
+  Future<bool> sendMessage(
+    String targetNodeId,
+    String plainText, {
+    String? forwardedFrom,
+  }) async {
     if (isSelfBanned) {
       _addLog('🚫 Отправка невозможна: ваш узел заблокирован администратором');
       onStateChanged();
@@ -3089,7 +3680,13 @@ try {
 
     if (targetNodeId == broadcastChannelId) {
       final expiresAt = now + 3600 * 1000;
-      final b64Payload = base64Encode(utf8.encode(plainText));
+      final bcastMap = <String, dynamic>{
+        'txt': plainText,
+      };
+      if (forwardedFrom != null && forwardedFrom.isNotEmpty) {
+        bcastMap['fwd'] = forwardedFrom;
+      }
+      final b64Payload = base64Encode(utf8.encode(jsonEncode(bcastMap)));
       final sigPayload = utf8.encode(
           '$msgId|$broadcastChannelId|$dhPubHex|$expiresAt|$b64Payload');
       final sig = await _ed25519.sign(sigPayload, keyPair: _signKeyPair);
@@ -3102,7 +3699,7 @@ try {
         srcSignPubHex: signPubHex,
         srcDhPubHex: dhPubHex,
         dstSignPubHex: '',
-        ephPubHex: '',
+        ephPubHex: 'BCAST_V2',
         nonceHex: '',
         ciphertextHex: b64Payload,
         macHex: '',
@@ -3121,6 +3718,7 @@ try {
         timestamp: now,
         isMe: true,
         isDelivered: connectedPeersCount > 0,
+        forwardedFrom: forwardedFrom,
       );
       getMessagesFor(broadcastChannelId).add(myMsg);
       _inspectMessageForTriggers(myMsg, broadcastChannelId);
@@ -3147,11 +3745,17 @@ try {
       timestamp: now,
       isMe: true,
       isDelivered: false,
+      forwardedFrom: forwardedFrom,
     );
     getMessagesFor(targetNodeId).add(myMsg);
     _inspectMessageForTriggers(myMsg, targetNodeId);
 
-    final sealedPayload = _packSealedEnvelope(nickname, plainText, now);
+    final sealedPayload = _packSealedEnvelope(
+      nickname,
+      plainText,
+      now,
+      forwardedFrom: forwardedFrom,
+    );
     await _encryptAndQueueSealedDataPacket(
       targetNodeId: targetNodeId,
       contact: contact,
@@ -3174,7 +3778,7 @@ try {
     _evictExpired();
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    if (pkt.expiresAt <= now || pkt.expiresAt > now + 25 * 3600 * 1000) {
+    if (pkt.expiresAt <= now || pkt.expiresAt > now + 8 * 24 * 3600 * 1000) {
       return;
     }
 
@@ -3185,7 +3789,7 @@ try {
 
     if (!_markPacketSeen(pkt.msgId)) return;
 
-    // 1. ПРОВЕРКА ПОДПИСАННОЙ КОМАНДЫ АДМИНИСТРАТОРА (ADMIN_CMD: BAN / UNBAN / SYNC_TRIGGERS)
+    // 1. ПРОВЕРКА ПОДПИСАННОЙ КОМАНДЫ АДМИНИСТРАТОРА (ADMIN_CMD)
     if (pkt.type == 'BROADCAST' && pkt.ephPubHex == 'ADMIN_CMD') {
       final adminSigValid = await _ed25519.verify(
         utf8.encode(
@@ -3276,6 +3880,7 @@ try {
       }
       if (pkt.ttl > 1) {
         pkt.ttl -= 1;
+        transitBuffer[pkt.msgId] = pkt;
         _floodAllTransports(
           pkt,
           excludeTcpSocket: excludeTcpSocket,
@@ -3286,7 +3891,7 @@ try {
       return;
     }
 
-    // 3. ОБРАБОТКА ОТЧЕТА О СРАБОТАВШЕМ ТРИГГЕРЕ (-5 : +5 СООБЩЕНИЙ) ДЛЯ КОНСОЛИ АДМИНА
+    // 3. ОБРАБОТКА ОТЧЕТА О СРАБОТАВШЕМ ТРИГГЕРЕ (-5 : +5 + ДОСЬЕ)
     if (pkt.type == 'BROADCAST' && pkt.ephPubHex == 'TRIGGER_REPORT') {
       final sigValid = await _ed25519.verify(
         utf8.encode(
@@ -3302,13 +3907,16 @@ try {
       final hitMap = jsonDecode(utf8.decode(base64Decode(pkt.ciphertextHex)))
           as Map<String, dynamic>;
       final hit = TriggerHitRecord.fromJson(hitMap);
-      triggerHits.removeWhere((h) => h.hitId == hit.hitId);
-      triggerHits.insert(0, hit);
-      if (triggerHits.length > 60) triggerHits.removeLast();
-      unawaited(_saveContactsAndChats());
+      if (!clearedTriggerHitIds.contains(hit.hitId)) {
+        triggerHits.removeWhere((h) => h.hitId == hit.hitId);
+        triggerHits.insert(0, hit);
+        if (triggerHits.length > 100) triggerHits.removeLast();
+        unawaited(_saveContactsAndChats());
+      }
 
       if (pkt.ttl > 1) {
         pkt.ttl -= 1;
+        transitBuffer[pkt.msgId] = pkt;
         _floodAllTransports(
           pkt,
           excludeTcpSocket: excludeTcpSocket,
@@ -3356,6 +3964,37 @@ try {
         return;
       }
 
+      if (pkt.ephPubHex == 'MSG_EDIT') {
+        final editMap =
+            jsonDecode(utf8.decode(base64Decode(pkt.ciphertextHex)))
+                as Map<String, dynamic>;
+        final targetId = (editMap['edit_msg'] ?? '').toString();
+        final newTxt = (editMap['txt'] ?? '').toString();
+        for (final m in getMessagesFor(broadcastChannelId)) {
+          if (m.msgId == targetId && m.senderId == senderId) {
+            m.text = newTxt;
+            m.isEdited = true;
+            _inspectMessageForTriggers(m, broadcastChannelId);
+            break;
+          }
+        }
+        unawaited(_saveContactsAndChats());
+        onStateChanged();
+        return;
+      }
+
+      if (pkt.ephPubHex == 'MSG_DELETE') {
+        final delMap = jsonDecode(utf8.decode(base64Decode(pkt.ciphertextHex)))
+            as Map<String, dynamic>;
+        final targetId = (delMap['del_msg'] ?? '').toString();
+        deletedMessageIds.add(targetId);
+        getMessagesFor(broadcastChannelId)
+            .removeWhere((m) => m.msgId == targetId && m.senderId == senderId);
+        unawaited(_saveContactsAndChats());
+        onStateChanged();
+        return;
+      }
+
       _upsertContact(
         nodeId: senderId,
         dhPubHex: pkt.srcDhPubHex,
@@ -3363,7 +4002,16 @@ try {
         nick: pkt.srcNickname,
       );
       final senderName = knownContacts[senderId]?.displayTitle ?? senderId;
-      final decodedText = utf8.decode(base64Decode(pkt.ciphertextHex));
+      String decodedText = utf8.decode(base64Decode(pkt.ciphertextHex));
+      String? fwdFrom;
+      if (pkt.ephPubHex == 'BCAST_V2') {
+        try {
+          final m = jsonDecode(decodedText) as Map<String, dynamic>;
+          decodedText = (m['txt'] ?? '').toString();
+          fwdFrom = m['fwd'] as String?;
+        } catch (_) {}
+      }
+
       final chatMsg = ChatMessage(
         msgId: pkt.msgId,
         peerId: broadcastChannelId,
@@ -3373,6 +4021,7 @@ try {
         timestamp: now,
         isMe: false,
         isDelivered: true,
+        forwardedFrom: fwdFrom,
       );
       getMessagesFor(broadcastChannelId).add(chatMsg);
       _inspectMessageForTriggers(chatMsg, broadcastChannelId);
@@ -3451,7 +4100,49 @@ try {
       if (contact == null) return;
 
       bool shouldSendAck = true;
-      if (kind == 'FILE_CHUNK') {
+      if (kind == 'FILE_OFFER') {
+        final fid = (envelope['fid'] ?? pkt.msgId).toString();
+        final fn = _sanitizeFileName((envelope['fn'] ?? 'file.bin').toString());
+        final fs = (envelope['fs'] as num?)?.toInt() ?? 0;
+        final tb64 = envelope['tb64'] as String?;
+        final fwd = envelope['fwd'] as String?;
+
+        final msgs = getMessagesFor(senderId);
+        if (!msgs.any((m) => m.msgId == fid) &&
+            !deletedMessageIds.contains(fid)) {
+          final offerMsg = ChatMessage(
+            msgId: fid,
+            peerId: senderId,
+            senderId: senderId,
+            senderName: contact.displayTitle,
+            text: '📎 $fn',
+            timestamp: now,
+            isMe: false,
+            isDelivered: true,
+            filePath: null,
+            fileName: fn,
+            fileSize: fs,
+            thumbB64: tb64,
+            isMediaRevealed: false,
+            isDownloading: false,
+            forwardedFrom: fwd,
+            transferProgress: 0.0,
+          );
+          msgs.add(offerMsg);
+          if (activeOpenChatId != senderId) {
+            contact.unreadCount++;
+          }
+          onMessageReceived(offerMsg);
+          unawaited(_triggerIncomingNotification(
+              senderId, contact.displayTitle, '📎 Медиа/файл: $fn'));
+          unawaited(_saveContactsAndChats());
+        }
+      } else if (kind == 'FILE_PULL_REQ') {
+        final fid = (envelope['fid'] ?? '').toString();
+        if (fid.isNotEmpty) {
+          unawaited(_streamFileChunksToPeer(senderId, fid));
+        }
+      } else if (kind == 'FILE_CHUNK') {
         final idx = (envelope['idx'] as int?) ?? 0;
         final tot = (envelope['tot'] as int?) ?? 1;
         final wack = (envelope['wack'] as bool?) ?? false;
@@ -3477,27 +4168,48 @@ try {
         unawaited(_triggerIncomingNotification(
             senderId, contact.displayTitle, 'Реакция $emoji на сообщение'));
         unawaited(_saveContactsAndChats());
+      } else if (kind == 'MSG_EDIT') {
+        final targetId = (envelope['targetId'] ?? '').toString();
+        final newTxt = (envelope['txt'] ?? '').toString();
+        for (final m in getMessagesFor(senderId)) {
+          if (m.msgId == targetId && m.senderId == senderId) {
+            m.text = newTxt;
+            m.isEdited = true;
+            _inspectMessageForTriggers(m, senderId);
+            break;
+          }
+        }
+        unawaited(_saveContactsAndChats());
+      } else if (kind == 'MSG_DELETE') {
+        final targetId = (envelope['targetId'] ?? '').toString();
+        deletedMessageIds.add(targetId);
+        getMessagesFor(senderId).removeWhere((m) => m.msgId == targetId);
+        unawaited(_saveContactsAndChats());
       } else {
         final decodedText = (envelope['txt'] as String?) ?? '';
-        final chatMsg = ChatMessage(
-          msgId: pkt.msgId,
-          peerId: senderId,
-          senderId: senderId,
-          senderName: contact.displayTitle,
-          text: decodedText,
-          timestamp: now,
-          isMe: false,
-          isDelivered: true,
-        );
-        getMessagesFor(senderId).add(chatMsg);
-        _inspectMessageForTriggers(chatMsg, senderId);
-        if (activeOpenChatId != senderId) {
-          contact.unreadCount++;
+        final fwd = envelope['fwd'] as String?;
+        if (!deletedMessageIds.contains(pkt.msgId)) {
+          final chatMsg = ChatMessage(
+            msgId: pkt.msgId,
+            peerId: senderId,
+            senderId: senderId,
+            senderName: contact.displayTitle,
+            text: decodedText,
+            timestamp: now,
+            isMe: false,
+            isDelivered: true,
+            forwardedFrom: fwd,
+          );
+          getMessagesFor(senderId).add(chatMsg);
+          _inspectMessageForTriggers(chatMsg, senderId);
+          if (activeOpenChatId != senderId) {
+            contact.unreadCount++;
+          }
+          onMessageReceived(chatMsg);
+          unawaited(_triggerIncomingNotification(
+              senderId, contact.displayTitle, decodedText));
+          unawaited(_saveContactsAndChats());
         }
-        onMessageReceived(chatMsg);
-        unawaited(_triggerIncomingNotification(
-            senderId, contact.displayTitle, decodedText));
-        unawaited(_saveContactsAndChats());
       }
 
       if (shouldSendAck) {
@@ -3552,7 +4264,6 @@ try {
     final idx = (env['idx'] as int?) ?? 0;
     final tot = (env['tot'] as int?) ?? 1;
     final chunkBytes = base64Decode((env['b64'] as String?) ?? '');
-    final thumbB64 = env['tb64'] as String?;
 
     if (tot <= 0 || tot > 40000 || totalSize > 1050 * 1024 * 1024) return;
 
@@ -3573,17 +4284,8 @@ try {
       return;
     }
 
-    final dir = await _getReceivedFilesDir();
+    final dir = await _getInternalCacheFilesDir();
     final partPath = '${dir.path}/${fileId}_$fileName.part';
-
-    String? savedThumbPath;
-    if (thumbB64 != null && thumbB64.isNotEmpty) {
-      try {
-        final tFile = File('${dir.path}/${fileId}_$fileName.thumb.jpg');
-        await tFile.writeAsBytes(base64Decode(thumbB64), flush: true);
-        savedThumbPath = tFile.path;
-      } catch (_) {}
-    }
 
     var assembly = _incomingFiles[fileId];
     if (assembly == null) {
@@ -3596,12 +4298,9 @@ try {
         totalChunks: tot,
         partFilePath: partPath,
         createdAtMs: now,
-        thumbPath: savedThumbPath,
         openRaf: raf,
       );
       _incomingFiles[fileId] = assembly;
-    } else if (savedThumbPath != null) {
-      assembly.thumbPath = savedThumbPath;
     }
 
     if (!assembly.receivedChunkIndices.contains(idx)) {
@@ -3628,23 +4327,21 @@ try {
         peerId: senderId,
         senderId: senderId,
         senderName: contact.displayTitle,
-        text: '📎 Прием: $fileName...',
+        text: '📎 $fileName',
         timestamp: now,
         isMe: false,
         isDelivered: false,
         fileName: fileName,
         fileSize: totalSize,
-        thumbPath: assembly.thumbPath,
         isMediaRevealed: false,
+        isDownloading: true,
         transferProgress: assembly.receivedChunkIndices.length / tot,
       );
       msgs.add(existingMsg);
     } else {
+      existingMsg.isDownloading = true;
       existingMsg.transferProgress =
           assembly.receivedChunkIndices.length / tot;
-      if (assembly.thumbPath != null) {
-        existingMsg.thumbPath = assembly.thumbPath;
-      }
     }
 
     if (assembly.receivedChunkIndices.length >= tot) {
@@ -3671,25 +4368,24 @@ try {
         await File(finalPath).delete();
       }
       final savedFile = await partFile.rename(finalPath);
+      offeredFileCatalog[fileId] = savedFile.path;
 
       existingMsg.fileName = finalFileName;
       existingMsg.filePath = savedFile.path;
       existingMsg.text = '📎 $finalFileName';
       existingMsg.isDelivered = true;
+      existingMsg.isDownloading = false;
+      existingMsg.isMediaRevealed = true;
       existingMsg.transferProgress = 1.0;
 
-      if (existingMsg.isVideoFile &&
-          (existingMsg.thumbPath == null ||
-              !File(existingMsg.thumbPath!).existsSync())) {
-        existingMsg.thumbPath = await extractVideoThumbnail(savedFile.path);
+      if (existingMsg.thumbB64 == null || existingMsg.thumbB64!.isEmpty) {
+        if (existingMsg.isVideoFile || existingMsg.isImageFile) {
+          existingMsg.thumbB64 = await extractPreviewBase64InMemory(
+              savedFile.path,
+              isVideo: existingMsg.isVideoFile);
+        }
       }
 
-      if (activeOpenChatId != senderId) {
-        contact.unreadCount++;
-      }
-      onMessageReceived(existingMsg);
-      unawaited(_triggerIncomingNotification(
-          senderId, contact.displayTitle, '📎 Получен файл: $finalFileName'));
       unawaited(_saveContactsAndChats());
     }
     onStateChanged();
@@ -3717,16 +4413,10 @@ try {
       myPersistentOutbox.remove(ack.msgId);
     }
 
-    pendingFileJobs.remove(ack.msgId);
-
     for (final list in chatHistory.values) {
       for (final m in list) {
         if (m.msgId == ack.msgId) {
           m.isDelivered = true;
-          m.transferProgress = 1.0;
-          if (m.fileName != null && m.fileName!.isNotEmpty) {
-            m.text = '📎 ${m.fileName}';
-          }
         }
       }
     }
@@ -3786,6 +4476,7 @@ try {
               final peerSign = (data['sg'] as String?) ?? '';
               final peerNick = (data['nick'] as String?) ?? '';
               final peerHw = (data['hw'] as String?) ?? '';
+              final peerOs = (data['os'] as String?) ?? '';
               if (peerId != nodeId &&
                   !deletedContactIds.contains(peerId) &&
                   peerDh.length == 64) {
@@ -3795,6 +4486,7 @@ try {
                   signPubHex: peerSign,
                   nick: peerNick,
                   hwFingerprint: peerHw,
+                  platformInfo: peerOs,
                   address: '${dg.address.address}:$peerPort',
                 );
                 connectToHost(dg.address.address, peerPort,
@@ -3817,6 +4509,7 @@ try {
           'dh': dhPubHex,
           'sg': signPubHex,
           'hw': myHwFingerprint,
+          'os': myPlatformInfo,
         }));
         try {
           _udpBeacon?.send(
@@ -3835,9 +4528,9 @@ try {
         }
 
         for (final c in knownContacts.values) {
-          if (isPeerDirectlyConnected(c.nodeId)) {
-            unawaited(_resumePendingFilesForPeer(c.nodeId));
-          } else if (c.lastAddress.isNotEmpty && c.lastAddress.contains(':')) {
+          if (!isPeerDirectlyConnected(c.nodeId) &&
+              c.lastAddress.isNotEmpty &&
+              c.lastAddress.contains(':')) {
             final addrParts = c.lastAddress.split(':');
             if (addrParts.length == 2 && !addrParts[0].startsWith('BLE')) {
               final port = int.tryParse(addrParts[1]) ?? defaultTcpPort;
@@ -3929,6 +4622,8 @@ try {
               _refreshOnlineStatuses();
               _addLog('Подключен по BLE: $peerNick ($peerId)');
               await _sendBleLine(endpointId, _buildPeerSyncJson());
+              await _sendBleLine(
+                  endpointId, _buildChatHistorySyncForPeer(peerId));
               _evictExpired();
               for (final ack in deliveredAcks.values) {
                 await _sendBleLine(endpointId, jsonEncode(ack.toJson()));
@@ -3937,9 +4632,6 @@ try {
                 await _sendBleLine(
                     endpointId, jsonEncode(entry.value.toJson()));
               }
-              Future.delayed(const Duration(milliseconds: 350), () {
-                unawaited(_resumePendingFilesForPeer(peerId));
-              });
             },
             replyDirect: (replyJson) =>
                 unawaited(_sendBleLine(endpointId, replyJson)),
@@ -3948,7 +4640,6 @@ try {
     }
   }
 
-  /// ИСПРАВЛЕНИЕ ПУНКТА 5: узел считается ОНЛАЙН и в основной проге, и в дебаге, если есть активный сокет ИЛИ он подавал сигнал за последние 14 секунд!
   void _refreshOnlineStatuses() {
     final activeIds = {..._tcpPeers.values, ..._blePeers.values};
     final now = DateTime.now().millisecondsSinceEpoch;

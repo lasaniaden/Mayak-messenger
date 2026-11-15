@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'dart:ui';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -10,231 +11,161 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'mesh_engine.dart';
 
 void main() {
-  runZonedGuarded(() {
-    WidgetsFlutterBinding.ensureInitialized();
-    FlutterError.onError = (FlutterErrorDetails details) {
-      FlutterError.presentError(details);
-    };
-    PlatformDispatcher.instance.onError = (error, stack) {
-      return true;
-    };
-    runApp(const MeshMessengerApp());
-  }, (error, stack) {});
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const MayakMeshApp());
 }
 
-class MeshMessengerApp extends StatelessWidget {
-  const MeshMessengerApp({super.key});
+class MayakTheme {
+  static const Color bgDeep = Color(0xFF0B0F19);
+  static const Color bgSurface = Color(0xFF131B2B);
+  static const Color bgElevated = Color(0xFF1C273D);
+  static const Color accentCyan = Color(0xFF06B6D4);
+  static const Color accentIndigo = Color(0xFF6366F1);
+  static const Color accentEmerald = Color(0xFF10B981);
+  static const Color accentAmber = Color(0xFFF59E0B);
+  static const Color accentRed = Color(0xFFEF4444);
+
+  static const LinearGradient primaryGradient = LinearGradient(
+    colors: [Color(0xFF4F46E5), Color(0xFF06B6D4)],
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+  );
+
+  static const LinearGradient myBubbleGradient = LinearGradient(
+    colors: [Color(0xFF3730A3), Color(0xFF0E7490)],
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+  );
+}
+
+class MayakMeshApp extends StatelessWidget {
+  const MayakMeshApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Маяк P2P Mesh',
+      title: 'Маяк P2P v1.5',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true).copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0B0F19),
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: MayakTheme.bgDeep,
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF38BDF8),
-          secondary: Color(0xFF6366F1),
-          surface: Color(0xFF111827),
-          onSurface: Color(0xFFF1F5F9),
+          primary: MayakTheme.accentCyan,
+          secondary: MayakTheme.accentIndigo,
+          surface: MayakTheme.bgSurface,
         ),
         appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF111827),
+          backgroundColor: MayakTheme.bgSurface,
           elevation: 0,
-          scrolledUnderElevation: 0,
+          centerTitle: false,
         ),
+        useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: const ChatsHomeScreen(),
     );
   }
 }
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+class ChatsHomeScreen extends StatefulWidget {
+  const ChatsHomeScreen({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<ChatsHomeScreen> createState() => _ChatsHomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  late final MeshEngine _engine;
-  final TextEditingController _inviteCtrl = TextEditingController();
+class _ChatsHomeScreenState extends State<ChatsHomeScreen>
+    with WidgetsBindingObserver {
+  late final MeshEngine engine;
   final TextEditingController _searchCtrl = TextEditingController();
-  final ScrollController _chatScrollCtrl = ScrollController();
-
-  String? _activeChatId;
   String _searchQuery = '';
 
   @override
   void initState() {
     super.initState();
-    _engine = MeshEngine(
+    WidgetsBinding.instance.addObserver(this);
+    engine = MeshEngine(
       onMessageReceived: (msg) {
         if (!mounted) return;
         setState(() {});
-        _scrollToBottom();
       },
       onStateChanged: () {
-        if (!mounted) return;
-        setState(() {});
+        if (mounted) setState(() {});
+        MeshEngineListenerExt.notifyExtra();
       },
     );
-    _initNode();
+    engine.init();
   }
 
-  Future<void> _initNode() async {
-    await _engine.init();
-    if (!mounted) return;
-    setState(() {});
-    if (Platform.isAndroid) {
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        await Future.delayed(const Duration(milliseconds: 800));
-        if (mounted) {
-          await _engine.requestAndroidNotifications();
-        }
-      });
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      engine.refreshNetworkCache(force: true);
     }
   }
 
-  List<Color> _avatarGradientFor(String seed) {
-    final hash = seed.codeUnits.fold<int>(0, (p, c) => p + c * 31);
-    const palettes = [
-      [Color(0xFF6366F1), Color(0xFF0EA5E9)],
-      [Color(0xFFEC4899), Color(0xFF8B5CF6)],
-      [Color(0xFF10B981), Color(0xFF059669)],
-      [Color(0xFFF59E0B), Color(0xFFEF4444)],
-      [Color(0xFF3B82F6), Color(0xFF2DD4BF)],
+  List<Color> _avatarColorsFor(String id) {
+    if (id == MeshEngine.broadcastChannelId) {
+      return const [Color(0xFFD97706), Color(0xFFF59E0B)];
+    }
+    final palettes = [
+      const [Color(0xFF4F46E5), Color(0xFF06B6D4)],
+      const [Color(0xFF059669), Color(0xFF10B981)],
+      const [Color(0xFF7C3AED), Color(0xFFEC4899)],
+      const [Color(0xFF2563EB), Color(0xFF38BDF8)],
+      const [Color(0xFFDB2777), Color(0xFFF43F5E)],
     ];
-    return palettes[hash.abs() % palettes.length];
+    final hash = id.codeUnits.fold<int>(0, (a, b) => a + b);
+    return palettes[hash % palettes.length];
   }
 
-  void _openChat(String chatId) {
-    setState(() {
-      _activeChatId = chatId;
-      _engine.markChatAsRead(chatId);
-    });
-    _scrollToBottom();
-  }
-
-  void _closeChatToHome() {
-    setState(() {
-      _activeChatId = null;
-      _engine.markChatAsRead(null);
-    });
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_chatScrollCtrl.hasClients) {
-        _chatScrollCtrl.animateTo(
-          _chatScrollCtrl.position.maxScrollExtent + 140,
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  Future<void> _sendTextMessage(String text) async {
-    final target = _activeChatId;
-    if (target == null || text.isEmpty) return;
-    if (_engine.isSelfBanned) {
-      _showBanAppealDialog();
-      return;
-    }
-    final ok = await _engine.sendMessage(target, text);
-    if (!mounted) return;
-    if (!ok && _engine.isSelfBanned) {
-      _showBanAppealDialog();
-      return;
-    }
-    setState(() {});
-    _scrollToBottom();
-  }
-
-  Future<void> _pickAndSendAttachment(String mode) async {
-    if (_engine.isSelfBanned) {
-      _showBanAppealDialog();
-      return;
-    }
-    final target = _activeChatId;
-    if (target == null || target == MeshEngine.broadcastChannelId) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-              'Пересылка зашифрованных медиа и файлов доступна в личных чатах'),
+  void _openChatRoom(String peerId, String title, bool isBroadcast) async {
+    engine.markChatAsRead(peerId);
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChatConversationScreen(
+          engine: engine,
+          peerId: peerId,
+          initialTitle: title,
+          isBroadcast: isBroadcast,
         ),
-      );
-      return;
-    }
-    final picked = await _engine.pickFileForChat(mode: mode);
-    if (picked == null) return;
-    final path = picked['path'] as String?;
-    final name = picked['name'] as String?;
-    final thumbPath = picked['thumbPath'] as String?;
-    if (path == null || name == null) return;
-
-    await _engine.sendFileMessage(
-      target,
-      filePath: path,
-      fileName: name,
-      thumbPathArg: thumbPath,
+      ),
     );
-    if (!mounted) return;
-    setState(() {});
-    _scrollToBottom();
+    engine.markChatAsRead(null);
   }
 
-  Future<void> _toggleVoiceNoteRecording() async {
-    if (_engine.isSelfBanned) {
-      _showBanAppealDialog();
-      return;
-    }
-    final target = _activeChatId;
-    if (target == null || target == MeshEngine.broadcastChannelId) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Голосовые сообщения отправляются в личных чатах'),
-        ),
-      );
-      return;
-    }
-
-    if (!_engine.isRecordingVoice) {
-      final ok = await _engine.startVoiceRecording();
-      if (!ok && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Проверьте доступ к микрофону для записи голоса')),
-        );
-      }
-    } else {
-      final recInfo = await _engine.stopVoiceRecording();
-      if (recInfo != null) {
-        final path = recInfo['path'] as String?;
-        final name = recInfo['name'] as String?;
-        if (path != null && name == null) return;
-        if (path != null && name != null) {
-          await _engine.sendFileMessage(target, filePath: path, fileName: name);
-          if (mounted) setState(() {});
-          _scrollToBottom();
-        }
-      }
-    }
+  void _openFullAdminDashboard() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => AdminDashboardScreen(engine: engine),
+      ),
+    );
+    if (mounted) setState(() {});
   }
 
-  /// Диалог отправки записки администратору, если пользователя забанили
   void _showBanAppealDialog() {
-    final noteCtrl = TextEditingController();
+    final ctrl = TextEditingController();
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF161F30),
+        backgroundColor: MayakTheme.bgSurface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Row(
           children: [
-            Icon(Icons.gavel, color: Colors.redAccent),
+            Icon(Icons.mark_email_unread_rounded, color: MayakTheme.accentAmber),
             SizedBox(width: 8),
-            Expanded(child: Text('Ваш узел ограничен')),
+            Expanded(
+              child: Text(
+                'Записка на разбан',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+              ),
+            ),
           ],
         ),
         content: Column(
@@ -242,17 +173,21 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Администратор сети ограничил отправку сообщений с вашего устройства. Если бан выдан по ошибке или вам нужен разбан, напишите короткую записку администратору:',
-              style: TextStyle(fontSize: 13, color: Colors.white70),
+              'Ваш узел заблокирован администратором сети. Вы не можете писать в чаты, но можете отправить объяснительную записку на разбан:',
+              style: TextStyle(fontSize: 12, color: Colors.white70),
             ),
             const SizedBox(height: 12),
             TextField(
-              controller: noteCtrl,
-              autofocus: true,
+              controller: ctrl,
               maxLines: 3,
-              decoration: const InputDecoration(
-                hintText: 'Напишите причину для разбана...',
-                border: OutlineInputBorder(),
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: 'Напишите причину для снятия блокировки...',
+                filled: true,
+                fillColor: MayakTheme.bgDeep,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
             ),
           ],
@@ -263,925 +198,59 @@ class _HomeScreenState extends State<HomeScreen> {
             child: const Text('Отмена'),
           ),
           FilledButton.icon(
-            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            style: FilledButton.styleFrom(
+              backgroundColor: MayakTheme.accentAmber,
+              foregroundColor: Colors.black,
+            ),
+            icon: const Icon(Icons.send_rounded, size: 16),
+            label: const Text('Отправить админу'),
             onPressed: () async {
-              final txt = noteCtrl.text.trim();
-              if (txt.isEmpty) return;
+              final text = ctrl.text.trim();
+              if (text.isEmpty) return;
               Navigator.pop(ctx);
-              await _engine.sendBanAppealNote(txt);
+              await engine.sendBanAppealNote(text);
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content:
-                      Text('Записка отправлена в консоль администратора сети'),
+                  content: Text(
+                      'Записка отправлена администратору сети! Ожидайте решения.'),
                 ),
               );
             },
-            icon: const Icon(Icons.send, size: 16),
-            label: const Text('Отправить записку'),
           ),
         ],
       ),
     );
   }
 
-  void _showReactionPicker(ChatMessage msg) {
-    final target = _activeChatId;
-    if (target == null || _engine.isSelfBanned) return;
-    const emojis = ['👍', '❤️', '🔥', '😂', '😮', '👏', '💯', '🤝'];
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF161F30),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 14),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Быстрая реакция на сообщение',
-              style: TextStyle(fontSize: 13, color: Colors.white70),
-            ),
-            const SizedBox(height: 14),
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              alignment: WrapAlignment.center,
-              children: emojis
-                  .map(
-                    (e) => InkWell(
-                      borderRadius: BorderRadius.circular(24),
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        _engine.sendReaction(target, msg.msgId, e);
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.06),
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        child: Text(
-                          e,
-                          style: const TextStyle(fontSize: 26),
-                        ),
-                      ),
-                    ),
-                  )
-                  .toList(),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// СКРЫТАЯ ROOT-КОНСОЛЬ АДМИНА v2 (3 вкладки: Узлы и Локатор, Триггеры -5:+5, Апелляции на разбан)
-  void _showHiddenAdminConsoleModal() {
-    _engine.pingAllKnownNodes();
-    final triggerInputCtrl = TextEditingController();
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF0D131F),
-      builder: (ctx) => DefaultTabController(
-        length: 3,
-        child: StatefulBuilder(
-          builder: (ctx, setModalState) {
-            final allNodes = _engine.knownContacts.values.toList()
-              ..sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
-
-            return DraggableScrollableSheet(
-              expand: false,
-              initialChildSize: 0.90,
-              maxChildSize: 0.96,
-              builder: (_, scrollCtrl) => Padding(
-                padding: const EdgeInsets.all(14),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.redAccent.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(Icons.admin_panel_settings,
-                              color: Colors.redAccent, size: 24),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'ROOT-КОНСОЛЬ АДМИНИСТРАТОРА',
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.redAccent,
-                                ),
-                              ),
-                              Text(
-                                'Мой ID: ${_engine.nodeId} (🟢 В СЕТИ) • IP: ${_engine.cachedIps.join(", ")}',
-                                style: const TextStyle(
-                                  fontSize: 11.5,
-                                  color: Colors.greenAccent,
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        FilledButton.tonalIcon(
-                          onPressed: () async {
-                            await _engine.pingAllKnownNodes();
-                            if (ctx.mounted) setModalState(() {});
-                          },
-                          icon: const Icon(Icons.sync, size: 16),
-                          label: const Text('Обновить'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Container(
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF161F30),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: TabBar(
-                        indicatorColor: Colors.redAccent,
-                        labelColor: Colors.white,
-                        unselectedLabelColor: Colors.white54,
-                        tabs: [
-                          Tab(text: '📡 Узлы (${allNodes.length + 1})'),
-                          Tab(
-                              text:
-                                  '🎯 Триггеры (${_engine.triggerHits.length})'),
-                          Tab(
-                              text:
-                                  '📨 Апелляции (${_engine.banAppeals.length})'),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Expanded(
-                      child: TabBarView(
-                        children: [
-                          // ВКЛАДКА 1: ВСЕ УЗЛЫ И ЛОКАТОР СЕТИ
-                          ListView(
-                            controller: scrollCtrl,
-                            children: [
-                              // Карточка собственного узла администратора (всегда ОНЛАЙН)
-                              Container(
-                                margin: const EdgeInsets.only(bottom: 10),
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF14242B),
-                                  borderRadius: BorderRadius.circular(14),
-                                  border: Border.all(
-                                      color:
-                                          Colors.greenAccent.withOpacity(0.4)),
-                                ),
-                                child: Row(
-                                  children: [
-                                    const Icon(Icons.verified_user,
-                                        color: Colors.greenAccent),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: Text(
-                                        '${_engine.nickname} [ЭТОТ УЗЕЛ: ${_engine.nodeId}]\n'
-                                        '📍 IP: ${_engine.cachedIps.join(", ")}:${_engine.listenPort} • HW: ${_engine.myHwFingerprint}',
-                                        style: const TextStyle(
-                                            fontSize: 12,
-                                            fontFamily: 'monospace'),
-                                      ),
-                                    ),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 8, vertical: 4),
-                                      decoration: BoxDecoration(
-                                        color: Colors.green.shade800,
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: const Text(
-                                        'АДМИН • ОНЛАЙН',
-                                        style: TextStyle(
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.bold),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              if (allNodes.isEmpty)
-                                const Padding(
-                                  padding: EdgeInsets.all(24),
-                                  child: Center(
-                                    child: Text(
-                                      'Других узлов в локальном реестре пока не обнаружено.',
-                                      style: TextStyle(color: Colors.white54),
-                                    ),
-                                  ),
-                                ),
-                              ...allNodes.map((c) {
-                                final banned = _engine.isNodeBanned(
-                                    c.nodeId, c.hwFingerprint);
-                                final lastDt = c.lastSeenTimestamp > 0
-                                    ? DateTime.fromMillisecondsSinceEpoch(
-                                        c.lastSeenTimestamp)
-                                    : null;
-                                final lastStr = lastDt != null
-                                    ? '${lastDt.hour.toString().padLeft(2, '0')}:${lastDt.minute.toString().padLeft(2, '0')}:${lastDt.second.toString().padLeft(2, '0')}'
-                                    : 'неизвестно';
-
-                                return Card(
-                                  color: banned
-                                      ? const Color(0xFF2B1419)
-                                      : const Color(0xFF162030),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14),
-                                  ),
-                                  margin: const EdgeInsets.only(bottom: 10),
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(12),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            Icon(
-                                              banned
-                                                  ? Icons.block
-                                                  : (c.isOnline
-                                                      ? Icons.sensors
-                                                      : Icons
-                                                          .portable_wifi_off),
-                                              color: banned
-                                                  ? Colors.redAccent
-                                                  : (c.isOnline
-                                                      ? Colors.greenAccent
-                                                      : Colors.orangeAccent),
-                                              size: 20,
-                                            ),
-                                            const SizedBox(width: 8),
-                                            Expanded(
-                                              child: Text(
-                                                '${c.displayTitle} [ID: ${c.nodeId}]',
-                                                style: const TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 14,
-                                                ),
-                                              ),
-                                            ),
-                                            Container(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      horizontal: 8,
-                                                      vertical: 3),
-                                              decoration: BoxDecoration(
-                                                color: banned
-                                                    ? Colors.redAccent
-                                                    : (c.isOnline
-                                                        ? Colors.green.shade800
-                                                        : Colors.blueGrey),
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                              ),
-                                              child: Text(
-                                                banned
-                                                    ? 'ЗАБАНЕН'
-                                                    : (c.isOnline
-                                                        ? 'ОНЛАЙН'
-                                                        : 'ОФФЛАЙН'),
-                                                style: const TextStyle(
-                                                    fontSize: 10.5,
-                                                    fontWeight:
-                                                        FontWeight.bold),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          '📍 Точка / Маршрут: ${c.lastAddress.isNotEmpty ? c.lastAddress : "Неизвестно"}\n'
-                                          '🔑 HW-отпечаток: ${c.hwFingerprint.isNotEmpty ? c.hwFingerprint : "не передан"}\n'
-                                          '⚡ Пинг: ${c.lastPingMs >= 0 ? "${c.lastPingMs} мс" : "активен"} • Пакетов: ${c.packetsSeenCount} • Сигнал: $lastStr',
-                                          style: const TextStyle(
-                                            fontSize: 11.5,
-                                            color: Colors.white70,
-                                            fontFamily: 'monospace',
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        Row(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.end,
-                                          children: [
-                                            OutlinedButton.icon(
-                                              onPressed: () async {
-                                                await _engine
-                                                    .pingPeer(c.nodeId);
-                                                if (ctx.mounted) {
-                                                  setModalState(() {});
-                                                }
-                                              },
-                                              icon: const Icon(
-                                                  Icons.network_ping,
-                                                  size: 15),
-                                              label: const Text('Пинг'),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            if (!banned)
-                                              FilledButton.icon(
-                                                style: FilledButton.styleFrom(
-                                                  backgroundColor:
-                                                      Colors.redAccent,
-                                                ),
-                                                onPressed: () async {
-                                                  await _engine
-                                                      .executeAdminBanOrUnban(
-                                                    targetNodeId: c.nodeId,
-                                                    ban: true,
-                                                  );
-                                                  if (ctx.mounted) {
-                                                    setModalState(() {});
-                                                  }
-                                                },
-                                                icon: const Icon(Icons.gavel,
-                                                    size: 16),
-                                                label: const Text(
-                                                    'Забанить в сети'),
-                                              )
-                                            else
-                                              FilledButton.icon(
-                                                style: FilledButton.styleFrom(
-                                                  backgroundColor:
-                                                      Colors.teal.shade700,
-                                                ),
-                                                onPressed: () async {
-                                                  await _engine
-                                                      .executeAdminBanOrUnban(
-                                                    targetNodeId: c.nodeId,
-                                                    ban: false,
-                                                  );
-                                                  if (ctx.mounted) {
-                                                    setModalState(() {});
-                                                  }
-                                                },
-                                                icon: const Icon(
-                                                    Icons.lock_open,
-                                                    size: 16),
-                                                label: const Text('Разбанить'),
-                                              ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              }),
-                            ],
-                          ),
-
-                          // ВКЛАДКА 2: ТРИГГЕРЫ В ЧАТАХ (КОНТЕКСТ -5 : +5 СООБЩЕНИЙ)
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: TextField(
-                                      controller: triggerInputCtrl,
-                                      decoration: const InputDecoration(
-                                        hintText:
-                                            'Добавить слово-триггер (например: спам)...',
-                                        isDense: true,
-                                        border: OutlineInputBorder(),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  FilledButton(
-                                    onPressed: () async {
-                                      final w = triggerInputCtrl.text.trim();
-                                      if (w.isEmpty) return;
-                                      triggerInputCtrl.clear();
-                                      await _engine.addAdminTriggerWord(w);
-                                      if (ctx.mounted) setModalState(() {});
-                                    },
-                                    child: const Text('+ Добавить'),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 6,
-                                runSpacing: 6,
-                                children: _engine.adminTriggerWords
-                                    .map(
-                                      (w) => Chip(
-                                        label: Text(w,
-                                            style:
-                                                const TextStyle(fontSize: 12)),
-                                        backgroundColor:
-                                            const Color(0xFF1E293B),
-                                        onDeleted: () async {
-                                          await _engine
-                                              .removeAdminTriggerWord(w);
-                                          if (ctx.mounted) setModalState(() {});
-                                        },
-                                      ),
-                                    )
-                                    .toList(),
-                              ),
-                              const Divider(height: 16),
-                              Expanded(
-                                child: _engine.triggerHits.isEmpty
-                                    ? const Center(
-                                        child: Text(
-                                          'Срабатываний триггеров пока нет.\nПри появлении слова-триггера в чате здесь отобразится контекст (-5 до и +5 после).',
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                              color: Colors.white54,
-                                              fontSize: 12.5),
-                                        ),
-                                      )
-                                    : ListView.builder(
-                                        itemCount: _engine.triggerHits.length,
-                                        itemBuilder: (_, idx) {
-                                          final hit = _engine.triggerHits[idx];
-                                          final isBanned = _engine.isNodeBanned(
-                                              hit.offenderNodeId);
-                                          return Card(
-                                            color: const Color(0xFF1A2234),
-                                            margin: const EdgeInsets.only(
-                                                bottom: 10),
-                                            child: Padding(
-                                              padding: const EdgeInsets.all(12),
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Row(
-                                                    children: [
-                                                      const Icon(
-                                                          Icons
-                                                              .warning_amber_rounded,
-                                                          color:
-                                                              Colors.amberAccent,
-                                                          size: 20),
-                                                      const SizedBox(width: 6),
-                                                      Expanded(
-                                                        child: Text(
-                                                          'Триггер «${hit.triggerWord}» • ${hit.chatTitle}',
-                                                          style:
-                                                              const TextStyle(
-                                                            fontWeight:
-                                                                FontWeight.bold,
-                                                            color: Colors
-                                                                .amberAccent,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                      if (hit.offenderNodeId !=
-                                                          _engine.nodeId)
-                                                        FilledButton.tonal(
-                                                          style: FilledButton
-                                                              .styleFrom(
-                                                            backgroundColor: isBanned
-                                                                ? Colors.teal
-                                                                : Colors
-                                                                    .redAccent,
-                                                          ),
-                                                          onPressed: () async {
-                                                            await _engine
-                                                                .executeAdminBanOrUnban(
-                                                              targetNodeId: hit
-                                                                  .offenderNodeId,
-                                                              ban: !isBanned,
-                                                            );
-                                                            if (ctx.mounted) {
-                                                              setModalState(
-                                                                  () {});
-                                                            }
-                                                          },
-                                                          child: Text(
-                                                            isBanned
-                                                                ? 'Разбанить'
-                                                                : 'Бан автора',
-                                                            style:
-                                                                const TextStyle(
-                                                                    fontSize:
-                                                                        11),
-                                                          ),
-                                                        ),
-                                                    ],
-                                                  ),
-                                                  const SizedBox(height: 6),
-                                                  Container(
-                                                    width: double.infinity,
-                                                    padding:
-                                                        const EdgeInsets.all(8),
-                                                    decoration: BoxDecoration(
-                                                      color: Colors.black38,
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                              8),
-                                                    ),
-                                                    child: Column(
-                                                      crossAxisAlignment:
-                                                          CrossAxisAlignment
-                                                              .start,
-                                                      children: [
-                                                        if (hit.beforeLines
-                                                            .isNotEmpty) ...[
-                                                          const Text(
-                                                            '--- До триггера (-5) ---',
-                                                            style: TextStyle(
-                                                                fontSize: 10,
-                                                                color: Colors
-                                                                    .white38),
-                                                          ),
-                                                          ...hit.beforeLines
-                                                              .map((l) => Text(
-                                                                    l,
-                                                                    style: const TextStyle(
-                                                                        fontSize:
-                                                                            11.5,
-                                                                        color: Colors
-                                                                            .white70),
-                                                                  )),
-                                                        ],
-                                                        Padding(
-                                                          padding:
-                                                              const EdgeInsets
-                                                                  .symmetric(
-                                                                  vertical: 4),
-                                                          child: Text(
-                                                            '🚨 ${hit.triggerLine}',
-                                                            style:
-                                                                const TextStyle(
-                                                              fontSize: 12.5,
-                                                              fontWeight:
-                                                                  FontWeight
-                                                                      .bold,
-                                                              color: Colors
-                                                                  .redAccent,
-                                                            ),
-                                                          ),
-                                                        ),
-                                                        if (hit.afterLines
-                                                            .isNotEmpty) ...[
-                                                          const Text(
-                                                            '--- После триггера (+5) ---',
-                                                            style: TextStyle(
-                                                                fontSize: 10,
-                                                                color: Colors
-                                                                    .white38),
-                                                          ),
-                                                          ...hit.afterLines.map(
-                                                              (l) => Text(
-                                                                    l,
-                                                                    style: const TextStyle(
-                                                                        fontSize:
-                                                                            11.5,
-                                                                        color: Colors
-                                                                            .white70),
-                                                                  )),
-                                                        ],
-                                                      ],
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          );
-                                        },
-                                      ),
-                              ),
-                            ],
-                          ),
-
-                          // ВКЛАДКА 3: АПЕЛЛЯЦИИ НА РАЗБАН
-                          _engine.banAppeals.isEmpty
-                              ? const Center(
-                                  child: Text(
-                                    'Записок на разбан от заблокированных пользователей пока нет.',
-                                    style: TextStyle(color: Colors.white54),
-                                  ),
-                                )
-                              : ListView.builder(
-                                  itemCount: _engine.banAppeals.length,
-                                  itemBuilder: (_, idx) {
-                                    final a = _engine.banAppeals[idx];
-                                    return Card(
-                                      color: const Color(0xFF1B2436),
-                                      margin: const EdgeInsets.only(bottom: 10),
-                                      child: ListTile(
-                                        leading: const Icon(Icons.mail_lock,
-                                            color: Colors.amberAccent),
-                                        title: Text(
-                                            '${a.nickname} [ID: ${a.nodeId}]'),
-                                        subtitle: Text(
-                                          'Записка: «${a.appealText}»\nHW: ${a.hwFingerprint}',
-                                          style: const TextStyle(
-                                              color: Colors.white70),
-                                        ),
-                                        trailing: FilledButton.icon(
-                                          style: FilledButton.styleFrom(
-                                              backgroundColor: Colors.teal),
-                                          onPressed: () async {
-                                            await _engine
-                                                .executeAdminBanOrUnban(
-                                              targetNodeId: a.nodeId,
-                                              ban: false,
-                                            );
-                                            if (ctx.mounted) {
-                                              setModalState(() {});
-                                            }
-                                          },
-                                          icon: const Icon(Icons.lock_open,
-                                              size: 16),
-                                          label: const Text('Разбанить'),
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showBenchmarkModal() async {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const AlertDialog(
-        content: Row(
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(width: 16),
-            Expanded(
-              child:
-                  Text('Тестирование крипто-ядра и замер пинга до друзей...'),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    final report = await _engine.runBenchmarkAndPing();
-    if (!mounted) return;
-    Navigator.pop(context);
-
+  void _showEditNicknameDialog() {
+    final ctrl = TextEditingController(text: engine.nickname);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.speed, color: Color(0xFF38BDF8)),
-            SizedBox(width: 8),
-            Expanded(child: Text('Бенчмарк Маяк v1.4')),
-          ],
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Производительность криптографии на устройстве:',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, color: Color(0xFF38BDF8)),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '• Потоковое шифрование ChaCha20-Poly1305: ${report.chachaMbPerSec.toStringAsFixed(1)} МБ/сек\n'
-                '• Рукопожатия X25519 + HKDF: ${report.x25519HandshakesPerSec} опер/сек\n'
-                '• Цифровые подписи Ed25519: ${report.ed25519SignsPerSec} пакет/сек',
-                style: const TextStyle(fontSize: 13),
-              ),
-              const Divider(height: 20),
-              const Text(
-                'Живой сетевой пинг (RTT) до подключенных узлов:',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, color: Color(0xFF38BDF8)),
-              ),
-              const SizedBox(height: 6),
-              if (report.peerPingsMs.isEmpty)
-                const Text(
-                  'Нет активных прямых подключений для замера пинга.',
-                  style: TextStyle(fontSize: 12.5, color: Colors.white60),
-                )
-              else
-                ...report.peerPingsMs.entries.map(
-                  (e) => Text(
-                    '• ${e.key}: ${e.value >= 0 ? "${e.value} мс" : "Таймаут"}',
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отлично'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _openFullScreenImage(String imagePath, String title) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => Scaffold(
-          backgroundColor: Colors.black,
-          extendBodyBehindAppBar: true,
-          appBar: AppBar(
-            backgroundColor: Colors.black54,
-            elevation: 0,
-            title: Text(title, style: const TextStyle(fontSize: 15)),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.download),
-                tooltip: 'Сохранить на устройство (в Загрузки/Mayak)',
-                onPressed: () async {
-                  final msg = await _engine.saveReceivedFileToDownloads(
-                      imagePath, title);
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(msg)),
-                  );
-                },
-              ),
-            ],
-          ),
-          body: SizedBox.expand(
-            child: InteractiveViewer(
-              clipBehavior: Clip.none,
-              panEnabled: true,
-              scaleEnabled: true,
-              minScale: 0.5,
-              maxScale: 6.0,
-              child: Center(
-                child: Image.file(
-                  File(imagePath),
-                  fit: BoxFit.contain,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _openInAppVideoPlayer(
-      String videoPath, String title, String? thumbPath) {
-    _engine.stopAudioPlayback();
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => InAppVideoPlayerScreen(
-          engine: _engine,
-          videoPath: videoPath,
-          title: title,
-          initialThumbPath: thumbPath,
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showSafetyNumberDialog(ContactProfile contact) async {
-    final safetyCode = await _engine.computeSafetyNumber(contact.nodeId);
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.verified_user, color: Color(0xFF38BDF8)),
-            SizedBox(width: 8),
-            Expanded(child: Text('Код безопасности E2EE v2')),
-          ],
-        ),
+        backgroundColor: MayakTheme.bgSurface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Ваш позывной (Никнейм)'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Сверьте этот код с устройством «${contact.displayTitle}»:',
-              style: const TextStyle(fontSize: 13, color: Colors.white70),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.black38,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                    color: const Color(0xFF38BDF8).withOpacity(0.4)),
-              ),
-              child: Text(
-                safetyCode,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  fontFamily: 'monospace',
-                  color: Color(0xFF38BDF8),
-                  letterSpacing: 1.5,
-                ),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Понятно'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _confirmDeleteContact(ContactProfile contact) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Управление чатом «${contact.displayTitle}»'),
-        content: const Text(
-          'Вы можете очистить только переписку или полностью удалить контакт.',
-          style: TextStyle(fontSize: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена'),
-          ),
-          OutlinedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await _engine.clearChatHistoryOnly(contact.nodeId);
-            },
-            child: const Text('Очистить СМС'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await _engine.deleteContact(contact.nodeId);
-            },
-            child: const Text('Удалить навсегда'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showAddContactModal() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Подключить узел по IP или коду'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Введи локальный IP второго устройства (например 192.168.1.5 или 192.168.43.1) либо вставь скопированный код-приглашение:',
-              style: TextStyle(fontSize: 12, color: Colors.white70),
-            ),
-            const SizedBox(height: 12),
             TextField(
-              controller: _inviteCtrl,
+              controller: ctrl,
               autofocus: true,
-              decoration: const InputDecoration(
-                hintText: '192.168.1.5 или код узла...',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                hintText: 'Введите имя или позывной',
+                filled: true,
+                fillColor: MayakTheme.bgDeep,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
-              onSubmitted: (val) async {
-                Navigator.pop(ctx);
-                await _handleConnectInput(val);
-              },
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Это имя видят все участники локальной сети рядом с вами.',
+              style: TextStyle(fontSize: 11, color: Colors.white54),
             ),
           ],
         ),
@@ -1191,175 +260,27 @@ class _HomeScreenState extends State<HomeScreen> {
             child: const Text('Отмена'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: MayakTheme.accentCyan,
+              foregroundColor: Colors.black,
+            ),
             onPressed: () async {
-              Navigator.pop(ctx);
-              await _handleConnectInput(_inviteCtrl.text);
-            },
-            child: const Text('Подключить'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showTutorialAndAutoSetupModal() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF111827),
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.85,
-        maxChildSize: 0.95,
-        builder: (_, scrollCtrl) => Padding(
-          padding: const EdgeInsets.all(18),
-          child: ListView(
-            controller: scrollCtrl,
-            children: [
-              const Text(
-                'Настройки и Память «Маяк v1.4.0»',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  FilledButton.icon(
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      _showBenchmarkModal();
-                    },
-                    icon: const Icon(Icons.speed, size: 18),
-                    label: const Text('Бенчмарк и Пинг'),
+              final input = ctrl.text.trim();
+              final unlocked = await engine.tryUnlockAdminConsole(input);
+              if (unlocked) {
+                if (ctx.mounted) Navigator.pop(ctx);
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    backgroundColor: Color(0xFF065F46),
+                    content: Text(
+                        '🛡️ ROOT-Панель Администратора разблокирована!'),
                   ),
-                  FilledButton.tonalIcon(
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      _engine.scanLocalSubnet();
-                    },
-                    icon: const Icon(Icons.radar, size: 18),
-                    label: const Text('Сканировать Wi-Fi сеть'),
-                  ),
-                  FilledButton.tonalIcon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF312E81),
-                    ),
-                    onPressed: () async {
-                      final report =
-                          await _engine.clearAllDownloadedMediaFromDevice();
-                      if (!mounted) return;
-                      Navigator.pop(ctx);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text(report)),
-                      );
-                    },
-                    icon: const Icon(Icons.cleaning_services, size: 18),
-                    label: const Text(
-                        'Стереть скачанные данные (картинки и файлы)'),
-                  ),
-                  if (Platform.isAndroid)
-                    FilledButton.tonalIcon(
-                      onPressed: () async {
-                        await _engine.requestIgnoreBatteryOptimizations();
-                      },
-                      icon: const Icon(Icons.battery_charging_full, size: 18),
-                      label:
-                          const Text('Разрешить работу в фоне (POCO/Xiaomi)'),
-                    ),
-                  if (Platform.isWindows)
-                    FilledButton.tonalIcon(
-                      onPressed: () async {
-                        final res =
-                            await _engine.configureWindowsPublicFirewall();
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(res == 'OK'
-                                ? 'Порты 42069/42070 открыты для Общественной сети!'
-                                : 'Запустите allow_public_network_firewall.bat от имени Администратора'),
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.security, size: 18),
-                      label: const Text(
-                          'Открыть доступ в Общественной сети (Firewall)'),
-                    ),
-                  FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                        backgroundColor: Colors.redAccent),
-                    onPressed: () => _engine.stopAllAndExitApp(),
-                    icon: const Icon(Icons.power_settings_new, size: 18),
-                    label: const Text('Полностью выключить Маяк и выйти'),
-                  ),
-                ],
-              ),
-              const Divider(height: 28),
-              const Text(
-                'Что нового в патче v1.4.0:',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, color: Color(0xFF38BDF8)),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                '• Новый современный интерфейс Cyber-Ocean (графит-индиго, градиентные карточки и поиск по чатам).\n'
-                '• Защита медиа в стиле Telegram: входящие фото и видео сначала скрыты под матовым блюром с кнопкой показа, а рядом есть отдельная кнопка сохранения на устройство.\n'
-                '• Кнопка «Стереть скачанные данные (картинки и файлы)» в настройках для мгновенной очистки памяти.\n'
-                '• Полноценный встроенный видеоплеер на Windows ПК и Android с генерацией превью-кадра до и после просмотра видео.\n'
-                '• Надежное файловое хранилище чатов и профилей на Android + автоматическая доотправка файлов из оффлайн-очереди буфера при подключении.',
-                style: TextStyle(fontSize: 13, color: Colors.white70, height: 1.4),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _showEditProfileDialog() {
-    final nameCtrl = TextEditingController(text: _engine.nickname);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Мой профиль и сеть'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Постоянный ID узла: ${_engine.nodeId}\n'
-                'Аппаратный отпечаток: ${_engine.myHwFingerprint}\n'
-                'Физические IP: ${_engine.cachedIps.join(", ")}\n'
-                'TCP-порт: ${_engine.listenPort}\n'
-                'Очередь буфера (СМС + файлы): ${_engine.totalBufferedCount}\n'
-                'Статус: ${_engine.lastStatusLog}',
-                style: const TextStyle(fontSize: 12, color: Colors.white70),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: nameCtrl,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Твое имя / Позывной',
-                  border: OutlineInputBorder(),
-                ),
-                onSubmitted: (_) async {
-                  await _engine.updateNickname(nameCtrl.text);
-                  if (ctx.mounted) Navigator.pop(ctx);
-                },
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              await _engine.updateNickname(nameCtrl.text);
+                );
+                _openFullAdminDashboard();
+                return;
+              }
+              engine.updateNickname(input);
               if (ctx.mounted) Navigator.pop(ctx);
             },
             child: const Text('Сохранить'),
@@ -1369,106 +290,308 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showLogsModal() {
+  void _showAddContactSheet() {
+    engine.refreshNetworkCache(force: true);
+    final codeCtrl = TextEditingController();
+
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF111827),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Журнал работы узла Маяк',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                ),
-                TextButton.icon(
-                  onPressed: () {
-                    Clipboard.setData(
-                      ClipboardData(text: _engine.debugLogs.join('\n')),
-                    );
-                    Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Журнал скопирован')),
-                    );
-                  },
-                  icon: const Icon(Icons.copy, size: 16),
-                  label: const Text('Скопировать'),
-                ),
-              ],
-            ),
-            const Divider(),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _engine.debugLogs.length,
-                itemBuilder: (_, i) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Text(
-                    _engine.debugLogs[i],
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 12,
+      isScrollControlled: true,
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(
+          left: 20,
+          right: 20,
+          top: 20,
+          bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.qr_code_2_rounded,
+                      color: MayakTheme.accentCyan, size: 26),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Подключение: ${engine.nickname}',
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Ваши локальные IP: ${engine.cachedIps.join(", ")} (Порт: ${engine.listenPort})',
+                style: const TextStyle(fontSize: 12, color: Colors.white60),
+              ),
+              const SizedBox(height: 12),
+              if (engine.cachedInviteCode.isNotEmpty)
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: MayakTheme.accentCyan.withOpacity(0.25),
+                          blurRadius: 16,
+                        ),
+                      ],
+                    ),
+                    child: QrImageView(
+                      data: engine.cachedInviteCode,
+                      version: QrVersions.auto,
+                      size: 190,
                     ),
                   ),
                 ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.copy, size: 16),
+                      label: const Text('Скопировать инвайт'),
+                      onPressed: () {
+                        Clipboard.setData(
+                            ClipboardData(text: engine.cachedInviteCode));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Код приглашения скопирован')),
+                        );
+                      },
+                    ),
+                  ),
+                  if (Platform.isAndroid) ...[
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: MayakTheme.accentIndigo,
+                          foregroundColor: Colors.white,
+                        ),
+                        icon: const Icon(Icons.qr_code_scanner, size: 18),
+                        label: const Text('Сканировать QR'),
+                        onPressed: () async {
+                          final camOk = await engine.requestCameraPermission();
+                          if (!camOk) return;
+                          if (!ctx.mounted) return;
+                          final scanned = await Navigator.of(ctx).push<String>(
+                            MaterialPageRoute(
+                              builder: (_) => const QrScannerPage(),
+                            ),
+                          );
+                          if (scanned != null && scanned.isNotEmpty) {
+                            final peerId =
+                                await engine.connectWithInviteOrIp(scanned);
+                            if (ctx.mounted) Navigator.pop(ctx);
+                            if (peerId != null && mounted) {
+                              final c = engine.knownContacts[peerId];
+                              if (c != null) {
+                                _openChatRoom(c.nodeId, c.displayTitle, false);
+                              }
+                            }
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ],
               ),
-            ),
-          ],
+              const SizedBox(height: 14),
+              TextField(
+                controller: codeCtrl,
+                decoration: InputDecoration(
+                  hintText:
+                      'Вставьте инвайт-код ИЛИ IP (напр. 192.168.1.45)',
+                  filled: true,
+                  fillColor: MayakTheme.bgDeep,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.paste),
+                    onPressed: () async {
+                      final data = await Clipboard.getData('text/plain');
+                      if (data?.text != null) {
+                        codeCtrl.text = data!.text!.trim();
+                      }
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: MayakTheme.accentCyan,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                icon: const Icon(Icons.link),
+                label: const Text(
+                  'Подключиться и открыть чат',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                onPressed: () async {
+                  final raw = codeCtrl.text.trim();
+                  if (raw.isEmpty) return;
+                  try {
+                    final peerId = await engine.connectWithInviteOrIp(raw);
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    if (peerId != null && mounted) {
+                      final c = engine.knownContacts[peerId];
+                      if (c != null) {
+                        _openChatRoom(c.nodeId, c.displayTitle, false);
+                      }
+                    }
+                  } catch (_) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text('Неверный формат кода или IP')),
+                    );
+                  }
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Future<void> _showMyQrModal() async {
-    await _engine.refreshNetworkCache(force: true);
-    if (!mounted || _engine.cachedInviteCode.isEmpty) return;
+  void _showBenchmarkDialog() async {
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        title: Text('${_engine.nickname} (${_engine.nodeId})'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        content: Row(
           children: [
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              width: 230,
-              height: 230,
-              child: Center(
-                child: QrImageView(
-                  data: _engine.cachedInviteCode,
-                  size: 210,
-                  backgroundColor: Colors.white,
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            SelectableText(
-              'Прямой IP: ${_engine.cachedIps.join(", ")}:${_engine.listenPort}',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF38BDF8)),
-              textAlign: TextAlign.center,
+            CircularProgressIndicator(color: MayakTheme.accentCyan),
+            SizedBox(width: 16),
+            Expanded(
+              child: Text(
+                  'Замер скорости шифрования ChaCha20-Poly1305 и пинга...'),
             ),
           ],
         ),
-        actions: [
-          TextButton.icon(
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: _engine.cachedInviteCode));
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Код скопирован')),
-              );
-            },
-            icon: const Icon(Icons.copy, size: 16),
-            label: const Text('Копировать код'),
+      ),
+    );
+
+    final report = await engine.runBenchmarkAndPing();
+    if (!mounted) return;
+    Navigator.of(context).pop();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        title: const Row(
+          children: [
+            Icon(Icons.speed, color: MayakTheme.accentCyan),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Тест скорости и готовности к звонкам',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '• Поток ChaCha20-Poly1305: ${report.chachaMbPerSec.toStringAsFixed(1)} МБ/сек\n'
+                '• Обмены X25519 + HKDF: ${report.x25519HandshakesPerSec} опер/сек\n'
+                '• Подписи Ed25519: ${report.ed25519SignsPerSec} опер/сек',
+                style: const TextStyle(fontSize: 13, height: 1.5),
+              ),
+              const Divider(height: 20),
+              Row(
+                children: [
+                  Icon(
+                    report.readyForVoicePtt
+                        ? Icons.check_circle
+                        : Icons.warning,
+                    color: report.readyForVoicePtt
+                        ? MayakTheme.accentEmerald
+                        : Colors.orange,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Голосовая рация (Push-To-Talk / Opus): Готово',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Icon(
+                    report.readyForVideoCalls
+                        ? Icons.check_circle
+                        : Icons.info_outline,
+                    color: report.readyForVideoCalls
+                        ? MayakTheme.accentEmerald
+                        : Colors.amber,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      report.readyForVideoCalls
+                          ? 'Видеозвонки по Wi-Fi (E2EE потоковое): Готово'
+                          : 'Видеозвонки: только при прямом Wi-Fi',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+              if (report.peerPingsMs.isNotEmpty) ...[
+                const Divider(height: 20),
+                const Text(
+                  'Задержка (RTT Ping) до активных узлов:',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: MayakTheme.accentCyan),
+                ),
+                const SizedBox(height: 6),
+                ...report.peerPingsMs.entries.map(
+                  (e) => Text(
+                    '• ${e.key}: ${e.value >= 0 ? "${e.value} мс" : "таймаут"}',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            ],
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
             child: const Text('Закрыть'),
           ),
         ],
@@ -1476,198 +599,460 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _openQrScanner() async {
-    if (Platform.isAndroid) {
-      final camGranted = await _engine.requestCameraPermission();
-      if (!camGranted) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Для сканирования QR разрешите доступ к камере')),
-        );
-        return;
-      }
-    }
-
-    if (!mounted) return;
-    final scannedCode = await Navigator.push<String>(
-      context,
-      MaterialPageRoute(builder: (_) => const QrScannerScreen()),
-    );
-    if (scannedCode != null && scannedCode.trim().isNotEmpty) {
-      await _handleConnectInput(scannedCode);
-    }
-  }
-
-  Future<void> _handleConnectInput(String raw) async {
-    final trimmed = raw.trim();
-    if (trimmed.isEmpty) return;
-
-    final isAdmin = await _engine.tryUnlockAdminConsole(trimmed);
-    if (isAdmin) {
-      _inviteCtrl.clear();
-      if (!mounted) return;
-      _showHiddenAdminConsoleModal();
-      return;
-    }
-
-    try {
-      final id = await _engine.connectWithInviteOrIp(trimmed);
-      if (!mounted) return;
-      _inviteCtrl.clear();
-      if (id != null) {
-        _openChat(id);
-      }
-      final label = id != null
-          ? (_engine.knownContacts[id]?.displayTitle ?? id)
-          : trimmed;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Подключение к узлу: $label')),
-      );
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Неверный формат кода или IP (пример: 192.168.1.5)')),
-      );
-    }
-  }
-
-  Widget _buildStatusPill(IconData icon, String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withOpacity(0.35)),
+  void _showNetworkDiagnosticsSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 5),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: color,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => Padding(
+          padding: const EdgeInsets.all(18),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.tune_rounded,
+                        color: MayakTheme.accentCyan),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Сеть, Память и Диагностика (ID: ${engine.nodeId})',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ),
+                    TextButton.icon(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _showEditNicknameDialog();
+                      },
+                      icon: const Icon(Icons.edit, size: 16),
+                      label: const Text('Имя'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Позывной: ${engine.nickname} • HW: ${engine.myHwFingerprint}\n'
+                  'IP: ${engine.cachedIps.join(", ")}:${engine.listenPort} • Онлайн: ${engine.connectedPeersCount} • Буфер: ${engine.totalBufferedCount}',
+                  style: const TextStyle(fontSize: 12, color: Colors.white60),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.tonalIcon(
+                      icon: engine.isScanningSubnet
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.wifi_find, size: 18),
+                      label: Text(engine.isScanningSubnet
+                          ? 'Сканирование...'
+                          : 'Сканировать Wi-Fi'),
+                      onPressed: engine.isScanningSubnet
+                          ? null
+                          : () async {
+                              setSheetState(() {});
+                              await engine.scanLocalSubnet();
+                              if (ctx.mounted) setSheetState(() {});
+                            },
+                    ),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.speed, size: 18),
+                      label: const Text('Тест скорости'),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _showBenchmarkDialog();
+                      },
+                    ),
+                    if (Platform.isAndroid)
+                      FilterChip(
+                        avatar: Icon(
+                          Icons.bluetooth_audio,
+                          size: 16,
+                          color: engine.bleMeshActive
+                              ? Colors.black
+                              : MayakTheme.accentCyan,
+                        ),
+                        label: Text(engine.bleMeshActive
+                            ? 'BLE Mesh ВКЛ (${engine.blePeersCount})'
+                            : 'Включить BLE Mesh'),
+                        selected: engine.bleMeshActive,
+                        selectedColor: MayakTheme.accentCyan,
+                        checkmarkColor: Colors.black,
+                        onSelected: (_) async {
+                          await engine.toggleAndroidBleMesh();
+                          setSheetState(() {});
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                    if (Platform.isAndroid)
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.battery_saver,
+                            size: 18, color: Colors.amberAccent),
+                        label: const Text('Без ограничений АКБ'),
+                        onPressed: () async {
+                          await engine.requestIgnoreBatteryOptimizations();
+                        },
+                      ),
+                    if (Platform.isWindows)
+                      FilledButton.tonalIcon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF1E3A8A),
+                        ),
+                        icon: const Icon(Icons.security,
+                            size: 16, color: Colors.lightBlueAccent),
+                        label: const Text(
+                            'Открыть порты Windows (Обществ. сеть)'),
+                        onPressed: () async {
+                          final res =
+                              await engine.configureWindowsPublicFirewall();
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(res == 'OK'
+                                  ? 'Порты 42069/42070 открыты для Общественной и Частной сети!'
+                                  : 'Запустите allow_public_network_firewall.bat от имени Администратора'),
+                            ),
+                          );
+                        },
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                // ОЧИСТКА СКАЧАННЫХ МЕДИА/ФАЙЛОВ ИЗ КЭША (с возможностью заново скачать по кнопке!)
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: MayakTheme.accentAmber,
+                    side: const BorderSide(color: MayakTheme.accentAmber),
+                  ),
+                  icon: const Icon(Icons.cleaning_services_rounded, size: 18),
+                  label: const Text(
+                      'Стереть скачанные данные с кэша (освободить память)'),
+                  onPressed: () async {
+                    final msg = await engine.clearAllDownloadedMediaFromDevice();
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(msg)),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF7F1D1D),
+                    foregroundColor: Colors.white,
+                  ),
+                  icon: const Icon(Icons.power_settings_new, size: 18),
+                  label: const Text(
+                      'Полностью остановить фоновый узел и выйти'),
+                  onPressed: () async {
+                    await engine.stopAllAndExitApp();
+                  },
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  height: 120,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: MayakTheme.bgDeep,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: ListView.builder(
+                    itemCount: engine.debugLogs.length,
+                    itemBuilder: (_, i) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Text(
+                        engine.debugLogs[i],
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _buildChatsListPane({required bool isWideScreen}) {
-    final contacts = _engine.knownContacts.values
-        .where((c) => !_engine.isNodeBanned(c.nodeId, c.hwFingerprint))
-        .where((c) =>
-            _searchQuery.isEmpty ||
-            c.displayTitle.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-            c.nodeId.toLowerCase().contains(_searchQuery.toLowerCase()))
-        .toList()
+  void _confirmContactAction(ContactProfile c) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.person, color: MayakTheme.accentCyan),
+              title: Text(c.displayTitle,
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('ID узла: ${c.nodeId} • ${c.lastAddress}'),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.cleaning_services_outlined,
+                  color: Colors.amber),
+              title: const Text('Очистить историю переписки'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await engine.clearChatHistoryOnly(c.nodeId);
+              },
+            ),
+            ListTile(
+              leading:
+                  const Icon(Icons.delete_forever, color: Colors.redAccent),
+              title: const Text(
+                'Удалить контакт и чат навсегда',
+                style: TextStyle(color: Colors.redAccent),
+              ),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await engine.deleteContact(c.nodeId);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allContacts = engine.knownContacts.values.toList()
       ..sort((a, b) {
         if (a.isOnline != b.isOnline) return a.isOnline ? -1 : 1;
-        final lastA = _engine.getLastMessageFor(a.nodeId)?.timestamp ?? 0;
-        final lastB = _engine.getLastMessageFor(b.nodeId)?.timestamp ?? 0;
+        final lastA = engine.getLastMessageFor(a.nodeId)?.timestamp ?? 0;
+        final lastB = engine.getLastMessageFor(b.nodeId)?.timestamp ?? 0;
         return lastB.compareTo(lastA);
       });
 
-    final lastBroadcast =
-        _engine.getLastMessageFor(MeshEngine.broadcastChannelId);
+    final contacts = _searchQuery.isEmpty
+        ? allContacts
+        : allContacts
+            .where((c) =>
+                c.displayTitle.toLowerCase().contains(_searchQuery) ||
+                c.nodeId.toLowerCase().contains(_searchQuery))
+            .toList();
 
-    return Container(
-      color: const Color(0xFF0E1420),
-      child: Column(
+    final lastBroadcast =
+        engine.getLastMessageFor(MeshEngine.broadcastChannelId);
+
+    return Scaffold(
+      appBar: AppBar(
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF111827), Color(0xFF1E1B4B)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        title: GestureDetector(
+          onTap: _showEditNicknameDialog,
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  gradient: MayakTheme.primaryGradient,
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: MayakTheme.accentCyan.withOpacity(0.35),
+                      blurRadius: 10,
+                    ),
+                  ],
+                ),
+                child: const Icon(Icons.radar_rounded,
+                    color: Colors.white, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            engine.nickname.isEmpty ? 'Маяк' : engine.nickname,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 17,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                        const Icon(Icons.edit, size: 14, color: Colors.white54),
+                      ],
+                    ),
+                    Text(
+                      engine.isSelfBanned
+                          ? '🚫 УЗЕЛ ЗАБЛОКИРОВАН АДМИНОМ'
+                          : (engine.connectedPeersCount > 0
+                              ? 'В сети: ${engine.connectedPeersCount} узел(ов) • ID: ${engine.nodeId}'
+                              : 'Автономный поиск • ID: ${engine.nodeId}'),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: engine.isSelfBanned
+                            ? MayakTheme.accentRed
+                            : (engine.connectedPeersCount > 0
+                                ? MayakTheme.accentEmerald
+                                : Colors.white54),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          if (engine.isAdminUnlocked)
+            IconButton(
+              tooltip: 'Панель Управления Сетью (ROOT)',
+              onPressed: _openFullAdminDashboard,
+              icon: Badge(
+                isLabelVisible: engine.banAppeals.isNotEmpty ||
+                    engine.triggerHits.isNotEmpty,
+                label: Text(
+                    '${engine.banAppeals.length + engine.triggerHits.length}'),
+                child: const Icon(Icons.admin_panel_settings_rounded,
+                    color: MayakTheme.accentAmber),
+              ),
+            ),
+          IconButton(
+            tooltip: 'Сканировать Wi-Fi сеть',
+            onPressed: engine.isScanningSubnet
+                ? null
+                : () => engine.scanLocalSubnet(),
+            icon: engine.isScanningSubnet
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: MayakTheme.accentCyan,
+                    ),
+                  )
+                : const Icon(Icons.wifi_find, color: MayakTheme.accentCyan),
+          ),
+          IconButton(
+            tooltip: 'Мой QR-код и добавление по IP',
+            onPressed: _showAddContactSheet,
+            icon: const Icon(Icons.qr_code_2_rounded),
+          ),
+          IconButton(
+            tooltip: 'Настройки, память и диагностика',
+            onPressed: _showNetworkDiagnosticsSheet,
+            icon: const Icon(Icons.tune_rounded),
+          ),
+        ],
+      ),
+      body: Column(
         children: [
-          if (_engine.isSelfBanned)
+          if (engine.isSelfBanned)
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              color: const Color(0xFF45121B),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: const BoxDecoration(
+                color: Color(0xFF450A0A),
+                border: Border(
+                  bottom: BorderSide(color: MayakTheme.accentRed, width: 1),
+                ),
+              ),
               child: Row(
                 children: [
-                  const Icon(Icons.block, color: Colors.redAccent, size: 20),
-                  const SizedBox(width: 8),
+                  const Icon(Icons.block,
+                      color: Colors.redAccent, size: 20),
+                  const SizedBox(width: 10),
                   const Expanded(
                     child: Text(
-                      'Ваш узел заблокирован администратором сети.',
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white),
+                      'Ваш узел заблокирован администратором. Отправка сообщений в чаты отключена.',
+                      style: TextStyle(fontSize: 12, color: Colors.white),
                     ),
                   ),
-                  FilledButton.tonal(
+                  FilledButton.tonalIcon(
                     style: FilledButton.styleFrom(
-                        backgroundColor: Colors.redAccent),
-                    onPressed: _showBanAppealDialog,
-                    child: const Text(
+                      backgroundColor: MayakTheme.accentAmber,
+                      foregroundColor: Colors.black,
+                    ),
+                    icon: const Icon(Icons.edit_note, size: 16),
+                    label: const Text(
                       'Записка на разбан',
-                      style: TextStyle(fontSize: 11, color: Colors.white),
+                      style:
+                          TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                    onPressed: _showBanAppealDialog,
+                  ),
+                ],
+              ),
+            ),
+          if (engine.vpnDetected)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              color: const Color(0xFF422006),
+              child: const Row(
+                children: [
+                  Icon(Icons.shield_outlined,
+                      size: 16, color: MayakTheme.accentAmber),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Активен VPN: Маяк автоматически обходит туннель для локальной сети.',
+                      style: TextStyle(fontSize: 11, color: Color(0xFFFDE68A)),
                     ),
                   ),
                 ],
               ),
             ),
           Container(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
             decoration: const BoxDecoration(
-              color: Color(0xFF131B2B),
-              border: Border(bottom: BorderSide(color: Color(0xFF1E293B))),
+              color: MayakTheme.bgSurface,
+              border: Border(
+                bottom: BorderSide(color: Colors.white10),
+              ),
             ),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    _buildStatusPill(
-                      Icons.sensors,
-                      'Онлайн: ${_engine.connectedPeersCount}',
-                      const Color(0xFF34D399),
-                    ),
-                    _buildStatusPill(
-                      Icons.lan_outlined,
-                      '${_engine.cachedIps.first}:${_engine.listenPort}',
-                      const Color(0xFF38BDF8),
-                    ),
-                    _buildStatusPill(
-                      Icons.inventory_2_outlined,
-                      'Буфер: ${_engine.totalBufferedCount}',
-                      _engine.totalBufferedCount > 0
-                          ? Colors.amberAccent
-                          : Colors.white70,
-                    ),
-                    if (Platform.isAndroid)
-                      InkWell(
-                        borderRadius: BorderRadius.circular(20),
-                        onTap: () async {
-                          await _engine.toggleAndroidBleMesh();
-                          if (mounted) setState(() {});
-                        },
-                        child: _buildStatusPill(
-                          _engine.bleMeshActive
-                              ? Icons.bluetooth_connected
-                              : Icons.bluetooth,
-                          _engine.bleMeshActive ? 'BLE Активен' : 'Вкл BLE',
-                          _engine.bleMeshActive
-                              ? const Color(0xFF60A5FA)
-                              : Colors.white54,
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 8),
                 TextField(
                   controller: _searchCtrl,
-                  onChanged: (v) => setState(() => _searchQuery = v.trim()),
+                  onChanged: (v) =>
+                      setState(() => _searchQuery = v.trim().toLowerCase()),
                   style: const TextStyle(fontSize: 13),
                   decoration: InputDecoration(
-                    hintText: 'Поиск по узлам и чатам...',
+                    hintText: 'Поиск по позывному или ID узла...',
                     prefixIcon: const Icon(Icons.search,
                         size: 18, color: Colors.white54),
                     suffixIcon: _searchQuery.isNotEmpty
@@ -1679,187 +1064,210 @@ class _HomeScreenState extends State<HomeScreen> {
                             },
                           )
                         : null,
-                    filled: true,
-                    fillColor: const Color(0xFF0B0F19),
                     isDense: true,
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
+                        horizontal: 12, vertical: 10),
+                    filled: true,
+                    fillColor: MayakTheme.bgDeep,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
-                      borderSide: const BorderSide(color: Color(0xFF1E293B)),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: const BorderSide(color: Color(0xFF1E293B)),
+                      borderSide: BorderSide.none,
                     ),
                   ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    _buildStatusPill(
+                      icon: Icons.lan_rounded,
+                      text: 'IP: ${engine.cachedIps.first}',
+                      color: MayakTheme.accentCyan,
+                    ),
+                    const SizedBox(width: 6),
+                    _buildStatusPill(
+                      icon: Icons.people_alt_rounded,
+                      text: 'Онлайн: ${engine.connectedPeersCount}',
+                      color: engine.connectedPeersCount > 0
+                          ? MayakTheme.accentEmerald
+                          : Colors.white38,
+                    ),
+                    const SizedBox(width: 6),
+                    _buildStatusPill(
+                      icon: Icons.outbox_rounded,
+                      text: 'Буфер: ${engine.totalBufferedCount}',
+                      color: engine.totalBufferedCount > 0
+                          ? MayakTheme.accentAmber
+                          : Colors.white38,
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               children: [
-                // КАРТОЧКА ОБЩЕГО ЭФИРА
+                // Карточка Общего эфира
                 Container(
-                  margin: const EdgeInsets.only(bottom: 6),
+                  margin: const EdgeInsets.only(bottom: 8),
                   decoration: BoxDecoration(
-                    color: _activeChatId == MeshEngine.broadcastChannelId &&
-                            isWideScreen
-                        ? const Color(0xFF1E293B)
-                        : const Color(0xFF141C2B),
-                    borderRadius: BorderRadius.circular(16),
+                    color: MayakTheme.bgSurface,
+                    borderRadius: BorderRadius.circular(18),
                     border: Border.all(
-                      color: _activeChatId == MeshEngine.broadcastChannelId &&
-                              isWideScreen
-                          ? const Color(0xFF38BDF8).withOpacity(0.5)
-                          : Colors.transparent,
+                      color: MayakTheme.accentAmber.withOpacity(0.25),
                     ),
                   ),
                   child: ListTile(
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    onTap: () => _openChatRoom(
+                      MeshEngine.broadcastChannelId,
+                      'Общий эфир (Все рядом)',
+                      true,
+                    ),
                     leading: Container(
-                      width: 44,
-                      height: 44,
+                      width: 50,
+                      height: 50,
                       decoration: BoxDecoration(
                         gradient: const LinearGradient(
-                          colors: [Color(0xFFF59E0B), Color(0xFFEA580C)],
+                          colors: [Color(0xFFD97706), Color(0xFFF59E0B)],
                         ),
-                        borderRadius: BorderRadius.circular(14),
+                        borderRadius: BorderRadius.circular(15),
                       ),
-                      child: const Icon(Icons.podcasts, color: Colors.white),
+                      child: const Icon(
+                        Icons.campaign_rounded,
+                        color: Colors.black,
+                        size: 28,
+                      ),
                     ),
-                    title: const Text(
-                      'Общий эфир (Всем рядом)',
-                      style:
-                          TextStyle(fontWeight: FontWeight.bold, fontSize: 14.5),
-                    ),
-                    subtitle: Text(
-                      lastBroadcast != null
-                          ? '${lastBroadcast.senderName}: ${lastBroadcast.text}'
-                          : 'Открытый радиоканал для всех узлов поблизости',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          const TextStyle(fontSize: 12.5, color: Colors.white60),
-                    ),
-                    trailing: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                    title: const Row(
                       children: [
-                        if (lastBroadcast != null)
-                          Text(
-                            lastBroadcast.timeFormatted,
-                            style: const TextStyle(
-                                fontSize: 11, color: Colors.white54),
+                        Expanded(
+                          child: Text(
+                            'Общий эфир (Все рядом)',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 15),
                           ),
-                        if (_engine.unreadBroadcastCount > 0)
-                          Container(
-                            margin: const EdgeInsets.only(top: 4),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 7, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF59E0B),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
+                        ),
+                        Text(
+                          'КАНАЛ',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: MayakTheme.accentAmber,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        lastBroadcast != null
+                            ? '${lastBroadcast.senderName}: ${lastBroadcast.text}'
+                            : 'Открытый широковещательный канал для всех узлов рядом',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 13),
+                      ),
+                    ),
+                    trailing: engine.unreadBroadcastCount > 0
+                        ? CircleAvatar(
+                            radius: 12,
+                            backgroundColor: MayakTheme.accentAmber,
                             child: Text(
-                              '${_engine.unreadBroadcastCount}',
+                              '${engine.unreadBroadcastCount}',
                               style: const TextStyle(
-                                color: Colors.black,
                                 fontSize: 11,
+                                color: Colors.black,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                          ),
-                      ],
-                    ),
-                    onTap: () => _openChat(MeshEngine.broadcastChannelId),
+                          )
+                        : const Icon(Icons.chevron_right,
+                            color: Colors.white38),
                   ),
                 ),
-
                 if (contacts.isEmpty)
                   Padding(
-                    padding: const EdgeInsets.all(24),
+                    padding: const EdgeInsets.all(28),
                     child: Column(
                       children: [
                         Container(
-                          padding: const EdgeInsets.all(16),
+                          width: 72,
+                          height: 72,
                           decoration: BoxDecoration(
-                            color: const Color(0xFF141C2B),
-                            borderRadius: BorderRadius.circular(20),
+                            color: MayakTheme.bgSurface,
+                            borderRadius: BorderRadius.circular(24),
                           ),
-                          child: const Icon(Icons.radar,
-                              size: 42, color: Color(0xFF38BDF8)),
-                        ),
-                        const SizedBox(height: 12),
-                        const Text(
-                          'Устройства рядом появятся автоматически\nпри включенном Wi-Fi, Точке доступа или BLE.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white54, fontSize: 13),
+                          child: const Icon(Icons.radar_rounded,
+                              size: 40, color: MayakTheme.accentCyan),
                         ),
                         const SizedBox(height: 14),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          alignment: WrapAlignment.center,
-                          children: [
-                            FilledButton.icon(
-                              onPressed: _showAddContactModal,
-                              icon: const Icon(Icons.person_add, size: 18),
-                              label: const Text('По IP / Коду'),
-                            ),
-                            OutlinedButton.icon(
-                              onPressed: () => _engine.scanLocalSubnet(),
-                              icon: const Icon(Icons.radar, size: 18),
-                              label: const Text('Поиск в сети'),
-                            ),
-                          ],
+                        const Text(
+                          'Ожидание других узлов Маяк...',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Устройства в одной Wi-Fi сети или точке доступа находятся автоматически.\nЕсли сети изолированы — нажмите на иконку QR-кода сверху.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white54, fontSize: 12),
                         ),
                       ],
                     ),
                   ),
-
                 ...contacts.map((c) {
-                  final lastMsg = _engine.getLastMessageFor(c.nodeId);
-                  final isSelected = _activeChatId == c.nodeId && isWideScreen;
-                  final grad = _avatarGradientFor(c.nodeId);
+                  final lastMsg = engine.getLastMessageFor(c.nodeId);
+                  final isBanned = engine.isNodeBanned(c.nodeId);
+                  final colors = _avatarColorsFor(c.nodeId);
                   return Container(
-                    margin: const EdgeInsets.only(bottom: 6),
+                    margin: const EdgeInsets.only(bottom: 8),
                     decoration: BoxDecoration(
-                      color: isSelected
-                          ? const Color(0xFF1E293B)
-                          : const Color(0xFF141C2B),
-                      borderRadius: BorderRadius.circular(16),
+                      color: MayakTheme.bgSurface,
+                      borderRadius: BorderRadius.circular(18),
                       border: Border.all(
-                        color: isSelected
-                            ? const Color(0xFF38BDF8).withOpacity(0.5)
-                            : Colors.transparent,
+                        color: isBanned
+                            ? MayakTheme.accentRed.withOpacity(0.5)
+                            : (c.isOnline
+                                ? MayakTheme.accentEmerald.withOpacity(0.3)
+                                : Colors.white10),
                       ),
                     ),
                     child: ListTile(
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16)),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
+                      onTap: () => _openChatRoom(c.nodeId, c.displayTitle, false),
+                      onLongPress: () => _confirmContactAction(c),
                       leading: Stack(
                         children: [
                           Container(
-                            width: 44,
-                            height: 44,
+                            width: 50,
+                            height: 50,
                             decoration: BoxDecoration(
-                              gradient: LinearGradient(colors: grad),
-                              borderRadius: BorderRadius.circular(14),
+                              gradient: LinearGradient(
+                                colors: isBanned
+                                    ? [
+                                        const Color(0xFF7F1D1D),
+                                        const Color(0xFF991B1B)
+                                      ]
+                                    : colors,
+                              ),
+                              borderRadius: BorderRadius.circular(15),
                             ),
-                            child: Center(
-                              child: Text(
-                                c.displayTitle.isNotEmpty
-                                    ? c.displayTitle[0].toUpperCase()
-                                    : '?',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 17,
-                                ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              c.displayTitle.characters.first.toUpperCase(),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                                fontSize: 19,
                               ),
                             ),
                           ),
@@ -1867,15 +1275,19 @@ class _HomeScreenState extends State<HomeScreen> {
                             right: 0,
                             bottom: 0,
                             child: Container(
-                              width: 13,
-                              height: 13,
+                              width: 14,
+                              height: 14,
                               decoration: BoxDecoration(
-                                color: c.isOnline
-                                    ? const Color(0xFF34D399)
-                                    : const Color(0xFFF59E0B),
+                                color: isBanned
+                                    ? MayakTheme.accentRed
+                                    : (c.isOnline
+                                        ? MayakTheme.accentEmerald
+                                        : Colors.grey),
                                 shape: BoxShape.circle,
                                 border: Border.all(
-                                    color: const Color(0xFF141C2B), width: 2.2),
+                                  color: MayakTheme.bgSurface,
+                                  width: 2.2,
+                                ),
                               ),
                             ),
                           ),
@@ -1885,74 +1297,74 @@ class _HomeScreenState extends State<HomeScreen> {
                         children: [
                           Expanded(
                             child: Text(
-                              c.displayTitle,
-                              maxLines: 1,
+                              isBanned
+                                  ? '🚫 ${c.displayTitle} (БАН)'
+                                  : c.displayTitle,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w600, fontSize: 14.5),
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 15,
+                                color: isBanned
+                                    ? Colors.redAccent
+                                    : Colors.white,
+                              ),
                             ),
                           ),
-                          const SizedBox(width: 6),
-                          Text(
-                            c.nodeId,
-                            style: const TextStyle(
-                              fontSize: 10.5,
-                              color: Colors.white38,
-                              fontFamily: 'monospace',
-                            ),
-                          ),
-                        ],
-                      ),
-                      subtitle: Text(
-                        lastMsg != null
-                            ? '${lastMsg.isMe ? "Вы: " : ""}${lastMsg.text}'
-                            : (c.isOnline
-                                ? '🟢 В сети (${c.lastAddress})'
-                                : '🟠 Ожидание соединения / Mesh'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          color: c.unreadCount > 0
-                              ? Colors.white
-                              : Colors.white60,
-                          fontWeight: c.unreadCount > 0
-                              ? FontWeight.w600
-                              : FontWeight.normal,
-                        ),
-                      ),
-                      trailing: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
                           if (lastMsg != null)
                             Text(
                               lastMsg.timeFormatted,
                               style: const TextStyle(
                                   fontSize: 11, color: Colors.white54),
                             ),
+                        ],
+                      ),
+                      subtitle: Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          lastMsg != null
+                              ? (lastMsg.isMe
+                                  ? 'Вы: ${lastMsg.text}'
+                                  : lastMsg.text)
+                              : (c.isOnline
+                                  ? 'Онлайн (${c.lastAddress}) • E2EE'
+                                  : 'Оффлайн • Доставка через буфер'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: c.unreadCount > 0
+                                ? MayakTheme.accentCyan
+                                : Colors.white60,
+                            fontWeight: c.unreadCount > 0
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
                           if (c.unreadCount > 0)
-                            Container(
-                              margin: const EdgeInsets.only(top: 4),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF38BDF8),
-                                borderRadius: BorderRadius.circular(10),
-                              ),
+                            CircleAvatar(
+                              radius: 12,
+                              backgroundColor: MayakTheme.accentCyan,
                               child: Text(
                                 '${c.unreadCount}',
                                 style: const TextStyle(
-                                  color: Colors.black,
                                   fontSize: 11,
+                                  color: Colors.black,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
                             ),
+                          IconButton(
+                            tooltip: 'Действия с чатом',
+                            icon: const Icon(Icons.more_vert,
+                                size: 18, color: Colors.white38),
+                            onPressed: () => _confirmContactAction(c),
+                          ),
                         ],
                       ),
-                      onTap: () => _openChat(c.nodeId),
-                      onLongPress: () => _confirmDeleteContact(c),
                     ),
                   );
                 }),
@@ -1961,123 +1373,1504 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: MayakTheme.accentCyan,
+        foregroundColor: Colors.black,
+        onPressed: _showAddContactSheet,
+        icon: const Icon(Icons.person_add_alt_1_rounded),
+        label: const Text(
+          'Новый узел',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
     );
   }
 
-  /// ИСПРАВЛЕНИЕ ПУНКТОВ 1 и 4: Медиа-карточки в стиле Telegram (сначала блюр с кнопкой показа/загрузки, превью-кадр видео и отдельная кнопка «На устройство»)
-  Widget _buildMessageContent(ChatMessage m) {
-    final hasFile = m.fileName != null && m.fileName!.isNotEmpty;
-    if (!hasFile) {
-      return Text(
-        m.text,
-        style: const TextStyle(fontSize: 15, color: Colors.white, height: 1.35),
+  Widget _buildStatusPill({
+    required IconData icon,
+    required String text,
+    required Color color,
+  }) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: MayakTheme.bgDeep,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withOpacity(0.3)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                text,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: color,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// ПОЛНОЭКРАННАЯ ПАНЕЛЬ АДМИНИСТРАТОРА СЕТИ «ЩИТ МАЯКА» (Исправление пунктов 6, 7 и 8)
+class AdminDashboardScreen extends StatefulWidget {
+  final MeshEngine engine;
+  const AdminDashboardScreen({super.key, required this.engine});
+
+  @override
+  State<AdminDashboardScreen> createState() => _AdminDashboardScreenState();
+}
+
+class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
+  MeshEngine get engine => widget.engine;
+
+  void _showAddTriggerDialog() {
+    final ctrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        title: const Text('Добавить триггерное слово'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Например: бомба, взрыв, террор, клад...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: MayakTheme.accentAmber,
+              foregroundColor: Colors.black,
+            ),
+            onPressed: () async {
+              final w = ctrl.text.trim();
+              if (w.isNotEmpty) {
+                await engine.addAdminTriggerWord(w);
+              }
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (mounted) setState(() {});
+            },
+            child: const Text('Добавить и синхронизировать'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final nodes = engine.knownContacts.values.toList()
+      ..sort((a, b) {
+        if (a.isOnline != b.isOnline) return a.isOnline ? -1 : 1;
+        return b.lastSeenTimestamp.compareTo(a.lastSeenTimestamp);
+      });
+
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        backgroundColor: MayakTheme.bgDeep,
+        appBar: AppBar(
+          backgroundColor: MayakTheme.bgSurface,
+          title: const Row(
+            children: [
+              Icon(Icons.shield_rounded, color: MayakTheme.accentAmber),
+              SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Панель Администратора Сети',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    Text(
+                      'Мониторинг узлов, триггеров (-5 : +5) и блокировок',
+                      style: TextStyle(fontSize: 11, color: Colors.white54),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              tooltip: 'Опросить все узлы',
+              icon: const Icon(Icons.sync, color: MayakTheme.accentCyan),
+              onPressed: () async {
+                await engine.pingAllKnownNodes();
+                if (mounted) setState(() {});
+              },
+            ),
+          ],
+          bottom: TabBar(
+            indicatorColor: MayakTheme.accentAmber,
+            labelColor: MayakTheme.accentAmber,
+            unselectedLabelColor: Colors.white60,
+            tabs: [
+              Tab(text: '📡 Узлы (${nodes.length + 1})'),
+              Tab(text: '🎯 Триггеры (${engine.triggerHits.length})'),
+              Tab(text: '📨 Апелляции (${engine.banAppeals.length})'),
+            ],
+          ),
+        ),
+        body: Column(
+          children: [
+            // Верхняя информационная панель показателей (KPI)
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+              decoration: const BoxDecoration(
+                color: MayakTheme.bgSurface,
+                border: Border(bottom: BorderSide(color: Colors.white12)),
+              ),
+              child: Row(
+                children: [
+                  _buildKpiBox(
+                    label: 'Онлайн',
+                    value: '${engine.connectedPeersCount + 1}',
+                    color: MayakTheme.accentEmerald,
+                  ),
+                  const SizedBox(width: 8),
+                  _buildKpiBox(
+                    label: 'Всего в базе',
+                    value: '${nodes.length + 1}',
+                    color: MayakTheme.accentCyan,
+                  ),
+                  const SizedBox(width: 8),
+                  _buildKpiBox(
+                    label: 'В бане',
+                    value: '${engine.bannedNodeIds.length}',
+                    color: MayakTheme.accentRed,
+                  ),
+                  const SizedBox(width: 8),
+                  _buildKpiBox(
+                    label: 'Инцидентов',
+                    value: '${engine.triggerHits.length}',
+                    color: MayakTheme.accentAmber,
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  // ВКЛАДКА 1: ВСЕ УЗЛЫ СЕТИ И ПОДРОБНЫЕ ДАННЫЕ
+                  ListView(
+                    padding: const EdgeInsets.all(14),
+                    children: [
+                      _buildAdminNodeCard(
+                        title: '${engine.nickname} (ВЫ — АДМИНИСТРАТОР)',
+                        nodeId: engine.nodeId,
+                        hw: engine.myHwFingerprint,
+                        osInfo: engine.myPlatformInfo,
+                        ipAddr:
+                            '${engine.cachedIps.join(", ")}:${engine.listenPort}',
+                        dhKey: engine.dhPubHex,
+                        signKey: engine.signPubHex,
+                        isOnline: true,
+                        pingMs: 0,
+                        isBanned: engine.isSelfBanned,
+                        isSelf: true,
+                      ),
+                      ...nodes.map(
+                        (c) => _buildAdminNodeCard(
+                          title: c.displayTitle,
+                          nodeId: c.nodeId,
+                          hw: c.hwFingerprint,
+                          osInfo: c.platformInfo,
+                          ipAddr: c.lastAddress,
+                          dhKey: c.dhPubHex,
+                          signKey: c.signPubHex,
+                          isOnline: c.isOnline,
+                          pingMs: c.lastPingMs,
+                          isBanned: engine.isNodeBanned(c.nodeId),
+                          isSelf: false,
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // ВКЛАДКА 2: ТРИГГЕРЫ (-5 : +5 СООБЩЕНИЙ) + ПОЛНОЕ ДОСЬЕ УЗЛА + ОЧИСТКА
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        color: MayakTheme.bgSurface,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Expanded(
+                                  child: Text(
+                                    'Слова-триггеры (синхронизируются на все узлы даже оффлайн):',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white70),
+                                  ),
+                                ),
+                                FilledButton.tonalIcon(
+                                  icon: const Icon(Icons.add, size: 16),
+                                  label: const Text('+ Слово',
+                                      style: TextStyle(fontSize: 12)),
+                                  onPressed: _showAddTriggerDialog,
+                                ),
+                                if (engine.triggerHits.isNotEmpty) ...[
+                                  const SizedBox(width: 8),
+                                  OutlinedButton.icon(
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: MayakTheme.accentRed,
+                                      side: const BorderSide(
+                                          color: MayakTheme.accentRed),
+                                    ),
+                                    icon: const Icon(Icons.delete_sweep_rounded,
+                                        size: 16),
+                                    label: const Text('Очистить журнал',
+                                        style: TextStyle(fontSize: 12)),
+                                    onPressed: () async {
+                                      await engine.clearAllTriggerHits();
+                                      if (mounted) setState(() {});
+                                    },
+                                  ),
+                                ],
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: engine.adminTriggerWords
+                                  .map(
+                                    (w) => InputChip(
+                                      label: Text(w,
+                                          style: const TextStyle(fontSize: 12)),
+                                      backgroundColor: MayakTheme.bgElevated,
+                                      deleteIconColor: Colors.redAccent,
+                                      onDeleted: () async {
+                                        await engine.removeAdminTriggerWord(w);
+                                        if (mounted) setState(() {});
+                                      },
+                                    ),
+                                  )
+                                  .toList(),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        child: engine.triggerHits.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  'Срабатываний триггеров в чатах пока не зафиксировано.\nПри срабатывании здесь появится полное досье узла и контекст -5 : +5 сообщений.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: Colors.white54, fontSize: 13),
+                                ),
+                              )
+                            : ListView.builder(
+                                padding: const EdgeInsets.all(14),
+                                itemCount: engine.triggerHits.length,
+                                itemBuilder: (_, i) {
+                                  final hit = engine.triggerHits[i];
+                                  final isOffenderBanned =
+                                      engine.isNodeBanned(hit.offenderNodeId);
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 12),
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      color: MayakTheme.bgSurface,
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(
+                                        color: MayakTheme.accentRed
+                                            .withOpacity(0.55),
+                                      ),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 8,
+                                                      vertical: 4),
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xFF7F1D1D),
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                              ),
+                                              child: Text(
+                                                'ТРИГГЕР: «${hit.triggerWord}»',
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Colors.white,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Expanded(
+                                              child: Text(
+                                                '${hit.chatTitle} • ${hit.formattedDateTime}',
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: MayakTheme.accentAmber,
+                                                ),
+                                              ),
+                                            ),
+                                            IconButton(
+                                              tooltip:
+                                                  'Удалить эту запись из журнала',
+                                              icon: const Icon(Icons.close,
+                                                  size: 18,
+                                                  color: Colors.white54),
+                                              onPressed: () async {
+                                                await engine
+                                                    .deleteSingleTriggerHit(
+                                                        hit.hitId);
+                                                if (mounted) setState(() {});
+                                              },
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 8),
+                                        // ПОЛНОЕ ТЕХНИЧЕСКОЕ ДОСЬЕ УЗЛА-НАРУШИТЕЛЯ (Исправление пункта 7)
+                                        Container(
+                                          width: double.infinity,
+                                          padding: const EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: MayakTheme.bgDeep,
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                            border: Border.all(
+                                                color: Colors.white12),
+                                          ),
+                                          child: SelectableText(
+                                            '👤 Позывной: ${hit.offenderName}\n'
+                                            '🔑 Крипто-ID узла: ${hit.offenderNodeId}\n'
+                                            '🧬 HW-отпечаток устройства: ${hit.offenderHwFingerprint.isNotEmpty ? hit.offenderHwFingerprint : "Н/Д"}\n'
+                                            '🌐 Сетевой адрес (IP:Порт): ${hit.offenderIpAddress.isNotEmpty ? hit.offenderIpAddress : "Mesh-маршрут"}\n'
+                                            '💻 ОС / Устройство: ${hit.offenderPlatformInfo.isNotEmpty ? hit.offenderPlatformInfo : "Не указано"}\n'
+                                            '🔐 Ключ X25519: ${hit.offenderDhPubHex.isNotEmpty ? hit.offenderDhPubHex : "Н/Д"}\n'
+                                            '✍️ Ключ Ed25519: ${hit.offenderSignPubHex.isNotEmpty ? hit.offenderSignPubHex : "Н/Д"}',
+                                            style: const TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: 11,
+                                              color: Colors.white70,
+                                              height: 1.4,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        const Text(
+                                          'Контекст переписки (-5 сообщений до и +5 после):',
+                                          style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                              color: MayakTheme.accentCyan),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        ...hit.beforeLines.map(
+                                          (l) => Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                                vertical: 1.5),
+                                            child: Text(
+                                              l,
+                                              style: const TextStyle(
+                                                  fontSize: 11,
+                                                  color: Colors.white54),
+                                            ),
+                                          ),
+                                        ),
+                                        Container(
+                                          width: double.infinity,
+                                          margin: const EdgeInsets.symmetric(
+                                              vertical: 5),
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF450A0A),
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            border: Border.all(
+                                                color: Colors.redAccent),
+                                          ),
+                                          child: SelectableText(
+                                            hit.triggerLine,
+                                            style: const TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                        ...hit.afterLines.map(
+                                          (l) => Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                                vertical: 1.5),
+                                            child: Text(
+                                              l,
+                                              style: const TextStyle(
+                                                  fontSize: 11,
+                                                  color: Colors.white70),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        Wrap(
+                                          spacing: 8,
+                                          runSpacing: 8,
+                                          children: [
+                                            OutlinedButton.icon(
+                                              icon: const Icon(Icons.copy_all,
+                                                  size: 16),
+                                              label: const Text(
+                                                  'Скопировать полное досье',
+                                                  style:
+                                                      TextStyle(fontSize: 12)),
+                                              onPressed: () {
+                                                Clipboard.setData(ClipboardData(
+                                                    text: hit
+                                                        .buildFullSecurityDossierText()));
+                                                ScaffoldMessenger.of(context)
+                                                    .showSnackBar(
+                                                  const SnackBar(
+                                                    content: Text(
+                                                        'Полное техническое досье инцидента скопировано в буфер обмена!'),
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                            if (hit.offenderNodeId !=
+                                                engine.nodeId)
+                                              FilledButton.tonalIcon(
+                                                style: FilledButton.styleFrom(
+                                                  backgroundColor:
+                                                      isOffenderBanned
+                                                          ? const Color(
+                                                              0xFF065F46)
+                                                          : const Color(
+                                                              0xFF7F1D1D),
+                                                  foregroundColor: Colors.white,
+                                                ),
+                                                icon: Icon(
+                                                  isOffenderBanned
+                                                      ? Icons.lock_open
+                                                      : Icons.gavel_rounded,
+                                                  size: 15,
+                                                ),
+                                                label: Text(
+                                                  isOffenderBanned
+                                                      ? 'Разбанить ${hit.offenderName}'
+                                                      : 'Забанить ${hit.offenderName}',
+                                                  style: const TextStyle(
+                                                      fontSize: 12),
+                                                ),
+                                                onPressed: () async {
+                                                  await engine
+                                                      .executeAdminBanOrUnban(
+                                                    targetNodeId:
+                                                        hit.offenderNodeId,
+                                                    ban: !isOffenderBanned,
+                                                  );
+                                                  if (mounted) setState(() {});
+                                                },
+                                              ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+
+                  // ВКЛАДКА 3: АПЕЛЛЯЦИИ (ЗАПИСКИ НА РАЗБАН)
+                  engine.banAppeals.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'Новых записок на разбан от заблокированных узлов нет.',
+                            style:
+                                TextStyle(color: Colors.white54, fontSize: 13),
+                          ),
+                        )
+                      : ListView.builder(
+                          padding: const EdgeInsets.all(14),
+                          itemCount: engine.banAppeals.length,
+                          itemBuilder: (_, i) {
+                            final ap = engine.banAppeals[i];
+                            final stillBanned = engine.isNodeBanned(ap.nodeId);
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: MayakTheme.bgSurface,
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(
+                                  color:
+                                      MayakTheme.accentAmber.withOpacity(0.4),
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.mail_lock_rounded,
+                                          color: MayakTheme.accentAmber,
+                                          size: 18),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          '${ap.nickname} (ID: ${ap.nodeId} • HW: ${ap.hwFingerprint})',
+                                          style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.all(10),
+                                    decoration: BoxDecoration(
+                                      color: MayakTheme.bgDeep,
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Text(
+                                      ap.appealText,
+                                      style: const TextStyle(
+                                          fontSize: 13, color: Colors.white),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: FilledButton.icon(
+                                      style: FilledButton.styleFrom(
+                                        backgroundColor: stillBanned
+                                            ? MayakTheme.accentEmerald
+                                            : Colors.grey,
+                                        foregroundColor: Colors.black,
+                                      ),
+                                      icon: const Icon(Icons.lock_open,
+                                          size: 16),
+                                      label: Text(stillBanned
+                                          ? 'Принять апелляцию и РАЗБАНИТЬ'
+                                          : 'Уже разбанен'),
+                                      onPressed: stillBanned
+                                          ? () async {
+                                              await engine
+                                                  .executeAdminBanOrUnban(
+                                                targetNodeId: ap.nodeId,
+                                                ban: false,
+                                              );
+                                              if (mounted) setState(() {});
+                                            }
+                                          : null,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildKpiBox({
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+        decoration: BoxDecoration(
+          color: MayakTheme.bgDeep,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(0.35)),
+        ),
+        child: Column(
+          children: [
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10, color: Colors.white60),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAdminNodeCard({
+    required String title,
+    required String nodeId,
+    required String hw,
+    required String osInfo,
+    required String ipAddr,
+    required String dhKey,
+    required String signKey,
+    required bool isOnline,
+    required int pingMs,
+    required bool isBanned,
+    required bool isSelf,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: MayakTheme.bgSurface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: isBanned
+              ? MayakTheme.accentRed.withOpacity(0.6)
+              : (isOnline
+                  ? MayakTheme.accentEmerald.withOpacity(0.4)
+                  : Colors.white12),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 11,
+                height: 11,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isBanned
+                      ? MayakTheme.accentRed
+                      : (isOnline ? MayakTheme.accentEmerald : Colors.grey),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: isBanned
+                      ? const Color(0xFF7F1D1D)
+                      : (isOnline
+                          ? const Color(0xFF065F46)
+                          : Colors.white10),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  isBanned ? 'ЗАБАНЕН' : (isOnline ? 'ОНЛАЙН' : 'ОФФЛАЙН'),
+                  style: const TextStyle(
+                      fontSize: 10, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SelectableText(
+            'ID узла: $nodeId • HW-ID: ${hw.isNotEmpty ? hw : "Н/Д"}\n'
+            'ОС / Устройство: ${osInfo.isNotEmpty ? osInfo : "Не определено"}\n'
+            'Адрес: ${ipAddr.isNotEmpty ? ipAddr : "Mesh"} ${pingMs >= 0 ? "• Ping: $pingMs мс" : ""}\n'
+            'X25519: $dhKey\n'
+            'Ed25519: $signKey',
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 11,
+              color: Colors.white70,
+              height: 1.35,
+            ),
+          ),
+          if (!isSelf) ...[
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: isBanned
+                        ? const Color(0xFF065F46)
+                        : const Color(0xFF7F1D1D),
+                    foregroundColor: Colors.white,
+                  ),
+                  icon: Icon(
+                    isBanned ? Icons.lock_open : Icons.gavel_rounded,
+                    size: 16,
+                  ),
+                  label: Text(
+                    isBanned ? 'РАЗБАНИТЬ УЗЕЛ' : 'ЗАБАНИТЬ В СЕТИ',
+                    style: const TextStyle(
+                        fontSize: 11, fontWeight: FontWeight.bold),
+                  ),
+                  onPressed: () async {
+                    await engine.executeAdminBanOrUnban(
+                      targetNodeId: nodeId,
+                      ban: !isBanned,
+                    );
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class ChatConversationScreen extends StatefulWidget {
+  final MeshEngine engine;
+  final String peerId;
+  final String initialTitle;
+  final bool isBroadcast;
+
+  const ChatConversationScreen({
+    super.key,
+    required this.engine,
+    required this.peerId,
+    required this.initialTitle,
+    required this.isBroadcast,
+  });
+
+  @override
+  State<ChatConversationScreen> createState() => _ChatConversationScreenState();
+}
+
+class _ChatConversationScreenState extends State<ChatConversationScreen> {
+  final TextEditingController _msgCtrl = TextEditingController();
+  final ScrollController _scrollCtrl = ScrollController();
+
+  MeshEngine get engine => widget.engine;
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onEngineUpdate);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onEngineUpdate);
+    _msgCtrl.dispose();
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onEngineUpdate() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  void _scrollToBottom() {
+    if (_scrollCtrl.hasClients) {
+      _scrollCtrl.animateTo(
+        _scrollCtrl.position.maxScrollExtent + 140,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  void _send() async {
+    final text = _msgCtrl.text.trim();
+    if (text.isEmpty) return;
+    _msgCtrl.clear();
+    await engine.sendMessage(widget.peerId, text);
+    _scrollToBottom();
+  }
+
+  void _pickAndSendFile({String mode = 'all'}) async {
+    final picked = await engine.pickFileForChat(mode: mode);
+    if (picked == null) return;
+    final path = (picked['path'] as String?) ?? '';
+    final name = (picked['name'] as String?) ?? 'file.bin';
+    final thumbB64 = (picked['thumbB64'] as String?) ?? '';
+    if (path.isEmpty) return;
+    await engine.sendFileMessage(
+      widget.peerId,
+      filePath: path,
+      fileName: name,
+      thumbB64Arg: thumbB64.isNotEmpty ? thumbB64 : null,
+    );
+    _scrollToBottom();
+  }
+
+  void _toggleVoiceRecording() async {
+    if (!engine.isRecordingVoice) {
+      final started = await engine.startVoiceRecording();
+      if (!started && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Не удалось запустить микрофон для записи')),
+        );
+      }
+    } else {
+      final voiceInfo = await engine.stopVoiceRecording();
+      if (voiceInfo != null) {
+        final path = (voiceInfo['path'] as String?) ?? '';
+        final name = (voiceInfo['name'] as String?) ?? 'Голосовое.m4a';
+        if (path.isNotEmpty) {
+          await engine.sendFileMessage(
+            widget.peerId,
+            filePath: path,
+            fileName: name,
+          );
+          _scrollToBottom();
+        }
+      }
+    }
+  }
+
+  /// ИСПРАВЛЕНИЕ ПУНКТА 9: Меню действий с сообщением (Реакции, Редактировать, Переслать, Удалить у всех, Копировать)
+  void _showMessageActionsSheet(ChatMessage m) {
+    const emojis = ['👍', '❤️', '🔥', '😂', '😮', '👏', '💯', '🤝'];
+    final canEdit = m.isMe && (m.fileName == null || m.fileName!.isEmpty);
+    final canDelete = m.isMe || engine.isAdminUnlocked;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Ряд быстрых реакций
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: emojis
+                      .map(
+                        (e) => InkWell(
+                          borderRadius: BorderRadius.circular(30),
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            engine.sendReaction(widget.peerId, m.msgId, e);
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.all(8.0),
+                            child: Text(e, style: const TextStyle(fontSize: 26)),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+              const Divider(height: 16),
+              if (canEdit)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.edit_rounded,
+                      color: MayakTheme.accentCyan),
+                  title: const Text('Редактировать сообщение'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showEditMessageDialog(m);
+                  },
+                ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.forward_rounded,
+                    color: MayakTheme.accentIndigo),
+                title: const Text('Переслать в другой чат'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showForwardMessagePicker(m);
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.copy_rounded, color: Colors.white70),
+                title: const Text('Скопировать текст'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Clipboard.setData(ClipboardData(text: m.text));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Текст скопирован')),
+                  );
+                },
+              ),
+              if (canDelete)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.delete_outline_rounded,
+                      color: MayakTheme.accentRed),
+                  title: const Text(
+                    'Удалить сообщение у всех',
+                    style: TextStyle(color: MayakTheme.accentRed),
+                  ),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await engine.deleteMessageForEveryone(
+                        widget.peerId, m.msgId);
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showEditMessageDialog(ChatMessage m) {
+    final editCtrl = TextEditingController(text: m.text);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        title: const Text('Редактировать сообщение',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        content: TextField(
+          controller: editCtrl,
+          autofocus: true,
+          maxLines: 4,
+          minLines: 1,
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: MayakTheme.bgDeep,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: MayakTheme.accentCyan,
+              foregroundColor: Colors.black,
+            ),
+            onPressed: () async {
+              final updated = editCtrl.text.trim();
+              if (updated.isNotEmpty) {
+                await engine.editMessage(widget.peerId, m.msgId, updated);
+              }
+              if (ctx.mounted) Navigator.pop(ctx);
+            },
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showForwardMessagePicker(ChatMessage m) {
+    final contacts = engine.knownContacts.values.toList();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Куда переслать сообщение?',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 10),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: MayakTheme.accentAmber,
+                  child: Icon(Icons.campaign_rounded, color: Colors.black),
+                ),
+                title: const Text('Общий эфир (Все рядом)'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await engine.forwardMessageToChat(
+                      m, MeshEngine.broadcastChannelId);
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                        content: Text('Сообщение переслано в Общий эфир')),
+                  );
+                },
+              ),
+              ...contacts.map(
+                (c) => ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: MayakTheme.accentIndigo,
+                    child: Text(c.displayTitle.characters.first.toUpperCase()),
+                  ),
+                  title: Text(c.displayTitle),
+                  subtitle: Text('ID: ${c.nodeId}'),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await engine.forwardMessageToChat(m, c.nodeId);
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                          content: Text(
+                              'Сообщение переслано контакту ${c.displayTitle}')),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showSafetyNumberDialog() async {
+    final code = await engine.computeSafetyNumber(widget.peerId);
+    if (!mounted) return;
+    final c = engine.knownContacts[widget.peerId];
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        title: const Row(
+          children: [
+            Icon(Icons.verified_user, color: MayakTheme.accentCyan),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Код безопасности E2EE',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Сверьте эти 4 группы цифр с собеседником. Если они совпадают — соединение на 100% защищено от перехвата (MITM):',
+              style: TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+              decoration: BoxDecoration(
+                color: MayakTheme.bgDeep,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                    color: MayakTheme.accentCyan.withOpacity(0.4)),
+              ),
+              child: Text(
+                code,
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: MayakTheme.accentCyan,
+                  letterSpacing: 1.4,
+                ),
+              ),
+            ),
+            if (c != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                'Ключ узла X25519:\n${c.dhPubHex.substring(0, 32)}...',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 10,
+                  color: Colors.white38,
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Понятно'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openInAppImageViewer(String imagePath, String title) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => InAppImageViewerScreen(
+          engine: engine,
+          imagePath: imagePath,
+          title: title,
+        ),
+      ),
+    );
+  }
+
+  void _openInAppVideoPlayer(
+      String videoPath, String title, String? thumbB64) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => InAppVideoPlayerScreen(
+          engine: engine,
+          videoPath: videoPath,
+          title: title,
+          thumbB64: thumbB64,
+        ),
+      ),
+    );
+  }
+
+  /// ИСПРАВЛЕНИЕ ПУНКТА 2: Отображение фото и видео с эффектом блюра как в Telegram и скачиванием по нажатию кнопки (без автосохранения превьюшек в Загрузки!)
+  Widget _buildInlineMediaPreview(ChatMessage m) {
+    final hasFileOnDisk =
+        m.filePath != null && File(m.filePath!).existsSync();
+    final hasThumbB64 = m.thumbB64 != null && m.thumbB64!.isNotEmpty;
+
+    Uint8List? thumbBytes;
+    if (hasThumbB64) {
+      try {
+        thumbBytes = base64Decode(m.thumbB64!);
+      } catch (_) {}
+    }
+
+    // 1. Встроенный аудиоплеер для голосовых и музыки (если еще не скачан — сначала кнопка Скачать!)
+    if (m.isAudioFile) {
+      if (!hasFileOnDisk) {
+        return Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton.filled(
+                style: IconButton.styleFrom(
+                  backgroundColor: MayakTheme.accentCyan,
+                  foregroundColor: Colors.black,
+                ),
+                icon: m.isDownloading
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.black),
+                      )
+                    : const Icon(Icons.download_rounded),
+                onPressed: m.isDownloading
+                    ? null
+                    : () => engine.requestDownloadOrRevealMedia(m),
+              ),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      m.fileName ?? 'Аудиозапись',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 12),
+                    ),
+                    Text(
+                      m.isDownloading
+                          ? 'Скачивание ${(m.transferProgress * 100).toInt()}%...'
+                          : 'Нажмите, чтобы скачать (${m.fileSizeFormatted})',
+                      style: const TextStyle(
+                          fontSize: 11, color: MayakTheme.accentCyan),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      final isThisPlaying =
+          engine.currentlyPlayingAudioPath == m.filePath &&
+              engine.isAudioPlaying;
+      final isThisLoaded = engine.currentlyPlayingAudioPath == m.filePath;
+      final curMs = isThisLoaded ? engine.audioPositionMs : 0;
+      final totMs = isThisLoaded ? max(engine.audioDurationMs, 1) : 1;
+      final progress =
+          isThisLoaded ? (curMs / totMs).clamp(0.0, 1.0) : 0.0;
+
+      return Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.black26,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color:
+                isThisPlaying ? MayakTheme.accentCyan : Colors.white12,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton.filled(
+                  style: IconButton.styleFrom(
+                    backgroundColor: isThisPlaying
+                        ? Colors.amber
+                        : MayakTheme.accentCyan,
+                    foregroundColor: Colors.black,
+                  ),
+                  icon: Icon(
+                      isThisPlaying ? Icons.pause : Icons.play_arrow),
+                  onPressed: () => engine.togglePlayAudioFile(m.filePath!),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        m.fileName ?? 'Аудиосообщение',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 12),
+                      ),
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 3,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6),
+                          overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 12),
+                        ),
+                        child: Slider(
+                          value: progress,
+                          activeColor: MayakTheme.accentCyan,
+                          inactiveColor: Colors.white24,
+                          onChanged: isThisLoaded
+                              ? (val) {
+                                  final target = (val * totMs).round();
+                                  engine.seekAudioFile(target);
+                                }
+                              : null,
+                        ),
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            isThisLoaded
+                                ? '${MeshEngine.formatDurationMs(curMs)} / ${MeshEngine.formatDurationMs(totMs)}'
+                                : m.fileSizeFormatted,
+                            style: const TextStyle(
+                                fontSize: 10, color: Colors.white70),
+                          ),
+                          InkWell(
+                            onTap: () async {
+                              final msg =
+                                  await engine.saveReceivedFileToDownloads(
+                                m.filePath!,
+                                m.fileName ?? 'audio.m4a',
+                              );
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text(msg)),
+                              );
+                            },
+                            child: const Text(
+                              '💾 В Загрузки',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: MayakTheme.accentCyan,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       );
     }
 
-    final fileReady = m.filePath != null && File(m.filePath!).existsSync();
-    final thumbReady = m.thumbPath != null && File(m.thumbPath!).existsSync();
-    final isThisAudioActive =
-        fileReady && _engine.currentlyPlayingAudioPath == m.filePath;
+    // 2. ФОТО ИЛИ ВИДЕО: Реализация с блюром как в Telegram (пока не нажата кнопка Скачать или после очистки кэша — висит блюр с кнопкой Скачать!)
+    if (m.isImageFile || m.isVideoFile) {
+      final bool showBlurredState = !m.isMediaRevealed || !hasFileOnDisk;
 
-    final isVisualMedia = m.isImageFile || m.isVideoFile;
-    final previewSourcePath = m.isImageFile
-        ? (fileReady ? m.filePath : (thumbReady ? m.thumbPath : null))
-        : (thumbReady ? m.thumbPath : null);
+      Widget backgroundWidget;
+      if (!showBlurredState && m.isImageFile && hasFileOnDisk) {
+        backgroundWidget = Image.file(
+          File(m.filePath!),
+          width: 245,
+          height: 185,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _buildFallbackMediaBox(m),
+        );
+      } else if (thumbBytes != null) {
+        backgroundWidget = Image.memory(
+          thumbBytes,
+          width: 245,
+          height: 185,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => _buildFallbackMediaBox(m),
+        );
+      } else if (m.isImageFile && hasFileOnDisk) {
+        backgroundWidget = Image.file(
+          File(m.filePath!),
+          width: 245,
+          height: 185,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _buildFallbackMediaBox(m),
+        );
+      } else {
+        backgroundWidget = _buildFallbackMediaBox(m);
+      }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (isVisualMedia)
-          ClipRRect(
+      return GestureDetector(
+        onTap: () {
+          if (showBlurredState) {
+            engine.requestDownloadOrRevealMedia(m);
+          } else if (m.isImageFile && hasFileOnDisk) {
+            _openInAppImageViewer(m.filePath!, m.fileName ?? 'Фото');
+          } else if (m.isVideoFile && hasFileOnDisk) {
+            _openInAppVideoPlayer(
+                m.filePath!, m.fileName ?? 'Видео', m.thumbB64);
+          }
+        },
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          width: 245,
+          decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
-            child: Container(
-              constraints: const BoxConstraints(
-                maxWidth: 290,
-                maxHeight: 240,
-                minHeight: 150,
-                minWidth: 240,
-              ),
-              color: const Color(0xFF0F172A),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  if (previewSourcePath != null)
-                    Positioned.fill(
-                      child: Image.file(
-                        File(previewSourcePath),
-                        fit: BoxFit.cover,
-                      ),
-                    )
-                  else
-                    Positioned.fill(
-                      child: Container(
-                        decoration: const BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
-                        ),
-                        child: Icon(
-                          m.isVideoFile ? Icons.movie_creation : Icons.image,
-                          size: 54,
-                          color: Colors.white24,
-                        ),
-                      ),
-                    ),
-
-                  // ЭФФЕКТ БЛЮРА В СТИЛЕ TELEGRAM (пока пользователь не нажал кнопку показа/скачивания)
-                  if (!m.isMediaRevealed || !fileReady)
-                    Positioned.fill(
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                        child: Container(
-                          color: Colors.black.withOpacity(0.35),
-                          alignment: Alignment.center,
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(30),
-                            onTap: () async {
-                              if (fileReady) {
-                                await _engine.revealMediaMessage(m);
-                              } else {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                        'Файл еще передается по сети или был очищен из кэша'),
-                                  ),
-                                );
-                              }
-                            },
+            color: Colors.black38,
+            border: Border.all(color: Colors.white12),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: 245,
+                height: 185,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    backgroundWidget,
+                    if (showBlurredState)
+                      ClipRect(
+                        child: BackdropFilter(
+                          filter: ui.ImageFilter.blur(
+                              sigmaX: 16.0, sigmaY: 16.0),
+                          child: Container(
+                            color: Colors.black.withOpacity(0.38),
+                            alignment: Alignment.center,
                             child: Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 16, vertical: 10),
+                                  horizontal: 14, vertical: 10),
                               decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.65),
-                                borderRadius: BorderRadius.circular(30),
+                                color: Colors.black.withOpacity(0.68),
+                                borderRadius: BorderRadius.circular(26),
                                 border: Border.all(
-                                    color: Colors.white24, width: 1.2),
+                                    color: MayakTheme.accentCyan,
+                                    width: 1.3),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(
-                                    m.transferProgress < 1.0
-                                        ? Icons.downloading
-                                        : Icons.visibility,
-                                    color: const Color(0xFF38BDF8),
-                                    size: 22,
-                                  ),
+                                  if (m.isDownloading)
+                                    const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: MayakTheme.accentCyan,
+                                      ),
+                                    )
+                                  else
+                                    Icon(
+                                      hasFileOnDisk
+                                          ? Icons.visibility_rounded
+                                          : Icons.download_rounded,
+                                      color: MayakTheme.accentCyan,
+                                      size: 20,
+                                    ),
                                   const SizedBox(width: 8),
                                   Text(
-                                    m.transferProgress < 1.0
-                                        ? 'Загрузка ${(m.transferProgress * 100).toInt()}% (${m.fileSizeFormatted})'
-                                        : (fileReady
-                                            ? 'Показать ${m.isVideoFile ? "видео" : "фото"} • ${m.fileSizeFormatted}'
-                                            : 'Очищено из кэша'),
+                                    m.isDownloading
+                                        ? 'Загрузка ${(m.transferProgress * 100).toInt()}%'
+                                        : (hasFileOnDisk
+                                            ? (m.isVideoFile
+                                                ? 'Показать видео'
+                                                : 'Показать фото')
+                                            : 'Скачать (${m.fileSizeFormatted})'),
                                     style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 12.5,
+                                      fontSize: 12,
                                       fontWeight: FontWeight.bold,
+                                      color: Colors.white,
                                     ),
                                   ),
                                 ],
@@ -2085,613 +2878,65 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ),
                         ),
-                      ),
-                    )
-                  else
-                    // Когда блюр снят: клик открывает фото в зуме или видео во встроенном плеере!
-                    Positioned.fill(
-                      child: Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          onTap: () {
-                            if (m.isImageFile) {
-                              _openFullScreenImage(m.filePath!, m.fileName!);
-                            } else if (m.isVideoFile) {
-                              _openInAppVideoPlayer(
-                                  m.filePath!, m.fileName!, m.thumbPath);
-                            }
-                          },
-                          child: m.isVideoFile
-                              ? Center(
-                                  child: Container(
-                                    padding: const EdgeInsets.all(14),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withOpacity(0.6),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                          color: const Color(0xFF38BDF8),
-                                          width: 2),
-                                    ),
-                                    child: const Icon(
-                                      Icons.play_arrow_rounded,
-                                      color: Colors.white,
-                                      size: 38,
-                                    ),
-                                  ),
-                                )
-                              : null,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        const SizedBox(height: 6),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.22),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (m.isAudioFile && fileReady)
-                    IconButton(
-                      icon: Icon(
-                        (isThisAudioActive && _engine.isAudioPlaying)
-                            ? Icons.pause_circle_filled
-                            : Icons.play_circle_fill,
-                        color: const Color(0xFF38BDF8),
-                        size: 34,
-                      ),
-                      tooltip: (isThisAudioActive && _engine.isAudioPlaying)
-                          ? 'Пауза'
-                          : 'Прослушать в программе',
-                      onPressed: () => _engine.togglePlayAudioFile(m.filePath!),
-                    )
-                  else if (m.isVideoFile && fileReady)
-                    IconButton(
-                      icon: const Icon(
-                        Icons.smart_display,
-                        color: Color(0xFF38BDF8),
-                        size: 32,
-                      ),
-                      tooltip: 'Смотреть видео во встроенном плеере',
-                      onPressed: () async {
-                        if (!m.isMediaRevealed) {
-                          await _engine.revealMediaMessage(m);
-                        }
-                        if (mounted) {
-                          _openInAppVideoPlayer(
-                              m.filePath!, m.fileName!, m.thumbPath);
-                        }
-                      },
-                    )
-                  else
-                    Icon(
-                      m.isImageFile
-                          ? Icons.photo_camera_back
-                          : (m.isVideoFile
-                              ? Icons.videocam
-                              : (m.isAudioFile
-                                  ? Icons.audiotrack
-                                  : Icons.insert_drive_file)),
-                      color: const Color(0xFF38BDF8),
-                      size: 24,
-                    ),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          m.fileName!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
+                      )
+                    else if (m.isVideoFile)
+                      Center(
+                        child: Container(
+                          width: 56,
+                          height: 56,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.65),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color: MayakTheme.accentCyan, width: 2),
+                          ),
+                          child: const Icon(
+                            Icons.play_arrow_rounded,
+                            size: 38,
+                            color: MayakTheme.accentCyan,
                           ),
                         ),
-                        Text(
-                          m.transferProgress < 1.0
-                              ? (m.transferProgress <= 0.0
-                                  ? '${m.fileSizeFormatted} • ⏳ В очереди буфера'
-                                  : '${m.fileSizeFormatted} • Передача ${(m.transferProgress * 100).toInt()}%')
-                              : m.fileSizeFormatted,
-                          style: const TextStyle(
-                              fontSize: 11, color: Colors.white70),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (fileReady) ...[
-                    const SizedBox(width: 6),
-                    FilledButton.tonalIcon(
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                        minimumSize: const Size(0, 32),
-                        backgroundColor: Colors.white.withOpacity(0.1),
                       ),
-                      onPressed: () async {
-                        final res = await _engine.saveReceivedFileToDownloads(
-                          m.filePath!,
-                          m.fileName!,
-                        );
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text(res)),
-                        );
-                      },
-                      icon: const Icon(Icons.download_rounded,
-                          size: 16, color: Color(0xFF38BDF8)),
-                      label: const Text(
-                        'На устройство',
-                        style: TextStyle(fontSize: 11, color: Colors.white),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              if (m.isAudioFile && isThisAudioActive)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Column(
-                    children: [
-                      SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          trackHeight: 3,
-                          thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 6),
-                        ),
-                        child: Slider(
-                          value: _engine.audioPositionMs
-                              .toDouble()
-                              .clamp(0.0, _engine.audioDurationMs.toDouble()),
-                          min: 0.0,
-                          max: max(_engine.audioDurationMs.toDouble(), 1.0),
-                          activeColor: const Color(0xFF38BDF8),
-                          inactiveColor: Colors.white24,
-                          onChanged: (val) {
-                            _engine.seekAudioFile(val.round());
-                          },
-                        ),
-                      ),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            MeshEngine.formatDurationMs(
-                                _engine.audioPositionMs),
-                            style: const TextStyle(
-                                fontSize: 10.5, color: Colors.white70),
-                          ),
-                          Text(
-                            MeshEngine.formatDurationMs(
-                                _engine.audioDurationMs),
-                            style: const TextStyle(
-                                fontSize: 10.5, color: Colors.white70),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-        ),
-        if (m.transferProgress > 0.0 && m.transferProgress < 1.0)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: LinearProgressIndicator(
-              value: m.transferProgress,
-              backgroundColor: Colors.white12,
-              color: const Color(0xFF38BDF8),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildConversationPane({required bool showBackButton}) {
-    final chatId = _activeChatId;
-    if (chatId == null) {
-      return Center(
-        child: Container(
-          padding: const EdgeInsets.all(28),
-          margin: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: const Color(0xFF131B2B),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: const Color(0xFF1E293B)),
-          ),
-          child: const Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.forum_outlined, size: 52, color: Color(0xFF38BDF8)),
-              SizedBox(height: 12),
-              Text(
-                'Выберите диалог слева или подключите друга',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-              ),
-              SizedBox(height: 6),
-              Text(
-                'Все сообщения, голосовые, фото и видео до 1 ГБ\nзащищены сквозным шифрованием E2EE v2.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white54, fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    final isBroadcast = chatId == MeshEngine.broadcastChannelId;
-    final contact = isBroadcast ? null : _engine.knownContacts[chatId];
-    final title = isBroadcast
-        ? 'Общий эфир (Всем рядом)'
-        : (contact?.displayTitle ?? 'Узел $chatId');
-    final subtitle = isBroadcast
-        ? 'Видят все устройства поблизости (Онлайн: ${_engine.connectedPeersCount})'
-        : (contact?.isOnline == true
-            ? '🟢 Прямая связь (${contact?.lastAddress ?? "P2P"}) • До 1 ГБ'
-            : '🟠 Оффлайн-буфер (автоматическая отправка при подключении)');
-
-    final messages = _engine.getMessagesFor(chatId);
-    final grad = _avatarGradientFor(chatId);
-
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-          decoration: const BoxDecoration(
-            color: Color(0xFF131B2B),
-            border: Border(bottom: BorderSide(color: Color(0xFF1E293B))),
-          ),
-          child: Row(
-            children: [
-              if (showBackButton)
-                IconButton(
-                  icon: const Icon(Icons.arrow_back_ios_new, size: 18),
-                  tooltip: 'Назад к чатам',
-                  onPressed: _closeChatToHome,
-                ),
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: isBroadcast
-                        ? [const Color(0xFFF59E0B), const Color(0xFFEA580C)]
-                        : grad,
-                  ),
-                  borderRadius: BorderRadius.circular(13),
-                ),
-                child: Center(
-                  child: isBroadcast
-                      ? const Icon(Icons.podcasts,
-                          color: Colors.white, size: 20)
-                      : Text(
-                          title.isNotEmpty ? title[0].toUpperCase() : '?',
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16),
-                        ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 15),
-                    ),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          const TextStyle(fontSize: 11.5, color: Colors.white60),
-                    ),
                   ],
                 ),
               ),
-              if (!isBroadcast && contact != null) ...[
-                IconButton(
-                  icon: const Icon(Icons.verified_user_outlined,
-                      color: Color(0xFF38BDF8), size: 20),
-                  tooltip: 'Код безопасности E2EE',
-                  onPressed: () => _showSafetyNumberDialog(contact),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline,
-                      color: Colors.white54, size: 20),
-                  tooltip: 'Очистить или удалить чат',
-                  onPressed: () => _confirmDeleteContact(contact),
-                ),
-              ],
-            ],
-          ),
-        ),
-        Expanded(
-          child: messages.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      isBroadcast
-                          ? 'Здесь отображаются открытые сообщения и реакции для всех вокруг.'
-                          : 'Защищенный E2EE v2 диалог с «$title».\nОтправляйте текст, смайлики 😊, голосовые 🎤, музыку 🎵, фото и видео до 1 ГБ 🎬.\nФайлы, прикрепленные оффлайн, автоматически уйдут при появлении собеседника!',
-                      textAlign: TextAlign.center,
-                      style:
-                          const TextStyle(color: Colors.white38, fontSize: 13),
-                    ),
-                  ),
-                )
-              : ListView.builder(
-                  controller: _chatScrollCtrl,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  itemCount: messages.length,
-                  itemBuilder: (_, i) {
-                    final m = messages[i];
-                    final align = m.isMe
-                        ? CrossAxisAlignment.end
-                        : CrossAxisAlignment.start;
-
-                    final reactionCounts = <String, int>{};
-                    for (final emoji in m.reactions.values) {
-                      reactionCounts[emoji] = (reactionCounts[emoji] ?? 0) + 1;
-                    }
-
-                    return Column(
-                      crossAxisAlignment: align,
-                      children: [
-                        GestureDetector(
-                          onTap: () => _showReactionPicker(m),
-                          onLongPress: () => _showReactionPicker(m),
-                          child: Container(
-                            constraints: const BoxConstraints(maxWidth: 350),
-                            margin: const EdgeInsets.symmetric(vertical: 5),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 13, vertical: 9),
-                            decoration: BoxDecoration(
-                              gradient: m.isMe
-                                  ? const LinearGradient(
-                                      colors: [
-                                        Color(0xFF4F46E5),
-                                        Color(0xFF0284C7),
-                                      ],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                    )
-                                  : null,
-                              color: m.isMe ? null : const Color(0xFF182234),
-                              borderRadius: BorderRadius.only(
-                                topLeft: const Radius.circular(18),
-                                topRight: const Radius.circular(18),
-                                bottomLeft:
-                                    Radius.circular(m.isMe ? 18 : 4),
-                                bottomRight:
-                                    Radius.circular(m.isMe ? 4 : 18),
-                              ),
-                              border: m.isMe
-                                  ? null
-                                  : Border.all(
-                                      color: const Color(0xFF28354A)),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                if (!m.isMe && isBroadcast)
-                                  Padding(
-                                    padding: const EdgeInsets.only(bottom: 4),
-                                    child: Text(
-                                      m.senderName,
-                                      style: const TextStyle(
-                                        fontSize: 11.5,
-                                        fontWeight: FontWeight.bold,
-                                        color: Color(0xFF38BDF8),
-                                      ),
-                                    ),
-                                  ),
-                                _buildMessageContent(m),
-                                if (reactionCounts.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 6),
-                                    child: Wrap(
-                                      spacing: 4,
-                                      runSpacing: 4,
-                                      children: reactionCounts.entries
-                                          .map(
-                                            (e) => Container(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      horizontal: 8,
-                                                      vertical: 3),
-                                              decoration: BoxDecoration(
-                                                color: Colors.black38,
-                                                borderRadius:
-                                                    BorderRadius.circular(12),
-                                              ),
-                                              child: Text(
-                                                e.value > 1
-                                                    ? '${e.key} ${e.value}'
-                                                    : e.key,
-                                                style: const TextStyle(
-                                                    fontSize: 13),
-                                              ),
-                                            ),
-                                          )
-                                          .toList(),
-                                    ),
-                                  ),
-                                const SizedBox(height: 4),
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
-                                    Text(
-                                      m.timeFormatted,
-                                      style: const TextStyle(
-                                          fontSize: 10.5,
-                                          color: Colors.white70),
-                                    ),
-                                    if (m.isMe) ...[
-                                      const SizedBox(width: 5),
-                                      Icon(
-                                        m.isDelivered
-                                            ? Icons.done_all
-                                            : Icons.schedule,
-                                        size: 14,
-                                        color: m.isDelivered
-                                            ? const Color(0xFF7DD3FC)
-                                            : Colors.white60,
-                                      ),
-                                    ],
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
-        ),
-        if (_engine.isSelfBanned)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            color: const Color(0xFF3B1219),
-            child: Row(
-              children: [
-                const Icon(Icons.lock_person, color: Colors.redAccent),
-                const SizedBox(width: 10),
-                const Expanded(
-                  child: Text(
-                    'Отправка сообщений заблокирована администратором сети.',
-                    style: TextStyle(fontSize: 12.5, color: Colors.white),
-                  ),
-                ),
-                FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                      backgroundColor: Colors.redAccent),
-                  onPressed: _showBanAppealDialog,
-                  icon: const Icon(Icons.edit_note, size: 18),
-                  label: const Text('Написать записку на разбан'),
-                ),
-              ],
-            ),
-          )
-        else
-          ChatInputBar(
-            hintText: isBroadcast
-                ? 'Сообщение в Общий эфир...'
-                : 'Написать для $title...',
-            allowAttachments: !isBroadcast,
-            isRecordingVoice: _engine.isRecordingVoice,
-            onSend: _sendTextMessage,
-            onPickMedia: () => _pickAndSendAttachment('media'),
-            onPickAudio: () => _pickAndSendAttachment('audio'),
-            onPickFile: () => _pickAndSendAttachment('all'),
-            onToggleVoiceRecord: _toggleVoiceNoteRecording,
-          ),
-      ],
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final isWideScreen = constraints.maxWidth >= 720;
-
-        return PopScope(
-          canPop: isWideScreen || _activeChatId == null,
-          onPopInvokedWithResult: (didPop, _) {
-            if (!didPop && _activeChatId != null && !isWideScreen) {
-              _closeChatToHome();
-            }
-          },
-          child: Scaffold(
-            appBar: AppBar(
-              title: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: _showEditProfileDialog,
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              if (hasFileOnDisk && !showBlurredState)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 6),
+                  color: Colors.black45,
                   child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Container(
-                        width: 34,
-                        height: 34,
-                        decoration: BoxDecoration(
-                          gradient: const LinearGradient(
-                            colors: [Color(0xFF6366F1), Color(0xFF38BDF8)],
-                          ),
-                          borderRadius: BorderRadius.circular(11),
-                        ),
-                        child: Center(
-                          child: Text(
-                            _engine.nickname.isNotEmpty
-                                ? _engine.nickname[0].toUpperCase()
-                                : 'М',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
-                          ),
-                        ),
+                      Text(
+                        m.fileSizeFormatted,
+                        style: const TextStyle(
+                            fontSize: 10, color: Colors.white70),
                       ),
-                      const SizedBox(width: 10),
-                      Flexible(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                      InkWell(
+                        onTap: () async {
+                          final msg =
+                              await engine.saveReceivedFileToDownloads(
+                            m.filePath!,
+                            m.fileName ?? 'media_file',
+                          );
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(msg)),
+                          );
+                        },
+                        child: const Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    _engine.nickname.isEmpty
-                                        ? 'Маяк P2P'
-                                        : _engine.nickname,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 15.5,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 4),
-                                const Icon(Icons.edit_outlined,
-                                    size: 14, color: Colors.white54),
-                              ],
-                            ),
+                            Icon(Icons.save_alt_rounded,
+                                size: 14, color: MayakTheme.accentCyan),
+                            SizedBox(width: 4),
                             Text(
-                              'ID: ${_engine.nodeId}',
-                              style: const TextStyle(
-                                fontSize: 10.5,
-                                color: Color(0xFF38BDF8),
-                                fontFamily: 'monospace',
+                              'В Загрузки',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: MayakTheme.accentCyan,
+                                fontWeight: FontWeight.bold,
                               ),
                             ),
                           ],
@@ -2700,138 +2945,708 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 ),
-              ),
-              actions: [
-                IconButton(
-                  icon: const Icon(Icons.speed, color: Color(0xFF38BDF8)),
-                  tooltip: 'Бенчмарк и Пинг',
-                  onPressed: _showBenchmarkModal,
+            ],
+          ),
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+
+  Widget _buildFallbackMediaBox(ChatMessage m) {
+    return Container(
+      width: 245,
+      height: 185,
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      alignment: Alignment.center,
+      child: Icon(
+        m.isVideoFile ? Icons.movie_creation_outlined : Icons.image_outlined,
+        size: 54,
+        color: Colors.white24,
+      ),
+    );
+  }
+
+  Widget _buildFileBubble(ChatMessage m) {
+    final isMedia = m.isImageFile || m.isVideoFile || m.isAudioFile;
+    final hasFileOnDisk =
+        m.filePath != null && File(m.filePath!).existsSync();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (isMedia) _buildInlineMediaPreview(m),
+        if (!isMedia)
+          Container(
+            margin: const EdgeInsets.only(bottom: 4),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.black26,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      hasFileOnDisk
+                          ? Icons.insert_drive_file_rounded
+                          : Icons.cloud_download_rounded,
+                      color: MayakTheme.accentCyan,
+                      size: 28,
+                    ),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            m.fileName ?? 'Файл',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
+                          Text(
+                            m.isDownloading
+                                ? 'Скачивание ${(m.transferProgress * 100).toInt()}% (${m.fileSizeFormatted})'
+                                : (hasFileOnDisk
+                                    ? 'Скачан в кэш (${m.fileSizeFormatted})'
+                                    : 'Доступен для скачивания (${m.fileSizeFormatted})'),
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.white70),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  icon: const Icon(Icons.person_add_alt_1),
-                  tooltip: 'Добавить по IP или коду',
-                  onPressed: _showAddContactModal,
-                ),
-                IconButton(
-                  icon: _engine.isScanningSubnet
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.radar),
-                  tooltip: 'Поиск узлов в Wi-Fi / Точке доступа',
-                  onPressed: () => _engine.scanLocalSubnet(),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.qr_code),
-                  tooltip: 'Мой QR-код',
-                  onPressed: _showMyQrModal,
-                ),
-                if (Platform.isAndroid || Platform.isIOS)
-                  IconButton(
-                    icon: const Icon(Icons.qr_code_scanner),
-                    tooltip: 'Сканировать QR камерой',
-                    onPressed: _openQrScanner,
+                if (m.isDownloading) ...[
+                  const SizedBox(height: 8),
+                  LinearProgressIndicator(
+                    value: m.transferProgress,
+                    backgroundColor: Colors.white12,
+                    color: MayakTheme.accentCyan,
                   ),
-                IconButton(
-                  icon: const Icon(Icons.tune, color: Color(0xFF38BDF8)),
-                  tooltip: 'Настройки, Очистка кэша и Выход',
-                  onPressed: _showTutorialAndAutoSetupModal,
-                ),
-                IconButton(
-                  icon: const Icon(Icons.terminal),
-                  tooltip: 'Журнал сети',
-                  onPressed: _showLogsModal,
+                ],
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: [
+                    if (!hasFileOnDisk && !m.isDownloading)
+                      FilledButton.tonalIcon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: MayakTheme.accentCyan,
+                          foregroundColor: Colors.black,
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: const Icon(Icons.download_rounded, size: 16),
+                        label: const Text('Скачать файл',
+                            style: TextStyle(
+                                fontSize: 12, fontWeight: FontWeight.bold)),
+                        onPressed: () =>
+                            engine.requestDownloadOrRevealMedia(m),
+                      ),
+                    if (hasFileOnDisk) ...[
+                      FilledButton.tonalIcon(
+                        style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: const Icon(Icons.open_in_new, size: 15),
+                        label: const Text('Открыть',
+                            style: TextStyle(fontSize: 12)),
+                        onPressed: () =>
+                            engine.openFileExternal(m.filePath!),
+                      ),
+                      OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: const Icon(Icons.download, size: 15),
+                        label: const Text('В Загрузки',
+                            style: TextStyle(fontSize: 12)),
+                        onPressed: () async {
+                          final msg =
+                              await engine.saveReceivedFileToDownloads(
+                            m.filePath!,
+                            m.fileName ?? 'mayak_file',
+                          );
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(msg)),
+                          );
+                        },
+                      ),
+                    ],
+                  ],
                 ),
               ],
             ),
-            body: isWideScreen
-                ? Row(
-                    children: [
-                      SizedBox(
-                        width: 350,
-                        child: _buildChatsListPane(isWideScreen: true),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final contact = engine.knownContacts[widget.peerId];
+    final title =
+        widget.isBroadcast ? widget.initialTitle : (contact?.displayTitle ?? widget.initialTitle);
+    final isOnline =
+        widget.isBroadcast ? engine.connectedPeersCount > 0 : (contact?.isOnline ?? false);
+    final messages = engine.getMessagesFor(widget.peerId);
+    final selfBanned = engine.isSelfBanned;
+
+    return Scaffold(
+      appBar: AppBar(
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF111827), Color(0xFF1E1B4B)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        titleSpacing: 0,
+        title: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                gradient: widget.isBroadcast
+                    ? const LinearGradient(
+                        colors: [Color(0xFFD97706), Color(0xFFF59E0B)])
+                    : MayakTheme.primaryGradient,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              alignment: Alignment.center,
+              child: widget.isBroadcast
+                  ? const Icon(Icons.campaign_rounded,
+                      color: Colors.black, size: 22)
+                  : Text(
+                      title.characters.first.toUpperCase(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
                       ),
-                      const VerticalDivider(
-                          width: 1, color: Color(0xFF1E293B)),
-                      Expanded(
-                        child: _buildConversationPane(showBackButton: false),
+                    ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                  Text(
+                    widget.isBroadcast
+                        ? 'Подключено узлов рядом: ${engine.connectedPeersCount}'
+                        : (isOnline
+                            ? 'В сети (${contact?.lastAddress ?? "прямой канал"}) • E2EE'
+                            : 'Оффлайн (доставка через буфер при появлении в сети)'),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isOnline
+                          ? MayakTheme.accentEmerald
+                          : Colors.white54,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          if (!widget.isBroadcast)
+            IconButton(
+              tooltip: 'Проверить код безопасности E2EE',
+              icon: const Icon(Icons.verified_user_outlined,
+                  color: MayakTheme.accentCyan),
+              onPressed: _showSafetyNumberDialog,
+            ),
+          PopupMenuButton<String>(
+            onSelected: (val) async {
+              if (val == 'clear') {
+                await engine.clearChatHistoryOnly(widget.peerId);
+              } else if (val == 'delete' && !widget.isBroadcast) {
+                await engine.deleteContact(widget.peerId);
+                if (mounted) Navigator.of(context).pop();
+              }
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                value: 'clear',
+                child: Row(
+                  children: [
+                    Icon(Icons.cleaning_services_outlined,
+                        size: 18, color: Colors.amber),
+                    SizedBox(width: 8),
+                    Text('Очистить историю сообщений'),
+                  ],
+                ),
+              ),
+              if (!widget.isBroadcast)
+                const PopupMenuItem(
+                  value: 'delete',
+                  child: Row(
+                    children: [
+                      Icon(Icons.delete_forever,
+                          size: 18, color: Colors.redAccent),
+                      SizedBox(width: 8),
+                      Text(
+                        'Удалить контакт и чат',
+                        style: TextStyle(color: Colors.redAccent),
                       ),
                     ],
-                  )
-                : (_activeChatId == null
-                    ? _buildChatsListPane(isWideScreen: false)
-                    : _buildConversationPane(showBackButton: true)),
+                  ),
+                ),
+            ],
           ),
-        );
-      },
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: messages.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        widget.isBroadcast
+                            ? 'Напишите сообщение в Общий эфир — его получат все устройства поблизости.'
+                            : 'Сквозное шифрование (X25519 + ChaCha20-Poly1305) активно.\nМожно отправлять текст, фото, видео, голосовые и файлы до 1 ГБ!\nНажмите на сообщение для реакций, редактирования, пересылки или удаления.',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 13),
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _scrollCtrl,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    itemCount: messages.length,
+                    itemBuilder: (_, i) {
+                      final m = messages[i];
+                      final hasReaction = m.reactions.isNotEmpty;
+                      return Align(
+                        alignment: m.isMe
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: GestureDetector(
+                          onTap: () => _showMessageActionsSheet(m),
+                          onLongPress: () => _showMessageActionsSheet(m),
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            constraints: BoxConstraints(
+                              maxWidth:
+                                  MediaQuery.of(context).size.width * 0.80,
+                            ),
+                            decoration: BoxDecoration(
+                              gradient:
+                                  m.isMe ? MayakTheme.myBubbleGradient : null,
+                              color: m.isMe ? null : MayakTheme.bgSurface,
+                              borderRadius: BorderRadius.only(
+                                topLeft: const Radius.circular(18),
+                                topRight: const Radius.circular(18),
+                                bottomLeft:
+                                    Radius.circular(m.isMe ? 18 : 4),
+                                bottomRight:
+                                    Radius.circular(m.isMe ? 4 : 18),
+                              ),
+                              border: Border.all(
+                                color: m.isMe
+                                    ? MayakTheme.accentCyan.withOpacity(0.25)
+                                    : Colors.white10,
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: m.isMe
+                                  ? CrossAxisAlignment.end
+                                  : CrossAxisAlignment.start,
+                              children: [
+                                if (!m.isMe && widget.isBroadcast)
+                                  Padding(
+                                    padding:
+                                        const EdgeInsets.only(bottom: 3),
+                                    child: Text(
+                                      m.senderName,
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: MayakTheme.accentAmber,
+                                      ),
+                                    ),
+                                  ),
+                                if (m.forwardedFrom != null &&
+                                    m.forwardedFrom!.isNotEmpty)
+                                  Container(
+                                    margin: const EdgeInsets.only(bottom: 5),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black26,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: const Border(
+                                        left: BorderSide(
+                                          color: MayakTheme.accentCyan,
+                                          width: 2.5,
+                                        ),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      '↪ Переслано от: ${m.forwardedFrom}',
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontStyle: FontStyle.italic,
+                                        color: MayakTheme.accentCyan,
+                                      ),
+                                    ),
+                                  ),
+                                if (m.fileName != null &&
+                                    m.fileName!.isNotEmpty)
+                                  _buildFileBubble(m)
+                                else
+                                  Text(
+                                    m.text,
+                                    style: const TextStyle(fontSize: 15),
+                                  ),
+                                const SizedBox(height: 4),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      m.isEdited
+                                          ? '${m.timeFormatted} (изм.)'
+                                          : m.timeFormatted,
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.white60,
+                                      ),
+                                    ),
+                                    if (m.isMe) ...[
+                                      const SizedBox(width: 4),
+                                      Icon(
+                                        m.isDelivered
+                                            ? Icons.done_all
+                                            : Icons.schedule,
+                                        size: 14,
+                                        color: m.isDelivered
+                                            ? MayakTheme.accentCyan
+                                            : Colors.amberAccent,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                                if (hasReaction) ...[
+                                  const SizedBox(height: 4),
+                                  Wrap(
+                                    spacing: 4,
+                                    children: m.reactions.values
+                                        .toSet()
+                                        .map((emoji) {
+                                      final count = m.reactions.values
+                                          .where((v) => v == emoji)
+                                          .length;
+                                      return Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black38,
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        child: Text(
+                                          count > 1
+                                              ? '$emoji $count'
+                                              : emoji,
+                                          style: const TextStyle(
+                                              fontSize: 12),
+                                        ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          SafeArea(
+            child: selfBanned
+                ? Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    color: const Color(0xFF450A0A),
+                    child: const Text(
+                      '🚫 Ваш узел заблокирован администратором сети. Отправка сообщений в чаты недоступна.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  )
+                : Container(
+                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                    decoration: const BoxDecoration(
+                      color: MayakTheme.bgSurface,
+                      border: Border(
+                        top: BorderSide(color: Colors.white10),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        if (!widget.isBroadcast) ...[
+                          PopupMenuButton<String>(
+                            tooltip: 'Прикрепить медиа или файл',
+                            icon: const Icon(Icons.attach_file,
+                                color: MayakTheme.accentCyan),
+                            onSelected: (mode) =>
+                                _pickAndSendFile(mode: mode),
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(
+                                value: 'media',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.perm_media,
+                                        color: MayakTheme.accentCyan,
+                                        size: 18),
+                                    SizedBox(width: 8),
+                                    Text('Фото или Видео'),
+                                  ],
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: 'audio',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.audiotrack,
+                                        color: Colors.amber, size: 18),
+                                    SizedBox(width: 8),
+                                    Text('Аудио / Музыка'),
+                                  ],
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: 'all',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.folder_open,
+                                        color: Colors.lightBlueAccent,
+                                        size: 18),
+                                    SizedBox(width: 8),
+                                    Text('Любой файл / Документ'),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            tooltip: engine.isRecordingVoice
+                                ? 'Нажмите, чтобы остановить и отправить голосовое'
+                                : 'Записать голосовое сообщение',
+                            onPressed: _toggleVoiceRecording,
+                            icon: Icon(
+                              engine.isRecordingVoice
+                                  ? Icons.stop_circle
+                                  : Icons.mic,
+                              color: engine.isRecordingVoice
+                                  ? Colors.redAccent
+                                  : Colors.amberAccent,
+                            ),
+                          ),
+                        ],
+                        Expanded(
+                          child: TextField(
+                            controller: _msgCtrl,
+                            onSubmitted: (_) => _send(),
+                            decoration: InputDecoration(
+                              hintText: engine.isRecordingVoice
+                                  ? '🔴 Идет запись голоса... Нажмите Стоп'
+                                  : (widget.isBroadcast
+                                      ? 'Сообщение в общий эфир...'
+                                      : 'Зашифрованное сообщение...'),
+                              isDense: true,
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 11),
+                              filled: true,
+                              fillColor: MayakTheme.bgDeep,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(22),
+                                borderSide: BorderSide.none,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        IconButton.filled(
+                          style: IconButton.styleFrom(
+                            backgroundColor: MayakTheme.accentCyan,
+                            foregroundColor: Colors.black,
+                          ),
+                          onPressed: _send,
+                          icon: const Icon(Icons.send_rounded),
+                        ),
+                      ],
+                    ),
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// ПОЛНОЦЕННЫЙ ВСТРОЕННЫЙ ВИДЕОПЛЕЕР (На Android через Texture, на Windows ПК через встроенный .NET WPF Frame+Audio Streamer без внешних окон + показ превью-кадра после окончания видео!)
+class InAppImageViewerScreen extends StatelessWidget {
+  final MeshEngine engine;
+  final String imagePath;
+  final String title;
+
+  const InAppImageViewerScreen({
+    super.key,
+    required this.engine,
+    required this.imagePath,
+    required this.title,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fileName = imagePath.split(RegExp(r'[\\/]')).last;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black87,
+        title: Text(title, style: const TextStyle(fontSize: 15)),
+        actions: [
+          IconButton(
+            tooltip: 'Сохранить в Загрузки',
+            icon: const Icon(Icons.download, color: MayakTheme.accentCyan),
+            onPressed: () async {
+              final res = await engine.saveReceivedFileToDownloads(
+                  imagePath, fileName);
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(res)),
+              );
+            },
+          ),
+          IconButton(
+            tooltip: 'Открыть во внешнем приложении',
+            icon: const Icon(Icons.open_in_new),
+            onPressed: () => engine.openFileExternal(imagePath),
+          ),
+        ],
+      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) => InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 6.0,
+          child: SizedBox(
+            width: constraints.maxWidth,
+            height: constraints.maxHeight,
+            child: Image.file(
+              File(imagePath),
+              fit: BoxFit.contain,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ИСПРАВЛЕНИЕ ПУНКТА 1: Встроенный видеоплеер для Windows ПК и Android (рабочий рендер кадров через скрытое окно WPF MediaElement + локальный TCP-сокет без блокировки stdin!)
 class InAppVideoPlayerScreen extends StatefulWidget {
   final MeshEngine engine;
   final String videoPath;
   final String title;
-  final String? initialThumbPath;
+  final String? thumbB64;
 
   const InAppVideoPlayerScreen({
     super.key,
     required this.engine,
     required this.videoPath,
     required this.title,
-    this.initialThumbPath,
+    this.thumbB64,
   });
 
   @override
-  State<InAppVideoPlayerScreen> createState() => _InAppVideoPlayerScreenState();
+  State<InAppVideoPlayerScreen> createState() =>
+      _InAppVideoPlayerScreenState();
 }
 
 class _InAppVideoPlayerScreenState extends State<InAppVideoPlayerScreen> {
   int? _textureId;
-  int _videoWidth = 1280;
-  int _videoHeight = 720;
+  int _videoWidth = 640;
+  int _videoHeight = 360;
   int _positionMs = 0;
   int _durationMs = 1;
   bool _isPlaying = true;
   bool _isCompleted = false;
   bool _loading = true;
-  String? _thumbPath;
+  Timer? _pollTimer;
 
-  Timer? _androidPollTimer;
+  // Переменные для встроенного рендера видео на Windows ПК (через локальный неблокирующий TCP-канал к WPF MediaElement)
+  ServerSocket? _winCmdServer;
+  Socket? _winClientSocket;
   Process? _winVideoProc;
-  Uint8List? _winCurrentFrameBytes;
+  Uint8List? _currentWinFrameBytes;
+  Uint8List? _fallbackThumbBytes;
 
   @override
   void initState() {
     super.initState();
-    _thumbPath = widget.initialThumbPath;
+    if (widget.thumbB64 != null && widget.thumbB64!.isNotEmpty) {
+      try {
+        _fallbackThumbBytes = base64Decode(widget.thumbB64!);
+      } catch (_) {}
+    }
     _initVideo();
   }
 
   Future<void> _initVideo() async {
-    if (_thumbPath == null || !File(_thumbPath!).existsSync()) {
-      _thumbPath = await widget.engine.extractVideoThumbnail(widget.videoPath);
-    }
-
     if (Platform.isAndroid) {
-      final res = await widget.engine.nativeChannel
+      final info = await widget.engine.nativeChannel
           .invokeMapMethod<String, dynamic>(
         'initInAppVideo',
         {'path': widget.videoPath},
       );
       if (!mounted) return;
-      if (res != null) {
+      if (info != null) {
         setState(() {
-          _textureId = res['textureId'] as int?;
-          _videoWidth = (res['width'] as int?) ?? 1280;
-          _videoHeight = (res['height'] as int?) ?? 720;
-          _durationMs = max((res['durationMs'] as int?) ?? 1, 1);
+          _textureId = (info['textureId'] as num?)?.toInt();
+          _videoWidth = max((info['width'] as num?)?.toInt() ?? 640, 1);
+          _videoHeight = max((info['height'] as num?)?.toInt() ?? 360, 1);
+          _durationMs = max((info['durationMs'] as num?)?.toInt() ?? 1, 1);
+          _isPlaying = true;
+          _isCompleted = false;
           _loading = false;
         });
-        _androidPollTimer =
+        _pollTimer =
             Timer.periodic(const Duration(milliseconds: 250), (_) async {
           final st = await widget.engine.nativeChannel
               .invokeMapMethod<String, dynamic>(
@@ -2839,15 +3654,12 @@ class _InAppVideoPlayerScreenState extends State<InAppVideoPlayerScreen> {
             {'action': 'status', 'positionMs': 0},
           );
           if (!mounted || st == null) return;
-          final playing = (st['isPlaying'] as bool?) ?? false;
-          final completed = (st['isCompleted'] as bool?) ?? false;
-          final pos = (st['positionMs'] as int?) ?? 0;
-          final dur = max((st['durationMs'] as int?) ?? 1, 1);
           setState(() {
-            _isPlaying = playing;
-            _isCompleted = completed || (!playing && pos >= dur - 250);
-            _positionMs = pos;
-            _durationMs = dur;
+            _isPlaying = (st['isPlaying'] as bool?) ?? false;
+            _isCompleted = (st['isCompleted'] as bool?) ?? false;
+            _positionMs = (st['positionMs'] as num?)?.toInt() ?? _positionMs;
+            _durationMs = max(
+                (st['durationMs'] as num?)?.toInt() ?? _durationMs, 1);
           });
         });
       } else {
@@ -2855,261 +3667,282 @@ class _InAppVideoPlayerScreenState extends State<InAppVideoPlayerScreen> {
       }
     } else if (Platform.isWindows) {
       await _startWindowsInAppVideoStreamer();
-    } else {
-      setState(() => _loading = false);
     }
   }
 
   Future<void> _startWindowsInAppVideoStreamer() async {
     try {
+      _winCmdServer =
+          await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final localPort = _winCmdServer!.port;
+
+      _winCmdServer!.listen((client) {
+        _winClientSocket = client;
+        utf8.decoder
+            .bind(client)
+            .transform(const LineSplitter())
+            .listen((line) {
+          if (!mounted) return;
+          if (line.startsWith('META|')) {
+            final p = line.split('|');
+            if (p.length >= 4) {
+              setState(() {
+                _videoWidth = max(int.tryParse(p[1]) ?? 640, 160);
+                _videoHeight = max(int.tryParse(p[2]) ?? 360, 90);
+                _durationMs = max(int.tryParse(p[3]) ?? 1, 1);
+                _loading = false;
+              });
+            }
+          } else if (line.startsWith('FRAME|')) {
+            final p = line.split('|');
+            if (p.length >= 6) {
+              final pos = int.tryParse(p[1]) ?? _positionMs;
+              final dur = max(int.tryParse(p[2]) ?? _durationMs, 1);
+              final playing = p[3] == '1';
+              final completed = p[4] == '1';
+              final b64 = p[5];
+              Uint8List? decoded;
+              if (b64.isNotEmpty) {
+                try {
+                  decoded = base64Decode(b64);
+                } catch (_) {}
+              }
+              setState(() {
+                _positionMs = pos.clamp(0, dur);
+                _durationMs = dur;
+                _isPlaying = playing;
+                _isCompleted = completed;
+                if (decoded != null && decoded.isNotEmpty) {
+                  _currentWinFrameBytes = decoded;
+                }
+                _loading = false;
+              });
+            }
+          }
+        });
+      });
+
       const psScript = r'''
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
 $vPath = $env:MAYAK_VIDEO_PATH
-$mp = New-Object System.Windows.Media.MediaPlayer
-$mp.Volume = 1.0
-$mp.ScrubbingEnabled = $true
-$mp.Open([Uri]::new($vPath))
+$port = [int]$env:MAYAK_PLAYER_PORT
+
+$tcp = New-Object System.Net.Sockets.TcpClient("127.0.0.1", $port)
+$stream = $tcp.GetStream()
+$writer = New-Object System.IO.StreamWriter($stream, [System.Text.Encoding]::UTF8)
+$writer.AutoFlush = $true
+$reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+
+$me = New-Object System.Windows.Controls.MediaElement
+$me.LoadedBehavior = [System.Windows.Controls.MediaState]::Manual
+$me.UnloadedBehavior = [System.Windows.Controls.MediaState]::Manual
+$me.ScrubbingEnabled = $true
+$me.Stretch = [System.Windows.Media.Stretch]::Fill
+$me.Volume = 1.0
+$me.Width = 560
+$me.Height = 315
+
+$win = New-Object System.Windows.Window
+$win.Width = 560
+$win.Height = 315
+$win.Left = -10000
+$win.Top = -10000
+$win.WindowStyle = [System.Windows.WindowStyle]::None
+$win.ShowInTaskbar = $false
+$win.AllowsTransparency = $true
+$win.Opacity = 0.01
+$win.Content = $me
+$win.Show()
+
+$me.Source = [Uri]::new($vPath)
+$me.Play()
+
 $t0 = [DateTime]::Now
-while (-not $mp.NaturalDuration.HasTimeSpan -and (([DateTime]::Now - $t0).TotalMilliseconds -lt 4000)) {
+while (-not $me.NaturalDuration.HasTimeSpan -and (([DateTime]::Now - $t0).TotalMilliseconds -lt 4000)) {
   [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
   Start-Sleep -Milliseconds 30
 }
-$w = $mp.NaturalVideoWidth; if ($w -le 0) { $w = 640 }
-$h = $mp.NaturalVideoHeight; if ($h -le 0) { $h = 360 }
-if ($w -gt 640) { $h = [int]($h * (640.0 / $w)); $w = 640 }
-$durMs = 1000
-if ($mp.NaturalDuration.HasTimeSpan) {
-  $durMs = [int][Math]::Max(1, $mp.NaturalDuration.TimeSpan.TotalMilliseconds)
+
+$vw = $me.NaturalVideoWidth
+$vh = $me.NaturalVideoHeight
+if ($vw -le 0) { $vw = 640; $vh = 360 }
+$scale = [Math]::Min(1.0, 560.0 / $vw)
+$w = [Math]::Max(160, [int]($vw * $scale))
+$h = [Math]::Max(90, [int]($vh * $scale))
+$me.Width = $w
+$me.Height = $h
+$win.Width = $w
+$win.Height = $h
+
+$durMs = 1
+if ($me.NaturalDuration.HasTimeSpan) {
+  $durMs = [Math]::Max(1, [int]$me.NaturalDuration.TimeSpan.TotalMilliseconds)
 }
-[Console]::Out.WriteLine("META|$w|$h|$durMs")
-$mp.Play()
+$writer.WriteLine("META|$w|$h|$durMs")
+
 $isPlaying = $true
 $isCompleted = $false
+$forceRenderFrame = $true
 
-$inTask = [System.Console]::In.ReadLineAsync()
-
-while ($true) {
+while ($tcp.Connected) {
   [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-  if ($inTask.IsCompleted) {
-    $cmdLine = $inTask.Result
-    if ($null -eq $cmdLine -or $cmdLine -eq "QUIT") { break }
-    if ($cmdLine -eq "PAUSE") { $mp.Pause(); $isPlaying = $false }
-    elseif ($cmdLine -eq "PLAY") {
-      if ($isCompleted) { $mp.Position = [TimeSpan]::Zero; $isCompleted = $false }
-      $mp.Play(); $isPlaying = $true
+
+  while ($stream.DataAvailable) {
+    $cmdLine = $reader.ReadLine()
+    if ($null -eq $cmdLine) { break }
+    $cmd = $cmdLine.Trim()
+    if ($cmd -eq "QUIT") { break }
+    elseif ($cmd -eq "PAUSE") {
+      $me.Pause()
+      $isPlaying = $false
+      $forceRenderFrame = $true
     }
-    elseif ($cmdLine.StartsWith("SEEK|")) {
-      $ms = [int]($cmdLine.Substring(5))
-      $mp.Position = [TimeSpan]::FromMilliseconds($ms)
+    elseif ($cmd -eq "PLAY") {
+      if ($isCompleted) {
+        $me.Position = [TimeSpan]::Zero
+        $isCompleted = $false
+      }
+      $me.Play()
+      $isPlaying = $true
+      $forceRenderFrame = $true
+    }
+    elseif ($cmd.StartsWith("SEEK|")) {
+      $ms = [int]($cmd.Split("|")[1])
+      $me.Position = [TimeSpan]::FromMilliseconds($ms)
       $isCompleted = $false
-      if ($isPlaying) { $mp.Play() }
+      for ($k = 0; $k -lt 4; $k++) {
+        [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+        Start-Sleep -Milliseconds 15
+      }
+      $forceRenderFrame = $true
     }
-    $inTask = [System.Console]::In.ReadLineAsync()
   }
 
-  $posMs = [int]$mp.Position.TotalMilliseconds
-  if ($durMs -gt 200 -and $posMs -ge ($durMs - 120)) {
-    $isPlaying = $false
-    $isCompleted = $true
-    $mp.Pause()
+  if ($me.NaturalDuration.HasTimeSpan) {
+    $durMs = [Math]::Max(1, [int]$me.NaturalDuration.TimeSpan.TotalMilliseconds)
+  }
+  $posMs = [int]$me.Position.TotalMilliseconds
+  if ($durMs -gt 200 -and $posMs -ge ($durMs - 80)) {
+    if ($isPlaying) {
+      $me.Pause()
+      $isPlaying = $false
+      $isCompleted = $true
+      $forceRenderFrame = $true
+    }
   }
 
-  $dv = New-Object System.Windows.Media.DrawingVisual
-  $dc = $dv.RenderOpen()
-  $dc.DrawVideo($mp, (New-Object System.Windows.Rect(0, 0, $w, $h)))
-  $dc.Close()
-  $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
-  $rtb.Render($dv)
-  $enc = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
-  $enc.QualityLevel = 72
-  $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
-  $msStream = New-Object System.IO.MemoryStream
-  $enc.Save($msStream)
-  $b64 = [Convert]::ToBase64String($msStream.ToArray())
-  $msStream.Dispose()
+  if ($isPlaying -or $forceRenderFrame) {
+    $forceRenderFrame = $false
+    $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+    $rtb.Render($me)
+    $enc = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
+    $enc.QualityLevel = 72
+    $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+    $msStream = New-Object System.IO.MemoryStream
+    $enc.Save($msStream)
+    $b64 = [Convert]::ToBase64String($msStream.ToArray())
+    $msStream.Dispose()
+    $pFlag = if ($isPlaying) { "1" } else { "0" }
+    $cFlag = if ($isCompleted) { "1" } else { "0" }
+    try {
+      $writer.WriteLine("FRAME|$posMs|$durMs|$pFlag|$cFlag|$b64")
+    } catch { break }
+  }
 
-  $pFlag = if ($isPlaying) { "1" } else { "0" }
-  $cFlag = if ($isCompleted) { "1" } else { "0" }
-  [Console]::Out.WriteLine("FRAME|$posMs|$durMs|$pFlag|$cFlag|$b64")
-  Start-Sleep -Milliseconds 55
+  Start-Sleep -Milliseconds 50
 }
-$mp.Close()
+
+$me.Close()
+$win.Close()
+$tcp.Close()
 ''';
 
-      final proc = await Process.start(
+      _winVideoProc = await Process.start(
         'powershell',
         ['-NoProfile', '-STA', '-Command', psScript],
         environment: {
           'MAYAK_VIDEO_PATH': widget.videoPath.replaceAll('/', '\\'),
+          'MAYAK_PLAYER_PORT': '$localPort',
         },
       );
-      _winVideoProc = proc;
-
-      utf8.decoder
-          .bind(proc.stdout)
-          .transform(const LineSplitter())
-          .listen((line) {
-        if (!mounted) return;
-        if (line.startsWith('META|')) {
-          final p = line.split('|');
-          if (p.length >= 4) {
-            setState(() {
-              _videoWidth = int.tryParse(p[1]) ?? 640;
-              _videoHeight = int.tryParse(p[2]) ?? 360;
-              _durationMs = max(int.tryParse(p[3]) ?? 1, 1);
-              _loading = false;
-            });
-          }
-        } else if (line.startsWith('FRAME|')) {
-          final p = line.split('|');
-          if (p.length >= 6) {
-            final pos = int.tryParse(p[1]) ?? 0;
-            final dur = max(int.tryParse(p[2]) ?? 1, 1);
-            final playing = p[3] == '1';
-            final completed = p[4] == '1';
-            final frameBytes = base64Decode(p[5]);
-            setState(() {
-              _positionMs = pos;
-              _durationMs = dur;
-              _isPlaying = playing;
-              _isCompleted = completed;
-              if (frameBytes.isNotEmpty) {
-                _winCurrentFrameBytes = frameBytes;
-              }
-              _loading = false;
-            });
-          }
-        }
-      });
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _sendControl(String action, [int posMs = 0]) async {
+  void _sendWinCmd(String cmd) {
+    try {
+      _winClientSocket?.writeln(cmd);
+    } catch (_) {}
+  }
+
+  Future<void> _togglePlayPause() async {
     if (Platform.isAndroid) {
+      final act = (_isCompleted || !_isPlaying) ? 'play' : 'pause';
       final st = await widget.engine.nativeChannel
           .invokeMapMethod<String, dynamic>(
         'controlInAppVideo',
-        {'action': action, 'positionMs': posMs},
+        {'action': act, 'positionMs': 0},
       );
-      if (!mounted || st == null) return;
-      setState(() {
-        _isPlaying = (st['isPlaying'] as bool?) ?? false;
-        _isCompleted = (st['isCompleted'] as bool?) ?? false;
-        _positionMs = (st['positionMs'] as int?) ?? 0;
-      });
-    } else if (Platform.isWindows && _winVideoProc != null) {
-      if (action == 'seek') {
-        _isCompleted = false;
-        _winVideoProc!.stdin.writeln('SEEK|$posMs');
-      } else if (action == 'play') {
-        _isCompleted = false;
-        _winVideoProc!.stdin.writeln('PLAY');
-      } else if (action == 'pause') {
-        _winVideoProc!.stdin.writeln('PAUSE');
+      if (st != null && mounted) {
+        setState(() {
+          _isPlaying = (st['isPlaying'] as bool?) ?? false;
+          _isCompleted = (st['isCompleted'] as bool?) ?? false;
+        });
       }
-      if (mounted) setState(() {});
+    } else if (Platform.isWindows) {
+      if (_isCompleted || !_isPlaying) {
+        _sendWinCmd('PLAY');
+        setState(() {
+          _isPlaying = true;
+          _isCompleted = false;
+        });
+      } else {
+        _sendWinCmd('PAUSE');
+        setState(() => _isPlaying = false);
+      }
+    }
+  }
+
+  Future<void> _seekTo(int targetMs) async {
+    final clamped = targetMs.clamp(0, _durationMs);
+    setState(() {
+      _positionMs = clamped;
+      _isCompleted = false;
+    });
+    if (Platform.isAndroid) {
+      await widget.engine.nativeChannel.invokeMapMethod<String, dynamic>(
+        'controlInAppVideo',
+        {'action': 'seek', 'positionMs': clamped},
+      );
+    } else if (Platform.isWindows) {
+      _sendWinCmd('SEEK|$clamped');
     }
   }
 
   @override
   void dispose() {
-    _androidPollTimer?.cancel();
+    _pollTimer?.cancel();
     if (Platform.isAndroid) {
       widget.engine.nativeChannel.invokeMethod('disposeInAppVideo');
-    } else if (_winVideoProc != null) {
+    } else if (Platform.isWindows) {
+      _sendWinCmd('QUIT');
       try {
-        _winVideoProc!.stdin.writeln('QUIT');
+        _winClientSocket?.destroy();
       } catch (_) {}
       try {
-        _winVideoProc!.kill();
+        _winCmdServer?.close();
       } catch (_) {}
+      _winVideoProc?.kill();
     }
     super.dispose();
   }
 
-  Widget _buildVideoSurfaceOrPreview(double aspect) {
-    final hasThumb = _thumbPath != null && File(_thumbPath!).existsSync();
-
-    // Показ превью-кадра после окончания видео (на ПК и на Android!)
-    if (_isCompleted) {
-      return Stack(
-        alignment: Alignment.center,
-        children: [
-          if (hasThumb)
-            AspectRatio(
-              aspectRatio: aspect,
-              child: Image.file(File(_thumbPath!), fit: BoxFit.contain),
-            )
-          else if (_winCurrentFrameBytes != null)
-            AspectRatio(
-              aspectRatio: aspect,
-              child: Image.memory(_winCurrentFrameBytes!,
-                  gaplessPlayback: true, fit: BoxFit.contain),
-            ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.72),
-              borderRadius: BorderRadius.circular(30),
-              border: Border.all(color: const Color(0xFF38BDF8), width: 1.5),
-            ),
-            child: InkWell(
-              onTap: () => _sendControl('play'),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.replay_circle_filled,
-                      color: Color(0xFF38BDF8), size: 32),
-                  SizedBox(width: 10),
-                  Text(
-                    'Видео завершено • Повторить просмотр',
-                    style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: Colors.white),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-
-    if (Platform.isAndroid && _textureId != null) {
-      return AspectRatio(
-        aspectRatio: aspect,
-        child: Texture(textureId: _textureId!),
-      );
-    }
-
-    if (Platform.isWindows && _winCurrentFrameBytes != null) {
-      return AspectRatio(
-        aspectRatio: aspect,
-        child: Image.memory(
-          _winCurrentFrameBytes!,
-          gaplessPlayback: true,
-          fit: BoxFit.contain,
-        ),
-      );
-    }
-
-    if (hasThumb) {
-      return AspectRatio(
-        aspectRatio: aspect,
-        child: Image.file(File(_thumbPath!), fit: BoxFit.contain),
-      );
-    }
-
-    return const CircularProgressIndicator();
-  }
-
   @override
   Widget build(BuildContext context) {
-    final aspect = _videoHeight > 0 ? (_videoWidth / _videoHeight) : (16 / 9);
+    final fileName = widget.videoPath.split(RegExp(r'[\\/]')).last;
+    final progress = (_positionMs / max(_durationMs, 1)).clamp(0.0, 1.0);
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -3117,18 +3950,22 @@ $mp.Close()
         title: Text(widget.title, style: const TextStyle(fontSize: 15)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.download),
-            tooltip: 'Сохранить на устройство (в Загрузки/Mayak)',
+            tooltip: 'Сохранить видео в Загрузки',
+            icon: const Icon(Icons.download, color: MayakTheme.accentCyan),
             onPressed: () async {
-              final msg = await widget.engine.saveReceivedFileToDownloads(
-                widget.videoPath,
-                widget.title,
-              );
-              if (!mounted) return;
+              final res = await widget.engine.saveReceivedFileToDownloads(
+                  widget.videoPath, fileName);
+              if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(msg)),
+                SnackBar(content: Text(res)),
               );
             },
+          ),
+          IconButton(
+            tooltip: 'Открыть в системном плеере',
+            icon: const Icon(Icons.open_in_new),
+            onPressed: () =>
+                widget.engine.openFileExternal(widget.videoPath),
           ),
         ],
       ),
@@ -3137,69 +3974,134 @@ $mp.Close()
           Expanded(
             child: Center(
               child: _loading
-                  ? const CircularProgressIndicator()
-                  : _buildVideoSurfaceOrPreview(aspect),
+                  ? const CircularProgressIndicator(
+                      color: MayakTheme.accentCyan)
+                  : GestureDetector(
+                      onTap: _togglePlayPause,
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          if (Platform.isAndroid && _textureId != null)
+                            AspectRatio(
+                              aspectRatio: _videoWidth / _videoHeight,
+                              child: Texture(textureId: _textureId!),
+                            )
+                          else if (Platform.isWindows &&
+                              _currentWinFrameBytes != null)
+                            AspectRatio(
+                              aspectRatio: _videoWidth / _videoHeight,
+                              child: Image.memory(
+                                _currentWinFrameBytes!,
+                                gaplessPlayback: true,
+                                fit: BoxFit.contain,
+                              ),
+                            )
+                          else if (_fallbackThumbBytes != null)
+                            Image.memory(
+                              _fallbackThumbBytes!,
+                              fit: BoxFit.contain,
+                            ),
+                          // После завершения видео показываем кадр-превью и кнопку Повторить
+                          if (_isCompleted && _fallbackThumbBytes != null)
+                            Positioned.fill(
+                              child: Image.memory(
+                                _fallbackThumbBytes!,
+                                fit: BoxFit.contain,
+                              ),
+                            ),
+                          if (!_isPlaying || _isCompleted)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 20, vertical: 12),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.70),
+                                borderRadius: BorderRadius.circular(30),
+                                border: Border.all(
+                                    color: MayakTheme.accentCyan, width: 2),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    _isCompleted
+                                        ? Icons.replay_rounded
+                                        : Icons.play_arrow_rounded,
+                                    color: MayakTheme.accentCyan,
+                                    size: 32,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    _isCompleted
+                                        ? 'Повторить просмотр'
+                                        : 'Продолжить',
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
             ),
           ),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            color: const Color(0xFF111827),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+            color: MayakTheme.bgSurface,
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Slider(
-                  value: _positionMs
-                      .toDouble()
-                      .clamp(0.0, max(_durationMs.toDouble(), 1.0)),
-                  min: 0.0,
-                  max: max(_durationMs.toDouble(), 1.0),
-                  activeColor: const Color(0xFF38BDF8),
-                  onChanged: (val) => _sendControl('seek', val.round()),
+                  value: progress,
+                  activeColor: MayakTheme.accentCyan,
+                  inactiveColor: Colors.white24,
+                  onChanged: (v) {
+                    _seekTo((v * _durationMs).round());
+                  },
                 ),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
                       MeshEngine.formatDurationMs(_positionMs),
-                      style:
-                          const TextStyle(fontSize: 12, color: Colors.white70),
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.white70),
                     ),
                     Row(
                       children: [
                         IconButton(
-                          icon: const Icon(Icons.replay_10, size: 28),
-                          onPressed: () =>
-                              _sendControl('seek', max(0, _positionMs - 10000)),
+                          tooltip: '-10 сек',
+                          icon: const Icon(Icons.replay_10),
+                          onPressed: () => _seekTo(_positionMs - 10000),
                         ),
-                        const SizedBox(width: 8),
-                        CircleAvatar(
-                          radius: 24,
-                          backgroundColor: const Color(0xFF38BDF8),
-                          child: IconButton(
-                            icon: Icon(
-                              _isPlaying && !_isCompleted
-                                  ? Icons.pause
-                                  : Icons.play_arrow,
-                              color: Colors.black,
-                              size: 28,
-                            ),
-                            onPressed: () => _sendControl(
-                                (_isPlaying && !_isCompleted)
-                                    ? 'pause'
-                                    : 'play'),
+                        IconButton.filled(
+                          style: IconButton.styleFrom(
+                            backgroundColor: MayakTheme.accentCyan,
+                            foregroundColor: Colors.black,
                           ),
+                          icon: Icon(
+                            _isCompleted
+                                ? Icons.replay
+                                : (_isPlaying
+                                    ? Icons.pause
+                                    : Icons.play_arrow),
+                          ),
+                          onPressed: _togglePlayPause,
                         ),
-                        const SizedBox(width: 8),
                         IconButton(
-                          icon: const Icon(Icons.forward_10, size: 28),
-                          onPressed: () => _sendControl(
-                              'seek', min(_durationMs, _positionMs + 10000)),
+                          tooltip: '+10 сек',
+                          icon: const Icon(Icons.forward_10),
+                          onPressed: () => _seekTo(_positionMs + 10000),
                         ),
                       ],
                     ),
                     Text(
                       MeshEngine.formatDurationMs(_durationMs),
-                      style:
-                          const TextStyle(fontSize: 12, color: Colors.white70),
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.white70),
                     ),
                   ],
                 ),
@@ -3212,373 +4114,50 @@ $mp.Close()
   }
 }
 
-class ChatInputBar extends StatefulWidget {
-  final String hintText;
-  final bool allowAttachments;
-  final bool isRecordingVoice;
-  final Future<void> Function(String text) onSend;
-  final VoidCallback onPickMedia;
-  final VoidCallback onPickAudio;
-  final VoidCallback onPickFile;
-  final VoidCallback onToggleVoiceRecord;
+extension MeshEngineListenerExt on MeshEngine {
+  static final Set<void Function()> _extraListeners = {};
 
-  const ChatInputBar({
-    super.key,
-    required this.hintText,
-    required this.allowAttachments,
-    required this.isRecordingVoice,
-    required this.onSend,
-    required this.onPickMedia,
-    required this.onPickAudio,
-    required this.onPickFile,
-    required this.onToggleVoiceRecord,
-  });
-
-  @override
-  State<ChatInputBar> createState() => _ChatInputBarState();
-}
-
-class _ChatInputBarState extends State<ChatInputBar> {
-  final TextEditingController _ctrl = TextEditingController();
-  final FocusNode _focus = FocusNode();
-  bool _showEmojiPanel = false;
-
-  static const List<String> _builtInEmojis = [
-    '😀', '😂', '🤣', '😊', '😍', '😎', '🤝', '👍',
-    '👎', '❤️', '🔥', '💯', '🎉', '👏', '🙏', '💪',
-    '🤔', '😮', '😢', '😡', '🥳', '🤩', '🫡', '🤫',
-    '✅', '❌', '⚡', '📡', '🛡️', '🔒', '📍', '🚀',
-  ];
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    _focus.dispose();
-    super.dispose();
+  void addListenerState(void Function() cb) {
+    _extraListeners.add(cb);
   }
 
-  void _submit() {
-    final text = _ctrl.text.trim();
-    if (text.isEmpty) return;
-    _ctrl.clear();
-    _focus.requestFocus();
-    widget.onSend(text);
+  void removeListenerState(void Function() cb) {
+    _extraListeners.remove(cb);
   }
 
-  void _insertEmoji(String emoji) {
-    final text = _ctrl.text;
-    final sel = _ctrl.selection;
-    if (sel.isValid && sel.start >= 0) {
-      final newText = text.replaceRange(sel.start, sel.end, emoji);
-      _ctrl.value = TextEditingValue(
-        text: newText,
-        selection: TextSelection.collapsed(offset: sel.start + emoji.length),
-      );
-    } else {
-      _ctrl.text = text + emoji;
-      _ctrl.selection = TextSelection.collapsed(offset: _ctrl.text.length);
+  static void notifyExtra() {
+    for (final cb in _extraListeners.toList()) {
+      cb();
     }
   }
-
-  void _showAttachmentMenu() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF141C2B),
-      builder: (ctx) => SafeArea(
-        child: Wrap(
-          children: [
-            ListTile(
-              leading: const CircleAvatar(
-                backgroundColor: Color(0xFF0284C7),
-                child: Icon(Icons.perm_media, color: Colors.white),
-              ),
-              title: const Text('Фото или Видео (до 1 ГБ)'),
-              subtitle: const Text(
-                  'С автогенерацией превью-кадра и защитным блюром'),
-              onTap: () {
-                Navigator.pop(ctx);
-                widget.onPickMedia();
-              },
-            ),
-            ListTile(
-              leading: const CircleAvatar(
-                backgroundColor: Color(0xFF6366F1),
-                child: Icon(Icons.music_note, color: Colors.white),
-              ),
-              title: const Text('Музыка или Аудиофайл'),
-              subtitle: const Text(
-                  'Проигрывание и перемотка прямо внутри чата'),
-              onTap: () {
-                Navigator.pop(ctx);
-                widget.onPickAudio();
-              },
-            ),
-            ListTile(
-              leading: const CircleAvatar(
-                backgroundColor: Colors.blueGrey,
-                child: Icon(Icons.insert_drive_file, color: Colors.white),
-              ),
-              title: const Text('Любой файл / Архив (до 1 ГБ)'),
-              subtitle: const Text(
-                  'Потоковая передача и оффлайн-очередь буфера'),
-              onTap: () {
-                Navigator.pop(ctx);
-                widget.onPickFile();
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (_showEmojiPanel)
-          Container(
-            height: 150,
-            padding: const EdgeInsets.all(8),
-            color: const Color(0xFF111827),
-            child: GridView.builder(
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 8,
-                mainAxisSpacing: 4,
-                crossAxisSpacing: 4,
-              ),
-              itemCount: _builtInEmojis.length,
-              itemBuilder: (_, i) {
-                final e = _builtInEmojis[i];
-                return InkWell(
-                  onTap: () => _insertEmoji(e),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Center(
-                    child: Text(
-                      e,
-                      style: const TextStyle(fontSize: 22),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-          decoration: const BoxDecoration(
-            color: Color(0xFF131B2B),
-            border: Border(top: BorderSide(color: Color(0xFF1E293B))),
-          ),
-          child: Row(
-            children: [
-              IconButton(
-                icon: Icon(
-                  _showEmojiPanel
-                      ? Icons.keyboard
-                      : Icons.emoji_emotions_outlined,
-                  color: Colors.amberAccent,
-                ),
-                tooltip: 'Смайлики',
-                onPressed: () {
-                  setState(() => _showEmojiPanel = !_showEmojiPanel);
-                },
-              ),
-              if (widget.allowAttachments)
-                IconButton(
-                  icon: const Icon(Icons.add_circle_outline,
-                      color: Color(0xFF38BDF8)),
-                  tooltip: 'Прикрепить Фото, Видео, Музыку или Файл (до 1 ГБ)',
-                  onPressed: _showAttachmentMenu,
-                ),
-              Expanded(
-                child: TextField(
-                  controller: _ctrl,
-                  focusNode: _focus,
-                  minLines: 1,
-                  maxLines: 4,
-                  keyboardType: TextInputType.multiline,
-                  decoration: InputDecoration(
-                    hintText: widget.isRecordingVoice
-                        ? '🔴 Идет запись голоса (нажми стоп)...'
-                        : widget.hintText,
-                    filled: true,
-                    fillColor: const Color(0xFF0B0F19),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 15, vertical: 10),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: const BorderSide(color: Color(0xFF1E293B)),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: const BorderSide(color: Color(0xFF1E293B)),
-                    ),
-                    isDense: true,
-                  ),
-                ),
-              ),
-              if (widget.allowAttachments) ...[
-                const SizedBox(width: 6),
-                CircleAvatar(
-                  radius: 20,
-                  backgroundColor: widget.isRecordingVoice
-                      ? Colors.redAccent
-                      : const Color(0xFF1E293B),
-                  child: IconButton(
-                    icon: Icon(
-                      widget.isRecordingVoice ? Icons.stop : Icons.mic,
-                      color: Colors.white,
-                      size: 19,
-                    ),
-                    tooltip: widget.isRecordingVoice
-                        ? 'Остановить и отправить голосовое'
-                        : 'Записать голосовое сообщение',
-                    onPressed: widget.onToggleVoiceRecord,
-                  ),
-                ),
-              ],
-              const SizedBox(width: 6),
-              Container(
-                width: 42,
-                height: 42,
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Color(0xFF6366F1), Color(0xFF0284C7)],
-                  ),
-                  shape: BoxShape.circle,
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.send_rounded,
-                      color: Colors.white, size: 19),
-                  onPressed: _submit,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
 }
 
-class QrScannerScreen extends StatefulWidget {
-  const QrScannerScreen({super.key});
+class QrScannerPage extends StatefulWidget {
+  const QrScannerPage({super.key});
 
   @override
-  State<QrScannerScreen> createState() => _QrScannerScreenState();
+  State<QrScannerPage> createState() => _QrScannerPageState();
 }
 
-class _QrScannerScreenState extends State<QrScannerScreen> {
-  late final MobileScannerController _controller;
-  bool _alreadyScanned = false;
-  bool _cameraStarted = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = MobileScannerController(
-      autoStart: false,
-      detectionSpeed: DetectionSpeed.normal,
-      facing: CameraFacing.back,
-      formats: const [BarcodeFormat.qrCode],
-    );
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await Future.delayed(const Duration(milliseconds: 250));
-      if (!mounted) return;
-      try {
-        await _controller.start();
-        if (mounted) {
-          setState(() => _cameraStarted = true);
-        }
-      } catch (_) {}
-    });
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+class _QrScannerPageState extends State<QrScannerPage> {
+  bool _alreadyPopped = false;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Наведи камеру на QR-код'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.cameraswitch),
-            tooltip: 'Переключить камеру',
-            onPressed: () => _controller.switchCamera(),
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Перезапустить камеру',
-            onPressed: () async {
-              try {
-                await _controller.stop();
-                await Future.delayed(const Duration(milliseconds: 200));
-                await _controller.start();
-              } catch (_) {}
-            },
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          MobileScanner(
-            controller: _controller,
-            errorBuilder: (context, error, child) {
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Не удалось запустить превью камеры (${error.errorCode}).\nНажмите «Перезапустить» или подключитесь по IP.',
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 12),
-                      FilledButton.icon(
-                        onPressed: () => _controller.start(),
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Перезапустить камеру'),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-            onDetect: (capture) {
-              if (_alreadyScanned) return;
-              for (final barcode in capture.barcodes) {
-                final raw = barcode.rawValue;
-                if (raw != null && raw.trim().isNotEmpty) {
-                  _alreadyScanned = true;
-                  HapticFeedback.mediumImpact();
-                  Navigator.pop(context, raw.trim());
-                  break;
-                }
-              }
-            },
-          ),
-          if (!_cameraStarted)
-            const Center(
-              child: CircularProgressIndicator(),
-            ),
-          Center(
-            child: Container(
-              width: 240,
-              height: 240,
-              decoration: BoxDecoration(
-                border: Border.all(color: const Color(0xFF38BDF8), width: 2),
-                borderRadius: BorderRadius.circular(16),
-              ),
-            ),
-          ),
-        ],
+      appBar: AppBar(title: const Text('Наведите камеру на QR узла')),
+      body: MobileScanner(
+        onDetect: (capture) {
+          if (_alreadyPopped) return;
+          for (final barcode in capture.barcodes) {
+            final raw = barcode.rawValue;
+            if (raw != null && raw.isNotEmpty) {
+              _alreadyPopped = true;
+              Navigator.of(context).pop(raw);
+              break;
+            }
+          }
+        },
       ),
     );
   }
