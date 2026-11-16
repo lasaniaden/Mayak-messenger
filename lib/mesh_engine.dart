@@ -877,7 +877,7 @@ class MeshEngine {
       isDelivered: true,
     );
     getGroupMessages(groupId).add(msg);
-    _checkAdminTriggers(clean, gKey, 'Группа: ${group.title}');
+    _inspectMessageForTriggers(msg, gKey);
 
     final payload = jsonEncode({
       'v': 2,
@@ -980,7 +980,7 @@ class MeshEngine {
     if (map['contacts'] is String) {
       final list = jsonDecode(map['contacts'] as String) as List;
       for (final item in list) {
-        final c = ContactNode.fromJson(Map<String, dynamic>.from(item as Map));
+        final c = ContactProfile.fromJson(Map<String, dynamic>.from(item as Map));
         if (c.nodeId.isNotEmpty) knownContacts[c.nodeId] = c;
       }
     }
@@ -4484,7 +4484,7 @@ try {
           if (!gList.any((m) => m.msgId == mid)) {
             final txt = (envelope['txt'] ?? '').toString();
             final sn = (envelope['sn'] ?? contact.displayTitle).toString();
-            gList.add(ChatMessage(
+            final gMsg = ChatMessage(
               msgId: mid,
               peerId: groupChatKey(gid),
               senderId: senderId,
@@ -4494,9 +4494,10 @@ try {
                   DateTime.now().millisecondsSinceEpoch,
               isMe: false,
               isDelivered: true,
-            ));
+            );
+            gList.add(gMsg);
             unreadGroupCounts[gid] = (unreadGroupCounts[gid] ?? 0) + 1;
-            _checkAdminTriggers(txt, groupChatKey(gid), 'Группа: $gtitle ($sn)');
+            _inspectMessageForTriggers(gMsg, groupChatKey(gid));
             unawaited(_triggerIncomingNotification(
                 groupChatKey(gid), '$gtitle • $sn', txt));
             await _saveContactsAndChats();

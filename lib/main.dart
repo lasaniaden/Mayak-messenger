@@ -1751,7 +1751,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
         children: [
           FloatingActionButton.extended(
             heroTag: 'fab_group',
-            backgroundColor: MayakTheme.bgSurfaceLight,
+            backgroundColor: MayakTheme.bgElevated,
             foregroundColor: Colors.white,
             onPressed: _showCreateGroupDialog,
             icon: const Icon(Icons.group_add_rounded),
