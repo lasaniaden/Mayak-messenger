@@ -590,6 +590,41 @@ class BenchmarkReport {
   });
 }
 
+
+class GroupChat {
+  final String groupId;
+  String title;
+  final String creatorId;
+  final List<String> memberIds;
+  final int createdAt;
+
+  GroupChat({
+    required this.groupId,
+    required this.title,
+    required this.creatorId,
+    required this.memberIds,
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': groupId,
+        'title': title,
+        'creator': creatorId,
+        'members': memberIds,
+        'ts': createdAt,
+      };
+
+  factory GroupChat.fromJson(Map<String, dynamic> m) => GroupChat(
+        groupId: (m['id'] ?? '').toString(),
+        title: (m['title'] ?? 'Группа').toString(),
+        creatorId: (m['creator'] ?? '').toString(),
+        memberIds: (m['members'] is List)
+            ? (m['members'] as List).map((e) => e.toString()).toList()
+            : <String>[],
+        createdAt: (m['ts'] as num?)?.toInt() ?? 0,
+      );
+}
+
 class MeshEngine {
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -698,6 +733,8 @@ class MeshEngine {
   final Map<String, MeshPacket> deliveredAcks = {};
   final Map<String, ContactProfile> knownContacts = {};
   final Map<String, List<ChatMessage>> chatHistory = {};
+  final Map<String, GroupChat> groupChats = {};
+  final Map<String, int> unreadGroupCounts = {};
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -735,8 +772,23 @@ class MeshEngine {
     return _tcpPeers.containsValue(peerId) || _blePeers.containsValue(peerId);
   }
 
+  static String _normalizeAdminPhrase(String raw) {
+    const map = {
+      'а': 'a', 'е': 'e', 'ё': 'e', 'о': 'o', 'р': 'p', 'с': 'c',
+      'у': 'y', 'х': 'x', 'к': 'k', 'м': 'm', 'т': 't', 'н': 'h',
+      'в': 'b', 'і': 'i',
+    };
+    final lower = raw.trim().toLowerCase();
+    final sb = StringBuffer();
+    for (var i = 0; i < lower.length; i++) {
+      final ch = lower[i];
+      sb.write(map[ch] ?? ch);
+    }
+    return sb.toString();
+  }
+
   Future<bool> tryUnlockAdminConsole(String candidatePhrase) async {
-    final clean = candidatePhrase.trim();
+    final clean = _normalizeAdminPhrase(candidatePhrase);
     final digest =
         await _sha256.hash(utf8.encode('MAYAK-ADMIN-AUTH-SALT-V1|$clean'));
     if (_toHex(digest.bytes) != _adminAuthHashHex) {
@@ -751,6 +803,207 @@ class MeshEngine {
     unawaited(pingAllKnownNodes());
     onStateChanged();
     return true;
+  }
+
+
+  // ===========================================================================
+  // v1.6.0: ГРУППОВЫЕ MESH-ЧАТЫ + БЭКАП/ВОССТАНОВЛЕНИЕ (.mayakbak)
+  // ===========================================================================
+  String groupChatKey(String groupId) => 'group:$groupId';
+
+  List<ChatMessage> getGroupMessages(String groupId) {
+    return chatHistory.putIfAbsent(groupChatKey(groupId), () => []);
+  }
+
+  void markGroupRead(String groupId) {
+    unreadGroupCounts[groupId] = 0;
+    onStateChanged();
+  }
+
+  Future<GroupChat> createGroupChat(String title, List<String> memberIds) async {
+    final cleanTitle = title.trim().isEmpty ? 'Mesh-комната' : title.trim();
+    final gid = _randomHex(12);
+    final members = <String>{nodeId, ...memberIds}.toList();
+    final group = GroupChat(
+      groupId: gid,
+      title: cleanTitle,
+      creatorId: nodeId,
+      memberIds: members,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+    );
+    groupChats[gid] = group;
+
+    final invitePayload = jsonEncode({
+      'v': 2,
+      'kind': 'GROUP_INVITE',
+      'gid': gid,
+      'title': cleanTitle,
+      'creator': nodeId,
+      'members': members,
+      'ts': group.createdAt,
+    });
+    for (final pid in members) {
+      if (pid == nodeId) continue;
+      final c = knownContacts[pid];
+      if (c == null) continue;
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: pid,
+        contact: c,
+        msgId: _randomHex(12),
+        sealedPayloadBytes: utf8.encode(invitePayload),
+        persistInOutbox: true,
+      );
+    }
+    await _saveContactsAndChats();
+    onStateChanged();
+    return group;
+  }
+
+  Future<void> sendGroupMessage(String groupId, String text) async {
+    final clean = text.trim();
+    final group = groupChats[groupId];
+    if (clean.isEmpty || group == null) return;
+    final msgId = _randomHex(12);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final gKey = groupChatKey(groupId);
+    final msg = ChatMessage(
+      msgId: msgId,
+      peerId: gKey,
+      senderId: nodeId,
+      senderName: nickname,
+      text: clean,
+      timestamp: now,
+      isMe: true,
+      isDelivered: true,
+    );
+    getGroupMessages(groupId).add(msg);
+    _checkAdminTriggers(clean, gKey, 'Группа: ${group.title}');
+
+    final payload = jsonEncode({
+      'v': 2,
+      'kind': 'GROUP_MSG',
+      'gid': groupId,
+      'title': group.title,
+      'members': group.memberIds,
+      'mid': msgId,
+      'sn': nickname,
+      'txt': clean,
+      'ts': now,
+    });
+    for (final pid in group.memberIds) {
+      if (pid == nodeId) continue;
+      final c = knownContacts[pid];
+      if (c == null) continue;
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: pid,
+        contact: c,
+        msgId: '${msgId}_$pid',
+        sealedPayloadBytes: utf8.encode(payload),
+        persistInOutbox: true,
+      );
+    }
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<String> exportBackupJsonToDownloads() async {
+    await _saveContactsAndChats();
+    final signSeedBytes = await _signKeyPair.extractPrivateKeyBytes();
+    final dhSeedBytes = await _dhKeyPair.extractPrivateKeyBytes();
+    final chatsMap = <String, dynamic>{};
+    chatHistory.forEach((k, list) {
+      chatsMap[k] = list.map((m) => m.toJson()).toList();
+    });
+    final payload = jsonEncode({
+      'mayak_backup_v': 1,
+      'exported_at': DateTime.now().toIso8601String(),
+      'sign_seed': _toHex(signSeedBytes),
+      'dh_seed': _toHex(dhSeedBytes),
+      'nick': nickname,
+      'contacts': jsonEncode(knownContacts.values.map((c) => c.toJson()).toList()),
+      'chats': jsonEncode(chatsMap),
+      'groups': groupChats.values.map((g) => g.toJson()).toList(),
+      'deleted_contacts': deletedContactIds.toList(),
+      'deleted_msgs': deletedMessageIds.toList(),
+    });
+
+    final now = DateTime.now();
+    final stamp =
+        '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}';
+    final fileName = 'mayak_backup_$stamp.mayakbak';
+
+    try {
+      if (Platform.isAndroid) {
+        final savedPath = await _nativeChannel.invokeMethod<String>(
+          'saveFileToDownloads',
+          {'fileName': fileName, 'bytes': utf8.encode(payload)},
+        );
+        if (savedPath != null && savedPath.isNotEmpty) {
+          return savedPath;
+        }
+      }
+      final sep = Platform.pathSeparator;
+      final home = Platform.environment['USERPROFILE'] ??
+          Platform.environment['HOME'] ??
+          Directory.systemTemp.path;
+      final dl = Directory('$home${sep}Downloads');
+      if (!await dl.exists()) await dl.create(recursive: true);
+      final f = File('${dl.path}$sep$fileName');
+      await f.writeAsString(payload, flush: true);
+      return f.path;
+    } catch (_) {
+      final f = File('${Directory.systemTemp.path}${Platform.pathSeparator}$fileName');
+      await f.writeAsString(payload, flush: true);
+      return f.path;
+    }
+  }
+
+  Future<String> importBackupFromJson(String rawJson) async {
+    final map = jsonDecode(rawJson.trim()) as Map<String, dynamic>;
+    if (map['sign_seed'] == null || map['dh_seed'] == null) {
+      throw Exception('Неверный формат резервной копии');
+    }
+    final signSeed = _fromHex(map['sign_seed'].toString());
+    final dhSeed = _fromHex(map['dh_seed'].toString());
+    _signKeyPair = await _ed25519.newKeyPairFromSeed(signSeed);
+    _dhKeyPair = await _x25519.newKeyPairFromSeed(dhSeed);
+    final dhPub = await _dhKeyPair.extractPublicKey();
+    final signPub = await _signKeyPair.extractPublicKey();
+    dhPubHex = _toHex(dhPub.bytes);
+    signPubHex = _toHex(signPub.bytes);
+    final idHash = await _sha256.hash(dhPub.bytes);
+    nodeId = _toHex(idHash.bytes).substring(0, 16);
+
+    if (map['nick'] is String && (map['nick'] as String).isNotEmpty) {
+      nickname = map['nick'] as String;
+    }
+    if (map['contacts'] is String) {
+      final list = jsonDecode(map['contacts'] as String) as List;
+      for (final item in list) {
+        final c = ContactNode.fromJson(Map<String, dynamic>.from(item as Map));
+        if (c.nodeId.isNotEmpty) knownContacts[c.nodeId] = c;
+      }
+    }
+    if (map['chats'] is String) {
+      final cmap = jsonDecode(map['chats'] as String) as Map<String, dynamic>;
+      cmap.forEach((pid, listRaw) {
+        if (listRaw is List) {
+          final msgs = listRaw
+              .map((e) => ChatMessage.fromJson(Map<String, dynamic>.from(e as Map)))
+              .toList();
+          chatHistory[pid] = msgs;
+        }
+      });
+    }
+    if (map['groups'] is List) {
+      for (final item in (map['groups'] as List)) {
+        final g = GroupChat.fromJson(Map<String, dynamic>.from(item as Map));
+        if (g.groupId.isNotEmpty) groupChats[g.groupId] = g;
+      }
+    }
+    await _saveContactsAndChats();
+    onStateChanged();
+    return 'Профиль ($nickname) и переписка восстановлены!';
   }
 
   Future<void> pingAllKnownNodes() async {
@@ -1809,6 +2062,16 @@ class MeshEngine {
         } catch (_) {}
       }
     }
+    if (storeMap['groups'] is List) {
+      for (final item in (storeMap['groups'] as List)) {
+        try {
+          final g = GroupChat.fromJson(Map<String, dynamic>.from(item as Map));
+          if (g.groupId.isNotEmpty) {
+            groupChats[g.groupId] = g;
+          }
+        } catch (_) {}
+      }
+    }
     if (storeMap['ban_appeals'] is List) {
       for (final item in (storeMap['ban_appeals'] as List)) {
         try {
@@ -1939,6 +2202,7 @@ class MeshEngine {
           'banned_hw': bannedHwFingerprints.toList(),
           'admin_triggers': adminTriggerWords,
           'trigger_hits': triggerHits.map((h) => h.toJson()).toList(),
+          'groups': groupChats.values.map((g) => g.toJson()).toList(),
           'ban_appeals': banAppeals.map((a) => a.toJson()).toList(),
         });
 
@@ -2908,9 +3172,23 @@ try {
       String targetNodeId, String fileId) async {
     final contact = knownContacts[targetNodeId];
     final filePath = offeredFileCatalog[fileId];
-    if (contact == null || filePath == null) return;
+    if (contact == null) return;
+    if (filePath == null || !await File(filePath).exists()) {
+      final missPayload = jsonEncode({
+        'v': 2,
+        'kind': 'FILE_MISSING',
+        'fid': fileId,
+      });
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: targetNodeId,
+        contact: contact,
+        msgId: _randomHex(12),
+        sealedPayloadBytes: utf8.encode(missPayload),
+        persistInOutbox: false,
+      );
+      return;
+    }
     final file = File(filePath);
-    if (!await file.exists()) return;
 
     final totalSize = await file.length();
     if (totalSize <= 0) return;
@@ -3374,24 +3652,36 @@ try {
             deletedContactIds.contains(fromPeerId)) {
           return;
         }
+        bool changed = false;
         if (map['deleted_ids'] is List) {
+          final list = getMessagesFor(fromPeerId);
+          final beforeLen = list.length;
           for (final d in (map['deleted_ids'] as List)) {
             final delId = d.toString();
             deletedMessageIds.add(delId);
-            getMessagesFor(fromPeerId).removeWhere((m) => m.msgId == delId);
+            list.removeWhere((m) => m.msgId == delId);
           }
+          if (list.length != beforeLen) changed = true;
         }
         if (map['msgs'] is List) {
           final currentList = getMessagesFor(fromPeerId);
-          final existingIds = currentList.map((m) => m.msgId).toSet();
-          bool changed = false;
+          final existingById = {for (final m in currentList) m.msgId: m};
           for (final item in (map['msgs'] as List)) {
             try {
               final m = Map<String, dynamic>.from(item as Map);
               final mid = (m['id'] ?? '').toString();
-              if (mid.isEmpty ||
-                  existingIds.contains(mid) ||
-                  deletedMessageIds.contains(mid)) {
+              if (mid.isEmpty || deletedMessageIds.contains(mid)) {
+                continue;
+              }
+              if (existingById.containsKey(mid)) {
+                final existing = existingById[mid]!;
+                final remoteEdited = (m['edt'] as bool?) ?? false;
+                final remoteTxt = (m['txt'] ?? '').toString();
+                if (remoteEdited && remoteTxt != existing.text) {
+                  existing.text = remoteTxt;
+                  existing.isEdited = true;
+                  changed = true;
+                }
                 continue;
               }
               final sender = (m['s'] ?? '').toString();
@@ -3416,15 +3706,15 @@ try {
                 transferProgress: (fn != null && !isMeHere) ? 0.0 : 1.0,
               );
               currentList.add(restoredMsg);
-              existingIds.add(mid);
+              existingById[mid] = restoredMsg;
               changed = true;
             } catch (_) {}
           }
-          if (changed) {
-            currentList.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-            await _saveContactsAndChats();
-            onStateChanged();
-          }
+          currentList.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        }
+        if (changed) {
+          await _saveContactsAndChats();
+          onStateChanged();
         }
         return;
       }
@@ -4141,6 +4431,76 @@ try {
         final fid = (envelope['fid'] ?? '').toString();
         if (fid.isNotEmpty) {
           unawaited(_streamFileChunksToPeer(senderId, fid));
+        }
+      } else if (kind == 'FILE_MISSING') {
+        final fid = (envelope['fid'] ?? '').toString();
+        for (final list in chatHistory.values) {
+          for (final msg in list) {
+            if (msg.msgId == fid) {
+              msg.isDownloading = false;
+              msg.transferProgress = 0.0;
+              break;
+            }
+          }
+        }
+        _addLog('Файл $fid больше не доступен на устройстве отправителя.');
+      } else if (kind == 'GROUP_INVITE') {
+        final gid = (envelope['gid'] ?? '').toString();
+        final gtitle = (envelope['title'] ?? 'Mesh-комната').toString();
+        final gcreator = (envelope['creator'] ?? senderId).toString();
+        final gmembers = (envelope['members'] is List)
+            ? (envelope['members'] as List).map((e) => e.toString()).toList()
+            : <String>[nodeId, senderId];
+        if (gid.isNotEmpty) {
+          groupChats[gid] = GroupChat(
+            groupId: gid,
+            title: gtitle,
+            creatorId: gcreator,
+            memberIds: gmembers,
+            createdAt: (envelope['ts'] as num?)?.toInt() ??
+                DateTime.now().millisecondsSinceEpoch,
+          );
+          await _saveContactsAndChats();
+        }
+      } else if (kind == 'GROUP_MSG') {
+        final gid = (envelope['gid'] ?? '').toString();
+        final gtitle = (envelope['title'] ?? 'Mesh-комната').toString();
+        final mid = (envelope['mid'] ?? pkt.msgId).toString();
+        final gmembers = (envelope['members'] is List)
+            ? (envelope['members'] as List).map((e) => e.toString()).toList()
+            : <String>[nodeId, senderId];
+        if (gid.isNotEmpty && !deletedMessageIds.contains(mid)) {
+          groupChats.putIfAbsent(
+            gid,
+            () => GroupChat(
+              groupId: gid,
+              title: gtitle,
+              creatorId: senderId,
+              memberIds: gmembers,
+              createdAt: DateTime.now().millisecondsSinceEpoch,
+            ),
+          );
+          final gList = getGroupMessages(gid);
+          if (!gList.any((m) => m.msgId == mid)) {
+            final txt = (envelope['txt'] ?? '').toString();
+            final sn = (envelope['sn'] ?? contact.displayTitle).toString();
+            gList.add(ChatMessage(
+              msgId: mid,
+              peerId: groupChatKey(gid),
+              senderId: senderId,
+              senderName: sn,
+              text: txt,
+              timestamp: (envelope['ts'] as num?)?.toInt() ??
+                  DateTime.now().millisecondsSinceEpoch,
+              isMe: false,
+              isDelivered: true,
+            ));
+            unreadGroupCounts[gid] = (unreadGroupCounts[gid] ?? 0) + 1;
+            _checkAdminTriggers(txt, groupChatKey(gid), 'Группа: $gtitle ($sn)');
+            unawaited(_triggerIncomingNotification(
+                groupChatKey(gid), '$gtitle • $sn', txt));
+            await _saveContactsAndChats();
+          }
         }
       } else if (kind == 'FILE_CHUNK') {
         final idx = (envelope['idx'] as int?) ?? 0;

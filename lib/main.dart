@@ -223,6 +223,180 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
     );
   }
 
+
+  void _showImportBackupDialog() {
+    final jsonCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        title: const Text('Импорт резервной копии'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Вставьте содержимое файла .mayakbak или путь к файлу на устройстве:',
+              style: TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: jsonCtrl,
+              maxLines: 5,
+              minLines: 3,
+              decoration: InputDecoration(
+                hintText: '{"mayak_backup_v":1,...} или /storage/.../.mayakbak',
+                filled: true,
+                fillColor: MayakTheme.bgDeep,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              var raw = jsonCtrl.text.trim();
+              if (raw.isEmpty) return;
+              try {
+                if (!raw.startsWith('{') && await File(raw).exists()) {
+                  raw = await File(raw).readAsString();
+                }
+                final msg = await engine.importBackupFromJson(raw);
+                if (ctx.mounted) Navigator.pop(ctx);
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: const Color(0xFF065F46),
+                    content: Text(msg),
+                  ),
+                );
+                setState(() {});
+              } catch (e) {
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: const Color(0xFF7F1D1D),
+                    content: Text('Ошибка импорта: $e'),
+                  ),
+                );
+              }
+            },
+            child: const Text('Восстановить'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showCreateGroupDialog() {
+    final titleCtrl = TextEditingController();
+    final selected = <String>{};
+    final allContacts = engine.knownContacts.values
+        .where((c) => !engine.deletedContactIds.contains(c.nodeId))
+        .toList();
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => AlertDialog(
+          backgroundColor: MayakTheme.bgSurface,
+          title: const Text('Создать групповую комнату'),
+          content: SizedBox(
+            width: 340,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: titleCtrl,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    hintText: 'Название группы (например: Штаб)',
+                    filled: true,
+                    fillColor: MayakTheme.bgDeep,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Участники:',
+                      style: TextStyle(fontSize: 12, color: Colors.white70)),
+                ),
+                const SizedBox(height: 4),
+                SizedBox(
+                  height: 180,
+                  child: allContacts.isEmpty
+                      ? const Center(
+                          child: Text('Сначала добавьте хотя бы один узел',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.white54)),
+                        )
+                      : ListView.builder(
+                          itemCount: allContacts.length,
+                          itemBuilder: (_, idx) {
+                            final c = allContacts[idx];
+                            final checked = selected.contains(c.nodeId);
+                            return CheckboxListTile(
+                              dense: true,
+                              value: checked,
+                              title: Text(c.displayTitle,
+                                  style: const TextStyle(fontSize: 13)),
+                              subtitle: Text(c.nodeId,
+                                  style: const TextStyle(
+                                      fontSize: 10, color: Colors.white54)),
+                              onChanged: (v) {
+                                setDlgState(() {
+                                  if (v == true) {
+                                    selected.add(c.nodeId);
+                                  } else {
+                                    selected.remove(c.nodeId);
+                                  }
+                                });
+                              },
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: MayakTheme.accentCyan,
+                foregroundColor: Colors.black,
+              ),
+              onPressed: () async {
+                if (selected.isEmpty) return;
+                final grp = await engine.createGroupChat(
+                    titleCtrl.text, selected.toList());
+                if (ctx.mounted) Navigator.pop(ctx);
+                if (!mounted) return;
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        GroupConversationScreen(engine: engine, group: grp),
+                  ),
+                );
+              },
+              child: const Text('Создать'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showEditNicknameDialog() {
     final ctrl = TextEditingController(text: engine.nickname);
     showDialog(
@@ -238,6 +412,9 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
             TextField(
               controller: ctrl,
               autofocus: true,
+              textCapitalization: TextCapitalization.none,
+              autocorrect: false,
+              enableSuggestions: false,
               decoration: InputDecoration(
                 hintText: 'Введите имя или позывной',
                 filled: true,
@@ -284,6 +461,76 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
               if (ctx.mounted) Navigator.pop(ctx);
             },
             child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+  void _showAdminSecretKeyDialog() {
+    final ctrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.shield_rounded, color: MayakTheme.accentAmber),
+            SizedBox(width: 8),
+            Text('Ключ Администратора', style: TextStyle(fontSize: 17)),
+          ],
+        ),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          obscureText: true,
+          textCapitalization: TextCapitalization.none,
+          autocorrect: false,
+          enableSuggestions: false,
+          keyboardType: TextInputType.visiblePassword,
+          decoration: InputDecoration(
+            hintText: 'Введите секретную команду',
+            filled: true,
+            fillColor: MayakTheme.bgDeep,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: MayakTheme.accentAmber,
+              foregroundColor: Colors.black,
+            ),
+            onPressed: () async {
+              final unlocked =
+                  await engine.tryUnlockAdminConsole(ctrl.text.trim());
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (!mounted) return;
+              if (unlocked) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    backgroundColor: Color(0xFF065F46),
+                    content:
+                        Text('🛡️ ROOT-Панель Администратора разблокирована!'),
+                  ),
+                );
+                _openFullAdminDashboard();
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    backgroundColor: Color(0xFF7F1D1D),
+                    content: Text('Неверный ключ администратора'),
+                  ),
+                );
+              }
+            },
+            child: const Text('Войти'),
           ),
         ],
       ),
@@ -733,6 +980,51 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                   ],
                 ),
                 const SizedBox(height: 12),
+                // v1.6.0: ЭКСПОРТ И ИМПОРТ РЕЗЕРВНОЙ КОПИИ (.mayakbak)
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: MayakTheme.accentCyan,
+                          side: const BorderSide(color: MayakTheme.accentCyan),
+                        ),
+                        icon: const Icon(Icons.upload_file_rounded, size: 17),
+                        label: const Text('Экспорт копии',
+                            style: TextStyle(fontSize: 12)),
+                        onPressed: () async {
+                          final path =
+                              await engine.exportBackupJsonToDownloads();
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Резервная копия сохранена: $path'),
+                              duration: const Duration(seconds: 4),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: MayakTheme.accentEmerald,
+                          side:
+                              const BorderSide(color: MayakTheme.accentEmerald),
+                        ),
+                        icon: const Icon(Icons.restore_rounded, size: 17),
+                        label: const Text('Импорт копии',
+                            style: TextStyle(fontSize: 12)),
+                        onPressed: () {
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          _showImportBackupDialog();
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
                 // ОЧИСТКА СКАЧАННЫХ МЕДИА/ФАЙЛОВ ИЗ КЭША (с возможностью заново скачать по кнопке!)
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
@@ -876,6 +1168,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
         ),
         title: GestureDetector(
           onTap: _showEditNicknameDialog,
+          onLongPress: _showAdminSecretKeyDialog,
           child: Row(
             children: [
               Container(
@@ -1189,7 +1482,87 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                             color: Colors.white38),
                   ),
                 ),
-                if (contacts.isEmpty)
+                ...engine.groupChats.values.map((grp) {
+                  final gMsgs = engine.getGroupMessages(grp.groupId);
+                  final lastG = gMsgs.isNotEmpty ? gMsgs.last : null;
+                  final unreadG = engine.unreadGroupCounts[grp.groupId] ?? 0;
+                  return Container(
+                    margin:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: MayakTheme.bgSurface,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: MayakTheme.accentIndigo.withOpacity(0.45),
+                      ),
+                    ),
+                    child: ListTile(
+                      onTap: () {
+                        engine.markGroupRead(grp.groupId);
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => GroupConversationScreen(
+                                engine: engine, group: grp),
+                          ),
+                        );
+                      },
+                      leading: Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF4F46E5), Color(0xFF06B6D4)],
+                          ),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(Icons.groups_rounded,
+                            color: Colors.white),
+                      ),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              grp.title,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 15),
+                            ),
+                          ),
+                          Text(
+                            '${grp.memberIds.length} уч.',
+                            style: const TextStyle(
+                                fontSize: 10, color: MayakTheme.accentCyan),
+                          ),
+                        ],
+                      ),
+                      subtitle: Text(
+                        lastG != null
+                            ? '${lastG.senderName}: ${lastG.text}'
+                            : 'Групповая E2EE-комната',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 13),
+                      ),
+                      trailing: unreadG > 0
+                          ? CircleAvatar(
+                              radius: 12,
+                              backgroundColor: MayakTheme.accentCyan,
+                              child: Text(
+                                '$unreadG',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.black,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            )
+                          : const Icon(Icons.chevron_right,
+                              color: Colors.white38),
+                    ),
+                  );
+                }),
+                if (contacts.isEmpty && engine.groupChats.isEmpty)
                   Padding(
                     padding: const EdgeInsets.all(28),
                     child: Column(
@@ -1373,15 +1746,31 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: MayakTheme.accentCyan,
-        foregroundColor: Colors.black,
-        onPressed: _showAddContactSheet,
-        icon: const Icon(Icons.person_add_alt_1_rounded),
-        label: const Text(
-          'Новый узел',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
+      floatingActionButton: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FloatingActionButton.extended(
+            heroTag: 'fab_group',
+            backgroundColor: MayakTheme.bgSurfaceLight,
+            foregroundColor: Colors.white,
+            onPressed: _showCreateGroupDialog,
+            icon: const Icon(Icons.group_add_rounded),
+            label: const Text('Группа',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(width: 10),
+          FloatingActionButton.extended(
+            heroTag: 'fab_peer',
+            backgroundColor: MayakTheme.accentCyan,
+            foregroundColor: Colors.black,
+            onPressed: _showAddContactSheet,
+            icon: const Icon(Icons.person_add_alt_1_rounded),
+            label: const Text(
+              'Новый узел',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1433,6 +1822,22 @@ class AdminDashboardScreen extends StatefulWidget {
 
 class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   MeshEngine get engine => widget.engine;
+
+  void _onAdminEngineUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onAdminEngineUpdate);
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onAdminEngineUpdate);
+    super.dispose();
+  }
 
   void _showAddTriggerDialog() {
     final ctrl = TextEditingController();
@@ -2187,6 +2592,9 @@ class ChatConversationScreen extends StatefulWidget {
 
 class _ChatConversationScreenState extends State<ChatConversationScreen> {
   final TextEditingController _msgCtrl = TextEditingController();
+  bool _isSearching = false;
+  final _searchCtrl = TextEditingController();
+  String _searchQuery = '';
   final ScrollController _scrollCtrl = ScrollController();
 
   MeshEngine get engine => widget.engine;
@@ -3105,7 +3513,14 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
         widget.isBroadcast ? widget.initialTitle : (contact?.displayTitle ?? widget.initialTitle);
     final isOnline =
         widget.isBroadcast ? engine.connectedPeersCount > 0 : (contact?.isOnline ?? false);
-    final messages = engine.getMessagesFor(widget.peerId);
+    final allMessages = engine.getMessagesFor(widget.peerId);
+    final messages = _searchQuery.isEmpty
+        ? allMessages
+        : allMessages
+            .where((m) =>
+                m.text.toLowerCase().contains(_searchQuery) ||
+                (m.fileName ?? '').toLowerCase().contains(_searchQuery))
+            .toList();
     final selfBanned = engine.isSelfBanned;
 
     return Scaffold(
@@ -3174,6 +3589,22 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Поиск по сообщениям',
+            icon: Icon(
+              _isSearching ? Icons.search_off_rounded : Icons.search_rounded,
+              color: Colors.white70,
+            ),
+            onPressed: () {
+              setState(() {
+                _isSearching = !_isSearching;
+                if (!_isSearching) {
+                  _searchCtrl.clear();
+                  _searchQuery = '';
+                }
+              });
+            },
+          ),
           if (!widget.isBroadcast)
             IconButton(
               tooltip: 'Проверить код безопасности E2EE',
@@ -3223,6 +3654,37 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
       ),
       body: Column(
         children: [
+          if (_isSearching)
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+              color: MayakTheme.bgSurface,
+              child: TextField(
+                controller: _searchCtrl,
+                autofocus: true,
+                onChanged: (v) =>
+                    setState(() => _searchQuery = v.trim().toLowerCase()),
+                decoration: InputDecoration(
+                  hintText: 'Поиск по сообщениям и файлам...',
+                  prefixIcon: const Icon(Icons.search_rounded, size: 18),
+                  suffixIcon: _searchQuery.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear_rounded, size: 18),
+                          onPressed: () {
+                            _searchCtrl.clear();
+                            setState(() => _searchQuery = '');
+                          },
+                        )
+                      : null,
+                  isDense: true,
+                  filled: true,
+                  fillColor: MayakTheme.bgDeep,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
           Expanded(
             child: messages.isEmpty
                 ? Center(
@@ -4158,6 +4620,166 @@ class _QrScannerPageState extends State<QrScannerPage> {
             }
           }
         },
+      ),
+    );
+  }
+}
+
+
+class GroupConversationScreen extends StatefulWidget {
+  final MeshEngine engine;
+  final GroupChat group;
+
+  const GroupConversationScreen({
+    super.key,
+    required this.engine,
+    required this.group,
+  });
+
+  @override
+  State<GroupConversationScreen> createState() =>
+      _GroupConversationScreenState();
+}
+
+class _GroupConversationScreenState extends State<GroupConversationScreen> {
+  final _ctrl = TextEditingController();
+  final _scroll = ScrollController();
+
+  MeshEngine get engine => widget.engine;
+
+  void _onUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onUpdate);
+    engine.markGroupRead(widget.group.groupId);
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onUpdate);
+    _ctrl.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final msgs = engine.getGroupMessages(widget.group.groupId);
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.group.title,
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            Text('Участников: ${widget.group.memberIds.length} • E2EE Mesh',
+                style:
+                    const TextStyle(fontSize: 11, color: MayakTheme.accentCyan)),
+          ],
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: msgs.isEmpty
+                ? const Center(
+                    child: Text(
+                      'Напишите первое сообщение в групповую комнату',
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.all(12),
+                    itemCount: msgs.length,
+                    itemBuilder: (_, idx) {
+                      final m = msgs[idx];
+                      return Align(
+                        alignment: m.isMe
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          constraints: const BoxConstraints(maxWidth: 300),
+                          decoration: BoxDecoration(
+                            color: m.isMe
+                                ? const Color(0xFF1E3A8A)
+                                : MayakTheme.bgSurface,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (!m.isMe)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 2),
+                                  child: Text(
+                                    m.senderName,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: MayakTheme.accentCyan,
+                                    ),
+                                  ),
+                                ),
+                              Text(m.text,
+                                  style: const TextStyle(color: Colors.white)),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            color: MayakTheme.bgSurface,
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _ctrl,
+                    decoration: InputDecoration(
+                      hintText: 'Сообщение в группу...',
+                      filled: true,
+                      fillColor: MayakTheme.bgDeep,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(20),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                    onSubmitted: (_) async {
+                      final txt = _ctrl.text;
+                      _ctrl.clear();
+                      await engine.sendGroupMessage(
+                          widget.group.groupId, txt);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  style: IconButton.styleFrom(
+                    backgroundColor: MayakTheme.accentCyan,
+                    foregroundColor: Colors.black,
+                  ),
+                  icon: const Icon(Icons.send_rounded),
+                  onPressed: () async {
+                    final txt = _ctrl.text;
+                    _ctrl.clear();
+                    await engine.sendGroupMessage(widget.group.groupId, txt);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
