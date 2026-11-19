@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
@@ -75,6 +76,384 @@ class WindowsMciAudioBridge {
       _free!(bufPtr.cast());
     }
   }
+}
+
+final class _WaveFormatEx extends Struct {
+  @Uint16()
+  external int wFormatTag;
+  @Uint16()
+  external int nChannels;
+  @Uint32()
+  external int nSamplesPerSec;
+  @Uint32()
+  external int nAvgBytesPerSec;
+  @Uint16()
+  external int nBlockAlign;
+  @Uint16()
+  external int wBitsPerSample;
+  @Uint16()
+  external int cbSize;
+}
+
+final class _WaveHdr extends Struct {
+  external Pointer<Uint8> lpData;
+  @Uint32()
+  external int dwBufferLength;
+  @Uint32()
+  external int dwBytesRecorded;
+  @IntPtr()
+  external int dwUser;
+  @Uint32()
+  external int dwFlags;
+  @Uint32()
+  external int dwLoops;
+  external Pointer<Void> lpNext;
+  @IntPtr()
+  external int reserved;
+}
+
+typedef _WaveOutOpenNative = Uint32 Function(
+    Pointer<IntPtr>, Uint32, Pointer<_WaveFormatEx>, IntPtr, IntPtr, Uint32);
+typedef _WaveOutOpenDart = int Function(
+    Pointer<IntPtr>, int, Pointer<_WaveFormatEx>, int, int, int);
+typedef _WaveHdrOpNative = Uint32 Function(IntPtr, Pointer<_WaveHdr>, Uint32);
+typedef _WaveHdrOpDart = int Function(int, Pointer<_WaveHdr>, int);
+typedef _WaveSimpleNative = Uint32 Function(IntPtr);
+typedef _WaveSimpleDart = int Function(int);
+
+class WindowsPcmAudioBridge {
+  static const int _waveMapper = 0xFFFFFFFF;
+  static const int _whdrDone = 0x00000001;
+  static const int _whdrPrepared = 0x00000002;
+  static const int _sampleRate = 16000;
+  static const int _inChunkBytes = 1280; // 40ms @ 16kHz 16-bit mono
+  static const int _inBufCount = 6;
+  static const int _outBufCount = 16;
+  static const int _outBufCap = 32768;
+
+  static bool _loaded = false;
+  static _CoTaskMemAllocDart? _alloc;
+  static _CoTaskMemFreeDart? _free;
+  static _WaveOutOpenDart? _waveOutOpen;
+  static _WaveHdrOpDart? _waveOutPrepare;
+  static _WaveHdrOpDart? _waveOutWrite;
+  static _WaveHdrOpDart? _waveOutUnprepare;
+  static _WaveSimpleDart? _waveOutReset;
+  static _WaveSimpleDart? _waveOutClose;
+
+  static _WaveOutOpenDart? _waveInOpen;
+  static _WaveHdrOpDart? _waveInPrepare;
+  static _WaveHdrOpDart? _waveInAddBuffer;
+  static _WaveHdrOpDart? _waveInUnprepare;
+  static _WaveSimpleDart? _waveInStart;
+  static _WaveSimpleDart? _waveInReset;
+  static _WaveSimpleDart? _waveInClose;
+
+  static int _hWaveOut = 0;
+  static int _hWaveIn = 0;
+  static final List<Pointer<_WaveHdr>> _outHdrs = [];
+  static final List<Pointer<Uint8>> _outBufs = [];
+  static final List<Pointer<_WaveHdr>> _inHdrs = [];
+  static final List<Pointer<Uint8>> _inBufs = [];
+  static Timer? _inPollTimer;
+  static Timer? _toneTimer;
+  static bool _micMuted = false;
+  static void Function(Uint8List pcm)? _onCaptured;
+
+  static void _ensureLoaded() {
+    if (_loaded || !Platform.isWindows) return;
+    _loaded = true;
+    try {
+      final winmm = DynamicLibrary.open('winmm.dll');
+      final ole32 = DynamicLibrary.open('ole32.dll');
+      _alloc = ole32.lookupFunction<_CoTaskMemAllocNative, _CoTaskMemAllocDart>(
+          'CoTaskMemAlloc');
+      _free = ole32.lookupFunction<_CoTaskMemFreeNative, _CoTaskMemFreeDart>(
+          'CoTaskMemFree');
+
+      _waveOutOpen = winmm
+          .lookupFunction<_WaveOutOpenNative, _WaveOutOpenDart>('waveOutOpen');
+      _waveOutPrepare =
+          winmm.lookupFunction<_WaveHdrOpNative, _WaveHdrOpDart>(
+              'waveOutPrepareHeader');
+      _waveOutWrite = winmm
+          .lookupFunction<_WaveHdrOpNative, _WaveHdrOpDart>('waveOutWrite');
+      _waveOutUnprepare =
+          winmm.lookupFunction<_WaveHdrOpNative, _WaveHdrOpDart>(
+              'waveOutUnprepareHeader');
+      _waveOutReset = winmm
+          .lookupFunction<_WaveSimpleNative, _WaveSimpleDart>('waveOutReset');
+      _waveOutClose = winmm
+          .lookupFunction<_WaveSimpleNative, _WaveSimpleDart>('waveOutClose');
+
+      _waveInOpen = winmm
+          .lookupFunction<_WaveOutOpenNative, _WaveOutOpenDart>('waveInOpen');
+      _waveInPrepare = winmm.lookupFunction<_WaveHdrOpNative, _WaveHdrOpDart>(
+          'waveInPrepareHeader');
+      _waveInAddBuffer = winmm.lookupFunction<_WaveHdrOpNative, _WaveHdrOpDart>(
+          'waveInAddBuffer');
+      _waveInUnprepare = winmm.lookupFunction<_WaveHdrOpNative, _WaveHdrOpDart>(
+          'waveInUnprepareHeader');
+      _waveInStart = winmm
+          .lookupFunction<_WaveSimpleNative, _WaveSimpleDart>('waveInStart');
+      _waveInReset = winmm
+          .lookupFunction<_WaveSimpleNative, _WaveSimpleDart>('waveInReset');
+      _waveInClose = winmm
+          .lookupFunction<_WaveSimpleNative, _WaveSimpleDart>('waveInClose');
+    } catch (_) {}
+  }
+
+  static Pointer<_WaveFormatEx> _allocFormat() {
+    final fmt = _alloc!(sizeOf<_WaveFormatEx>()).cast<_WaveFormatEx>();
+    fmt.ref.wFormatTag = 1; // PCM
+    fmt.ref.nChannels = 1;
+    fmt.ref.nSamplesPerSec = _sampleRate;
+    fmt.ref.wBitsPerSample = 16;
+    fmt.ref.nBlockAlign = 2;
+    fmt.ref.nAvgBytesPerSec = _sampleRate * 2;
+    fmt.ref.cbSize = 0;
+    return fmt;
+  }
+
+  static bool ensureOutputOpen() {
+    if (!Platform.isWindows) return false;
+    _ensureLoaded();
+    if (_hWaveOut != 0) return true;
+    if (_waveOutOpen == null || _alloc == null || _free == null) return false;
+    final hPtr = _alloc!(sizeOf<IntPtr>()).cast<IntPtr>();
+    final fmt = _allocFormat();
+    try {
+      hPtr.value = 0;
+      final res = _waveOutOpen!(hPtr, _waveMapper, fmt, 0, 0, 0);
+      if (res != 0) return false;
+      _hWaveOut = hPtr.value;
+      _outHdrs.clear();
+      _outBufs.clear();
+      for (int i = 0; i < _outBufCount; i++) {
+        final hdr = _alloc!(sizeOf<_WaveHdr>()).cast<_WaveHdr>();
+        final buf = _alloc!(_outBufCap).cast<Uint8>();
+        hdr.ref.lpData = buf;
+        hdr.ref.dwBufferLength = 0;
+        hdr.ref.dwBytesRecorded = 0;
+        hdr.ref.dwUser = 0;
+        hdr.ref.dwFlags = 0;
+        hdr.ref.dwLoops = 0;
+        hdr.ref.lpNext = nullptr;
+        hdr.ref.reserved = 0;
+        _outHdrs.add(hdr);
+        _outBufs.add(buf);
+      }
+      return true;
+    } finally {
+      _free!(hPtr.cast());
+      _free!(fmt.cast());
+    }
+  }
+
+  static void playPcm(Uint8List pcm) {
+    if (!Platform.isWindows || pcm.isEmpty) return;
+    if (!ensureOutputOpen()) return;
+    final len = pcm.length > _outBufCap ? _outBufCap : pcm.length;
+    Pointer<_WaveHdr>? freeHdr;
+    Pointer<Uint8>? freeBuf;
+    for (int i = 0; i < _outHdrs.length; i++) {
+      final hdr = _outHdrs[i];
+      final flags = hdr.ref.dwFlags;
+      if ((flags & _whdrPrepared) == 0 || (flags & _whdrDone) != 0) {
+        if ((flags & _whdrPrepared) != 0) {
+          _waveOutUnprepare!(_hWaveOut, hdr, sizeOf<_WaveHdr>());
+        }
+        freeHdr = hdr;
+        freeBuf = _outBufs[i];
+        break;
+      }
+    }
+    if (freeHdr == null || freeBuf == null) return;
+    freeBuf.asTypedList(len).setRange(0, len, pcm);
+    freeHdr.ref.lpData = freeBuf;
+    freeHdr.ref.dwBufferLength = len;
+    freeHdr.ref.dwFlags = 0;
+    freeHdr.ref.dwLoops = 0;
+    if (_waveOutPrepare!(_hWaveOut, freeHdr, sizeOf<_WaveHdr>()) == 0) {
+      _waveOutWrite!(_hWaveOut, freeHdr, sizeOf<_WaveHdr>());
+    }
+  }
+
+  static void setMicMuted(bool muted) {
+    _micMuted = muted;
+  }
+
+  static bool startFullDuplex(void Function(Uint8List pcm) onCaptured) {
+    if (!Platform.isWindows) return false;
+    stopFullDuplex();
+    _ensureLoaded();
+    ensureOutputOpen();
+    if (_waveInOpen == null || _alloc == null || _free == null) return false;
+    _onCaptured = onCaptured;
+    _micMuted = false;
+    final hPtr = _alloc!(sizeOf<IntPtr>()).cast<IntPtr>();
+    final fmt = _allocFormat();
+    try {
+      hPtr.value = 0;
+      final res = _waveInOpen!(hPtr, _waveMapper, fmt, 0, 0, 0);
+      if (res != 0) return _hWaveOut != 0;
+      _hWaveIn = hPtr.value;
+      _inHdrs.clear();
+      _inBufs.clear();
+      for (int i = 0; i < _inBufCount; i++) {
+        final hdr = _alloc!(sizeOf<_WaveHdr>()).cast<_WaveHdr>();
+        final buf = _alloc!(_inChunkBytes).cast<Uint8>();
+        hdr.ref.lpData = buf;
+        hdr.ref.dwBufferLength = _inChunkBytes;
+        hdr.ref.dwBytesRecorded = 0;
+        hdr.ref.dwUser = 0;
+        hdr.ref.dwFlags = 0;
+        hdr.ref.dwLoops = 0;
+        hdr.ref.lpNext = nullptr;
+        hdr.ref.reserved = 0;
+        _waveInPrepare!(_hWaveIn, hdr, sizeOf<_WaveHdr>());
+        _waveInAddBuffer!(_hWaveIn, hdr, sizeOf<_WaveHdr>());
+        _inHdrs.add(hdr);
+        _inBufs.add(buf);
+      }
+      _waveInStart!(_hWaveIn);
+      _inPollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
+        if (_hWaveIn == 0) return;
+        for (int i = 0; i < _inHdrs.length; i++) {
+          final hdr = _inHdrs[i];
+          if ((hdr.ref.dwFlags & _whdrDone) != 0) {
+            final recLen = hdr.ref.dwBytesRecorded;
+            if (recLen > 0 && !_micMuted && _onCaptured != null) {
+              final copy = Uint8List.fromList(
+                  _inBufs[i].asTypedList(recLen));
+              _onCaptured!(copy);
+            }
+            _waveInUnprepare!(_hWaveIn, hdr, sizeOf<_WaveHdr>());
+            hdr.ref.dwFlags = 0;
+            hdr.ref.dwBytesRecorded = 0;
+            hdr.ref.dwBufferLength = _inChunkBytes;
+            _waveInPrepare!(_hWaveIn, hdr, sizeOf<_WaveHdr>());
+            _waveInAddBuffer!(_hWaveIn, hdr, sizeOf<_WaveHdr>());
+          }
+        }
+      });
+      return true;
+    } finally {
+      _free!(hPtr.cast());
+      _free!(fmt.cast());
+    }
+  }
+
+  static void stopFullDuplex() {
+    _inPollTimer?.cancel();
+    _inPollTimer = null;
+    _onCaptured = null;
+    if (_hWaveIn != 0) {
+      try { _waveInReset!(_hWaveIn); } catch (_) {}
+      for (final hdr in _inHdrs) {
+        try { _waveInUnprepare!(_hWaveIn, hdr, sizeOf<_WaveHdr>()); } catch (_) {}
+        try { _free!(hdr.cast()); } catch (_) {}
+      }
+      for (final buf in _inBufs) {
+        try { _free!(buf.cast()); } catch (_) {}
+      }
+      _inHdrs.clear();
+      _inBufs.clear();
+      try { _waveInClose!(_hWaveIn); } catch (_) {}
+      _hWaveIn = 0;
+    }
+    if (_hWaveOut != 0 && _toneTimer == null) {
+      _closeOutput();
+    }
+  }
+
+  static void _closeOutput() {
+    if (_hWaveOut == 0) return;
+    try { _waveOutReset!(_hWaveOut); } catch (_) {}
+    for (final hdr in _outHdrs) {
+      try { _waveOutUnprepare!(_hWaveOut, hdr, sizeOf<_WaveHdr>()); } catch (_) {}
+      try { _free!(hdr.cast()); } catch (_) {}
+    }
+    for (final buf in _outBufs) {
+      try { _free!(buf.cast()); } catch (_) {}
+    }
+    _outHdrs.clear();
+    _outBufs.clear();
+    try { _waveOutClose!(_hWaveOut); } catch (_) {}
+    _hWaveOut = 0;
+  }
+
+  static Uint8List _synthTone(double freq1, double freq2, int durationMs,
+      {double amp = 0.25}) {
+    final samples = (_sampleRate * durationMs) ~/ 1000;
+    final out = Int16List(samples);
+    for (int i = 0; i < samples; i++) {
+      final t = i / _sampleRate;
+      final fade = (i < 160)
+          ? i / 160.0
+          : (i > samples - 160 ? (samples - i) / 160.0 : 1.0);
+      final v = (sin(2 * pi * freq1 * t) +
+              (freq2 > 0 ? sin(2 * pi * freq2 * t) : 0.0)) *
+          (freq2 > 0 ? 0.5 : 1.0) *
+          amp *
+          fade;
+      out[i] = (v * 32767).round().clamp(-32767, 32767);
+    }
+    return out.buffer.asUint8List();
+  }
+
+  static void startOutgoingRingback() {
+    stopTones();
+    if (!Platform.isWindows) return;
+    final beep = _synthTone(425.0, 0.0, 950, amp: 0.22);
+    playPcm(beep);
+    _toneTimer = Timer.periodic(const Duration(milliseconds: 3200), (_) {
+      playPcm(beep);
+    });
+  }
+
+  static void startIncomingRingtone() {
+    stopTones();
+    if (!Platform.isWindows) return;
+    final pulse1 = _synthTone(440.0, 554.37, 380, amp: 0.28);
+    final pulse2 = _synthTone(554.37, 659.25, 420, amp: 0.28);
+    void ringOnce() {
+      playPcm(pulse1);
+      Future.delayed(const Duration(milliseconds: 420), () {
+        if (_toneTimer != null) playPcm(pulse2);
+      });
+    }
+    ringOnce();
+    _toneTimer = Timer.periodic(const Duration(milliseconds: 2200), (_) {
+      ringOnce();
+    });
+  }
+
+  static void playCallEndTone() {
+    if (!Platform.isWindows) return;
+    playPcm(_synthTone(440.0, 0.0, 140, amp: 0.22));
+    Future.delayed(const Duration(milliseconds: 170), () {
+      playPcm(_synthTone(330.0, 0.0, 180, amp: 0.22));
+    });
+  }
+
+  static void stopTones() {
+    _toneTimer?.cancel();
+    _toneTimer = null;
+    if (_hWaveIn == 0 && _hWaveOut != 0) {
+      _closeOutput();
+    }
+  }
+}
+
+class _UdpVideoAssembly {
+  final int total;
+  final List<Uint8List?> chunks;
+  int received = 0;
+  final int createdMs;
+  _UdpVideoAssembly(this.total)
+      : chunks = List<Uint8List?>.filled(total, null),
+        createdMs = DateTime.now().millisecondsSinceEpoch;
 }
 
 class ChatMessage {
@@ -629,6 +1008,7 @@ class MeshEngine {
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
+  static const int callMediaUdpPort = 42072;
   static const int maxBufferPackets = 500;
   static const int maxLineLengthBytes = 250 * 1024;
   static const int maxConcurrentIncomingFiles = 8;
@@ -736,15 +1116,35 @@ class MeshEngine {
   final Map<String, GroupChat> groupChats = {};
   final Map<String, int> unreadGroupCounts = {};
 
-  // v1.7.0: ГЧ (Голосовой чат) и ВЧ (Видеочат) в реальном времени
+  // v1.8.0: Полнодуплексный ГЧ/ВЧ (16kHz PCM + UDP 42072 ChaCha20 + 14 FPS Video)
   String? activeCallPeerId;
   String activeCallMode = 'voice'; // 'voice' | 'video'
   bool isCallAccepted = false;
+  bool isCallMicMuted = false;
+  bool isCallVideoMuted = false;
+  bool remoteCallMicMuted = false;
+  bool remoteCallVideoMuted = false;
+  bool isCallFrontCamera = true;
+  String windowsVideoSource = 'camera'; // 'camera' | 'screen'
   String? incomingCallFromPeerId;
   String incomingCallMode = 'voice';
+  String _incomingCallId = '';
+  int _incomingCallUdpPort = callMediaUdpPort;
+  String _activeCallId = '';
+  SecretKey? _activeCallMediaKey;
+  RawDatagramSocket? _callUdpSocket;
+  int _callUdpListenPort = callMediaUdpPort;
+  String? _activeCallPeerIp;
+  int _activeCallPeerUdpPort = callMediaUdpPort;
+  int _callAudioSeq = 0;
+  int _callVideoSeq = 0;
+  final Map<int, _UdpVideoAssembly> _udpVideoAssemblies = {};
+  int _lastRenderedVideoSeq = -1;
+  ServerSocket? _winVideoServer;
+  Process? _winVideoProcess;
+  Timer? _udpPunchTimer;
   Uint8List? remoteVideoFrameBytes;
   String callStatusText = '';
-  int _lastCallAudioPlayMs = 0;
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -1065,21 +1465,579 @@ class MeshEngine {
     }
   }
 
+  String? _resolvePeerIp(String peerId) {
+    for (final entry in _tcpPeers.entries) {
+      if (entry.value == peerId) {
+        return entry.key.remoteAddress.address;
+      }
+    }
+    final c = knownContacts[peerId];
+    if (c != null && c.lastAddress.isNotEmpty) {
+      final host = c.lastAddress.split(':').first.trim();
+      if (host.isNotEmpty && !host.startsWith('BLE')) return host;
+    }
+    return null;
+  }
+
+  Future<void> _initCallUdpSocket() async {
+    if (_callUdpSocket != null) return;
+    for (final port in [callMediaUdpPort, 0]) {
+      try {
+        _callUdpSocket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          port,
+          reuseAddress: true,
+        );
+        _callUdpListenPort = _callUdpSocket!.port;
+        _callUdpSocket!.listen((event) {
+          if (event == RawSocketEvent.read) {
+            final dg = _callUdpSocket?.receive();
+            if (dg != null) {
+              unawaited(_onCallUdpDatagram(dg));
+            }
+          }
+        }, onError: (_) {});
+        break;
+      } catch (_) {}
+    }
+  }
+
+  Future<SecretKey?> _deriveCallMediaKey(String peerId, String callId) async {
+    final contact = knownContacts[peerId];
+    if (contact == null || contact.dhPubHex.isEmpty) return null;
+    try {
+      final peerDhPub = SimplePublicKey(
+        _fromHex(contact.dhPubHex),
+        type: KeyPairType.x25519,
+      );
+      final shared = await _x25519.sharedSecretKey(
+        keyPair: _dhKeyPair,
+        remotePublicKey: peerDhPub,
+      );
+      final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+      return await hkdf.deriveKey(
+        secretKey: shared,
+        nonce: utf8.encode('mayak-call-salt-v18'),
+        info: utf8.encode('mayak-call-key|$callId'),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _sendCallUdpPacket(
+      int type, int seq, int chunkIdx, int chunkTotal, Uint8List payload) async {
+    final sock = _callUdpSocket;
+    final key = _activeCallMediaKey;
+    final ip = _activeCallPeerIp ??
+        (activeCallPeerId != null ? _resolvePeerIp(activeCallPeerId!) : null);
+    if (sock == null || key == null || ip == null || ip.isEmpty) return;
+    try {
+      final nonce = Uint8List(12);
+      final rng = Random.secure();
+      for (int i = 0; i < 12; i++) {
+        nonce[i] = rng.nextInt(256);
+      }
+      final box = await _cipher.encrypt(
+        payload,
+        secretKey: key,
+        nonce: nonce,
+      );
+      final out = Uint8List(20 + box.cipherText.length + 16);
+      out[0] = 0x4D; // 'M'
+      out[1] = type;
+      out[2] = (seq >> 24) & 0xFF;
+      out[3] = (seq >> 16) & 0xFF;
+      out[4] = (seq >> 8) & 0xFF;
+      out[5] = seq & 0xFF;
+      out[6] = chunkIdx & 0xFF;
+      out[7] = chunkTotal & 0xFF;
+      out.setRange(8, 20, nonce);
+      out.setRange(20, 20 + box.cipherText.length, box.cipherText);
+      out.setRange(20 + box.cipherText.length, out.length, box.mac.bytes);
+      sock.send(out, InternetAddress(ip), _activeCallPeerUdpPort);
+    } catch (_) {}
+  }
+
+  Future<void> _onCallUdpDatagram(Datagram dg) async {
+    if (activeCallPeerId == null || !isCallAccepted) return;
+    final key = _activeCallMediaKey;
+    if (key == null) return;
+    final data = dg.data;
+    if (data.length < 36 || data[0] != 0x4D) return;
+    final type = data[1];
+    final seq = (data[2] << 24) | (data[3] << 16) | (data[4] << 8) | data[5];
+    final chunkIdx = data[6];
+    final chunkTotal = data[7];
+    final nonce = data.sublist(8, 20);
+    final ctLen = data.length - 36;
+    final ct = data.sublist(20, 20 + ctLen);
+    final macBytes = data.sublist(20 + ctLen);
+    try {
+      final plain = await _cipher.decrypt(
+        SecretBox(ct, nonce: nonce, mac: Mac(macBytes)),
+        secretKey: key,
+      );
+      // Автоматически запоминаем обратный UDP-адрес собеседника (NAT punch)
+      _activeCallPeerIp = dg.address.address;
+      _activeCallPeerUdpPort = dg.port;
+
+      if (type == 0x01) {
+        // PCM 16kHz 16-bit mono audio
+        final pcm = Uint8List.fromList(plain);
+        if (Platform.isAndroid) {
+          unawaited(_nativeChannel.invokeMethod('playCallAudioPcm', pcm));
+        } else if (Platform.isWindows) {
+          WindowsPcmAudioBridge.playPcm(pcm);
+        }
+      } else if (type == 0x02 && chunkTotal > 0 && chunkIdx < chunkTotal) {
+        // Chunked JPEG video frame
+        if (seq < _lastRenderedVideoSeq - 2) return;
+        final asm = _udpVideoAssemblies.putIfAbsent(
+            seq, () => _UdpVideoAssembly(chunkTotal));
+        if (asm.chunks[chunkIdx] == null) {
+          asm.chunks[chunkIdx] = Uint8List.fromList(plain);
+          asm.received++;
+        }
+        if (asm.received == asm.total) {
+          final bb = BytesBuilder(copy: false);
+          for (final c in asm.chunks) {
+            if (c != null) bb.add(c);
+          }
+          remoteVideoFrameBytes = bb.takeBytes();
+          _lastRenderedVideoSeq = seq;
+          _udpVideoAssemblies.removeWhere((k, _) => k <= seq);
+          onStateChanged();
+        } else if (_udpVideoAssemblies.length > 4) {
+          final oldestKey = _udpVideoAssemblies.keys.reduce(min);
+          _udpVideoAssemblies.remove(oldestKey);
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _onLocalCapturedPcm(Uint8List pcm) {
+    if (activeCallPeerId == null || !isCallAccepted || isCallMicMuted) return;
+    _callAudioSeq++;
+    unawaited(_sendCallUdpPacket(0x01, _callAudioSeq, 0, 1, pcm));
+  }
+
+  void _onLocalCapturedVideoFrame(Uint8List jpeg) {
+    if (activeCallPeerId == null ||
+        !isCallAccepted ||
+        activeCallMode != 'video' ||
+        isCallVideoMuted ||
+        jpeg.isEmpty) {
+      return;
+    }
+    _callVideoSeq++;
+    final seq = _callVideoSeq;
+    const maxChunk = 1150;
+    final total = (jpeg.length + maxChunk - 1) ~/ maxChunk;
+    if (total <= 0 || total > 120) return;
+    for (int i = 0; i < total; i++) {
+      final start = i * maxChunk;
+      final end = min(start + maxChunk, jpeg.length);
+      final part = Uint8List.sublistView(jpeg, start, end);
+      unawaited(_sendCallUdpPacket(0x02, seq, i, total, part));
+    }
+  }
+
+  Future<void> _startCallTonesOutgoing() async {
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('startOutgoingRingback');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.startOutgoingRingback();
+    }
+  }
+
+  Future<void> _stopCallTonesOutgoing() async {
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('stopOutgoingRingback');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.stopTones();
+    }
+  }
+
+  Future<void> _startIncomingRingtone() async {
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('startIncomingRingtone');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.startIncomingRingtone();
+    }
+  }
+
+  Future<void> _stopIncomingRingtone() async {
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('stopIncomingRingtone');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.stopTones();
+    }
+  }
+
+  Future<void> _playCallEndTone() async {
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('playCallEndTone');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.playCallEndTone();
+    }
+  }
+
+  Future<void> _startWindowsVideoStreamer() async {
+    await _stopWindowsVideoStreamer();
+    if (!Platform.isWindows) return;
+    try {
+      final srv = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      _winVideoServer = srv;
+      final localPort = srv.port;
+      srv.listen((client) {
+        final buf = <int>[];
+        client.listen((chunk) {
+          buf.addAll(chunk);
+          while (buf.length >= 4) {
+            final len =
+                (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
+            if (len <= 0 || len > 400000) {
+              buf.clear();
+              break;
+            }
+            if (buf.length < 4 + len) break;
+            final frame = Uint8List.fromList(buf.sublist(4, 4 + len));
+            buf.removeRange(0, 4 + len);
+            _onLocalCapturedVideoFrame(frame);
+          }
+        }, onError: (_) {});
+      }, onError: (_) {});
+
+      final useCam = windowsVideoSource == 'camera' ? '1' : '0';
+      final psScript = '''
+\$code = @"
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+
+public class MayakWinVideo {
+    [DllImport("avicap32.dll")]
+    public static extern IntPtr capCreateCaptureWindowA(string lpszWindowName, int dwStyle, int x, int y, int nWidth, int nHeight, IntPtr hwndParent, int nID);
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, string lParam);
+    [DllImport("user32.dll")]
+    public static extern bool DestroyWindow(IntPtr hWnd);
+
+    const int WM_CAP_DRIVER_CONNECT = 0x040A;
+    const int WM_CAP_DRIVER_DISCONNECT = 0x040B;
+    const int WM_CAP_SAVEDIB = 0x0419;
+    const int WM_CAP_GRAB_FRAME = 0x043C;
+
+    static ImageCodecInfo GetJpegCodec() {
+        foreach (var c in ImageCodecInfo.GetImageEncoders()) {
+            if (c.MimeType == "image/jpeg") return c;
+        }
+        return null;
+    }
+
+    public static void Run(int port, bool tryCam) {
+        var codec = GetJpegCodec();
+        var ep = new EncoderParameters(1);
+        ep.Param[0] = new EncoderParameter(Encoder.Quality, 75L);
+
+        IntPtr hCam = IntPtr.Zero;
+        bool camOk = false;
+        string dibPath = Path.Combine(Path.GetTempPath(), "mayak_cam_" + port + ".bmp");
+        if (tryCam) {
+            try {
+                hCam = capCreateCaptureWindowA("MayakCam", 0, 0, 0, 640, 480, IntPtr.Zero, 0);
+                if (hCam != IntPtr.Zero) {
+                    var res = SendMessage(hCam, WM_CAP_DRIVER_CONNECT, IntPtr.Zero, IntPtr.Zero);
+                    camOk = (res != IntPtr.Zero);
+                }
+            } catch { camOk = false; }
+        }
+
+        try {
+            using (var tcp = new TcpClient("127.0.0.1", port))
+            using (var ns = tcp.GetStream()) {
+                while (true) {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    byte[] jpg = null;
+                    try {
+                        if (camOk) {
+                            SendMessage(hCam, WM_CAP_GRAB_FRAME, IntPtr.Zero, IntPtr.Zero);
+                            SendMessage(hCam, WM_CAP_SAVEDIB, IntPtr.Zero, dibPath);
+                            if (File.Exists(dibPath)) {
+                                using (var fs = new FileStream(dibPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                                using (var raw = Image.FromStream(fs))
+                                using (var dst = new Bitmap(640, 480))
+                                using (var g = Graphics.FromImage(dst))
+                                using (var ms = new MemoryStream()) {
+                                    g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                                    g.DrawImage(raw, 0, 0, 640, 480);
+                                    dst.Save(ms, codec, ep);
+                                    jpg = ms.ToArray();
+                                }
+                            } else {
+                                camOk = false;
+                            }
+                        }
+                        if (!camOk) {
+                            var bounds = Screen.PrimaryScreen.Bounds;
+                            using (var scr = new Bitmap(bounds.Width, bounds.Height))
+                            using (var g1 = Graphics.FromImage(scr))
+                            using (var dst = new Bitmap(640, 360))
+                            using (var g2 = Graphics.FromImage(dst))
+                            using (var ms = new MemoryStream()) {
+                                g1.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
+                                g2.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                                g2.DrawImage(scr, 0, 0, 640, 360);
+                                dst.Save(ms, codec, ep);
+                                jpg = ms.ToArray();
+                            }
+                        }
+                    } catch { camOk = false; }
+
+                    if (jpg != null && jpg.Length > 0) {
+                        int n = jpg.Length;
+                        byte[] hdr = new byte[4] { (byte)(n >> 24), (byte)(n >> 16), (byte)(n >> 8), (byte)n };
+                        ns.Write(hdr, 0, 4);
+                        ns.Write(jpg, 0, n);
+                        ns.Flush();
+                    }
+                    int sleepMs = 70 - (int)sw.ElapsedMilliseconds;
+                    if (sleepMs > 5) Thread.Sleep(sleepMs);
+                }
+            }
+        } catch {
+        } finally {
+            if (hCam != IntPtr.Zero) {
+                try { SendMessage(hCam, WM_CAP_DRIVER_DISCONNECT, IntPtr.Zero, IntPtr.Zero); } catch {}
+                try { DestroyWindow(hCam); } catch {}
+            }
+            try { if (File.Exists(dibPath)) File.Delete(dibPath); } catch {}
+        }
+    }
+}
+"@
+Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Windows.Forms, System.Net.Sockets
+[MayakWinVideo]::Run($localPort, ($useCam -eq 1))
+''';
+      final tmpScript = File(
+          '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_vid_$localPort.ps1');
+      await tmpScript.writeAsString(psScript, flush: true);
+      _winVideoProcess = await Process.start(
+        'powershell',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          tmpScript.path,
+        ],
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _stopWindowsVideoStreamer() async {
+    try {
+      _winVideoProcess?.kill();
+    } catch (_) {}
+    _winVideoProcess = null;
+    try {
+      await _winVideoServer?.close();
+    } catch (_) {}
+    _winVideoServer = null;
+  }
+
+  Future<void> _startCallMediaPipelines() async {
+    await _initCallUdpSocket();
+    _udpVideoAssemblies.clear();
+    _lastRenderedVideoSeq = -1;
+    _callAudioSeq = 0;
+    _callVideoSeq = 0;
+
+    // 1. Полнодуплексный аудио-поток 16 kHz 16-bit Mono PCM
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('startCallAudio');
+        await _nativeChannel
+            .invokeMethod('setCallAudioMuted', {'muted': isCallMicMuted});
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.startFullDuplex(_onLocalCapturedPcm);
+      WindowsPcmAudioBridge.setMicMuted(isCallMicMuted);
+    }
+
+    // 2. Поток видео (если ВЧ и камера не выключена)
+    if (activeCallMode == 'video' && !isCallVideoMuted) {
+      if (Platform.isAndroid) {
+        try {
+          await _nativeChannel
+              .invokeMethod('startCallCamera', {'front': isCallFrontCamera});
+        } catch (_) {}
+      } else if (Platform.isWindows) {
+        unawaited(_startWindowsVideoStreamer());
+      }
+    }
+
+    // 3. UDP keepalive / NAT punch каждые 1.5с
+    _udpPunchTimer?.cancel();
+    void sendPunch() {
+      unawaited(_sendCallUdpPacket(0x03, 0, 0, 1, Uint8List.fromList([1, 8, 0])));
+    }
+    sendPunch();
+    Future.delayed(const Duration(milliseconds: 250), sendPunch);
+    _udpPunchTimer =
+        Timer.periodic(const Duration(milliseconds: 1500), (_) => sendPunch());
+  }
+
+  Future<void> _stopCallMediaPipelines() async {
+    _udpPunchTimer?.cancel();
+    _udpPunchTimer = null;
+    _udpVideoAssemblies.clear();
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('stopCallAudio');
+      } catch (_) {}
+      try {
+        await _nativeChannel.invokeMethod('stopCallCamera');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.stopFullDuplex();
+      await _stopWindowsVideoStreamer();
+    }
+  }
+
+  Future<void> _sendCallStateSync() async {
+    final pid = activeCallPeerId;
+    if (pid == null) return;
+    final contact = knownContacts[pid];
+    if (contact == null) return;
+    final payload = jsonEncode({
+      'v': 2,
+      'kind': 'CALL_STATE',
+      'micMuted': isCallMicMuted,
+      'videoMuted': isCallVideoMuted,
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: pid,
+      contact: contact,
+      msgId: _randomHex(10),
+      sealedPayloadBytes: utf8.encode(payload),
+      persistInOutbox: false,
+      keepInTransitBuffer: false,
+    );
+  }
+
+  Future<void> toggleCallMicMute() async {
+    isCallMicMuted = !isCallMicMuted;
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel
+            .invokeMethod('setCallAudioMuted', {'muted': isCallMicMuted});
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.setMicMuted(isCallMicMuted);
+    }
+    unawaited(_sendCallStateSync());
+    onStateChanged();
+  }
+
+  Future<void> toggleCallVideoMute() async {
+    if (activeCallMode != 'video') return;
+    isCallVideoMuted = !isCallVideoMuted;
+    if (isCallAccepted) {
+      if (isCallVideoMuted) {
+        if (Platform.isAndroid) {
+          try {
+            await _nativeChannel.invokeMethod('stopCallCamera');
+          } catch (_) {}
+        } else if (Platform.isWindows) {
+          await _stopWindowsVideoStreamer();
+        }
+      } else {
+        if (Platform.isAndroid) {
+          try {
+            await _nativeChannel
+                .invokeMethod('startCallCamera', {'front': isCallFrontCamera});
+          } catch (_) {}
+        } else if (Platform.isWindows) {
+          unawaited(_startWindowsVideoStreamer());
+        }
+      }
+    }
+    unawaited(_sendCallStateSync());
+    onStateChanged();
+  }
+
+  Future<void> switchCallCameraOrSource() async {
+    if (activeCallMode != 'video' || isCallVideoMuted) return;
+    if (Platform.isAndroid) {
+      isCallFrontCamera = !isCallFrontCamera;
+      try {
+        await _nativeChannel.invokeMethod('switchCallCamera');
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      windowsVideoSource =
+          windowsVideoSource == 'camera' ? 'screen' : 'camera';
+      if (isCallAccepted) {
+        unawaited(_startWindowsVideoStreamer());
+      }
+    }
+    onStateChanged();
+  }
+
   Future<void> startLiveCall(String peerId, String mode) async {
     final contact = knownContacts[peerId];
     if (contact == null) return;
+    await _initCallUdpSocket();
+    await _stopIncomingRingtone();
+    await _stopCallMediaPipelines();
+
     activeCallPeerId = peerId;
     activeCallMode = mode;
     isCallAccepted = false;
+    isCallMicMuted = false;
+    isCallVideoMuted = (mode != 'video');
+    remoteCallMicMuted = false;
+    remoteCallVideoMuted = (mode != 'video');
     remoteVideoFrameBytes = null;
+    _activeCallId = _randomHex(12);
+    _activeCallPeerIp = _resolvePeerIp(peerId);
+    _activeCallPeerUdpPort = callMediaUdpPort;
+    _activeCallMediaKey = await _deriveCallMediaKey(peerId, _activeCallId);
+
     callStatusText = mode == 'video'
         ? 'Вызов ВЧ (Видеочат)...'
         : 'Вызов ГЧ (Голосовой чат)...';
+
+    await _startCallTonesOutgoing();
+
     final payload = jsonEncode({
       'v': 2,
       'kind': 'CALL_INVITE',
       'mode': mode,
       'nick': nickname,
+      'callId': _activeCallId,
+      'udpPort': _callUdpListenPort,
     });
     await _encryptAndQueueSealedDataPacket(
       targetNodeId: peerId,
@@ -1095,20 +2053,36 @@ class MeshEngine {
   Future<void> acceptIncomingCall() async {
     final pid = incomingCallFromPeerId;
     if (pid == null) return;
+    await _initCallUdpSocket();
+    await _stopIncomingRingtone();
+    await _stopCallTonesOutgoing();
+
     final contact = knownContacts[pid];
     activeCallPeerId = pid;
     activeCallMode = incomingCallMode;
     isCallAccepted = true;
+    isCallMicMuted = false;
+    isCallVideoMuted = (activeCallMode != 'video');
+    remoteCallMicMuted = false;
+    remoteCallVideoMuted = (activeCallMode != 'video');
     remoteVideoFrameBytes = null;
+    _activeCallId = _incomingCallId.isNotEmpty ? _incomingCallId : _randomHex(12);
+    _activeCallPeerIp = _resolvePeerIp(pid);
+    _activeCallPeerUdpPort = _incomingCallUdpPort;
+    _activeCallMediaKey = await _deriveCallMediaKey(pid, _activeCallId);
     incomingCallFromPeerId = null;
+
     callStatusText = activeCallMode == 'video'
-        ? 'ВЧ активен (Видео + Голос)'
+        ? 'ВЧ активен (HD Видео + Голос)'
         : 'ГЧ активен (Голос)';
+
     if (contact != null) {
       final payload = jsonEncode({
         'v': 2,
         'kind': 'CALL_ACCEPT',
         'mode': activeCallMode,
+        'callId': _activeCallId,
+        'udpPort': _callUdpListenPort,
       });
       await _encryptAndQueueSealedDataPacket(
         targetNodeId: pid,
@@ -1116,14 +2090,17 @@ class MeshEngine {
         msgId: _randomHex(12),
         sealedPayloadBytes: utf8.encode(payload),
         persistInOutbox: false,
+        keepInTransitBuffer: false,
       );
     }
+    await _startCallMediaPipelines();
     onStateChanged();
   }
 
   Future<void> rejectIncomingCall() async {
     final pid = incomingCallFromPeerId;
     incomingCallFromPeerId = null;
+    await _stopIncomingRingtone();
     if (pid != null) {
       final contact = knownContacts[pid];
       if (contact != null) {
@@ -1134,20 +2111,32 @@ class MeshEngine {
           msgId: _randomHex(12),
           sealedPayloadBytes: utf8.encode(payload),
           persistInOutbox: false,
+          keepInTransitBuffer: false,
         );
       }
     }
     onStateChanged();
   }
 
-  Future<void> endActiveCall() async {
+  Future<void> endActiveCall({bool notifyPeer = true}) async {
     final pid = activeCallPeerId;
     activeCallPeerId = null;
     isCallAccepted = false;
+    isCallMicMuted = false;
+    isCallVideoMuted = false;
+    remoteCallMicMuted = false;
+    remoteCallVideoMuted = false;
     remoteVideoFrameBytes = null;
+    _activeCallMediaKey = null;
+    _activeCallId = '';
     callStatusText = '';
-    await stopAudioPlayback();
-    if (pid != null) {
+
+    await _stopCallTonesOutgoing();
+    await _stopIncomingRingtone();
+    await _stopCallMediaPipelines();
+    await _playCallEndTone();
+
+    if (notifyPeer && pid != null) {
       final contact = knownContacts[pid];
       if (contact != null) {
         final payload = jsonEncode({'v': 2, 'kind': 'CALL_END'});
@@ -1157,85 +2146,11 @@ class MeshEngine {
           msgId: _randomHex(12),
           sealedPayloadBytes: utf8.encode(payload),
           persistInOutbox: false,
+          keepInTransitBuffer: false,
         );
       }
     }
     onStateChanged();
-  }
-
-  Future<void> sendCallAudioChunk(Uint8List bytes) async {
-    final pid = activeCallPeerId;
-    if (pid == null || !isCallAccepted || bytes.isEmpty) return;
-    final contact = knownContacts[pid];
-    if (contact == null) return;
-    final payload = jsonEncode({
-      'v': 2,
-      'kind': 'CALL_AUDIO_CHUNK',
-      'b64': base64Encode(bytes),
-    });
-    await _encryptAndQueueSealedDataPacket(
-      targetNodeId: pid,
-      contact: contact,
-      msgId: _randomHex(10),
-      sealedPayloadBytes: utf8.encode(payload),
-      persistInOutbox: false,
-      keepInTransitBuffer: false,
-    );
-  }
-
-  Future<void> sendCallVideoFrame(Uint8List jpegBytes) async {
-    final pid = activeCallPeerId;
-    if (pid == null || !isCallAccepted || jpegBytes.isEmpty) return;
-    final contact = knownContacts[pid];
-    if (contact == null) return;
-    final payload = jsonEncode({
-      'v': 2,
-      'kind': 'CALL_VIDEO_FRAME',
-      'b64': base64Encode(jpegBytes),
-    });
-    await _encryptAndQueueSealedDataPacket(
-      targetNodeId: pid,
-      contact: contact,
-      msgId: _randomHex(10),
-      sealedPayloadBytes: utf8.encode(payload),
-      persistInOutbox: false,
-      keepInTransitBuffer: false,
-    );
-  }
-
-  Future<Uint8List?> capturePlatformVideoFrame() async {
-    try {
-      if (Platform.isAndroid) {
-        final bytes =
-            await _nativeChannel.invokeMethod<Uint8List>('captureCameraFrame');
-        return bytes;
-      } else if (Platform.isWindows) {
-        final tmpPath =
-            '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_vframe.jpg';
-        final ps = r"""
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-\$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-\$bmp = New-Object System.Drawing.Bitmap \$b.Width, \$b.Height
-\$g = [System.Drawing.Graphics]::FromImage(\$bmp)
-\$g.CopyFromScreen(\$b.Location, [System.Drawing.Point]::Empty, \$b.Size)
-\$small = New-Object System.Drawing.Bitmap 320, 180
-\$g2 = [System.Drawing.Graphics]::FromImage(\$small)
-\$g2.DrawImage(\$bmp, 0, 0, 320, 180)
-\$small.Save('$tmpPath', [System.Drawing.Imaging.ImageFormat]::Jpeg)
-\$g2.Dispose(); \$small.Dispose(); \$g.Dispose(); \$bmp.Dispose()
-""";
-        final res = await Process.run(
-            'powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps]);
-        if (res.exitCode == 0) {
-          final f = File(tmpPath);
-          if (await f.exists()) {
-            return await f.readAsBytes();
-          }
-        }
-      }
-    } catch (_) {}
-    return null;
   }
 
   Future<void> pingAllKnownNodes() async {
@@ -2026,6 +2941,18 @@ Add-Type -AssemblyName System.Drawing
           final data = map['data'] as String;
           await _onBlePayload(endpointId, data);
           break;
+        case 'onCallAudioPcm':
+          final pcm = call.arguments as Uint8List?;
+          if (pcm != null && pcm.isNotEmpty) {
+            _onLocalCapturedPcm(pcm);
+          }
+          break;
+        case 'onCallVideoFrame':
+          final jpg = call.arguments as Uint8List?;
+          if (jpg != null && jpg.isNotEmpty) {
+            _onLocalCapturedVideoFrame(jpg);
+          }
+          break;
         case 'onAudioCompleted':
           currentlyPlayingAudioPath = null;
           isAudioPlaying = false;
@@ -2092,6 +3019,7 @@ Add-Type -AssemblyName System.Drawing
       );
     }
 
+    await _initCallUdpSocket();
     await refreshNetworkCache(force: true);
     await _startLanAutoDiscovery();
     _addLog('Защищенный узел v1.5 готов (порт $listenPort)');
@@ -2788,7 +3716,9 @@ Add-Type -AssemblyName System.Drawing
           '/c netsh advfirewall firewall delete rule name="Mayak P2P TCP 42070" >nul 2>&1 & '
           'netsh advfirewall firewall delete rule name="Mayak P2P UDP 42069" >nul 2>&1 & '
           'netsh advfirewall firewall add rule name="Mayak P2P TCP 42070" dir=in action=allow protocol=TCP localport=42070 profile=public,private,domain & '
-          'netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain';
+          'netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain & '
+          'netsh advfirewall firewall delete rule name="Mayak P2P Call Media UDP 42072" >nul 2>&1 & '
+          'netsh advfirewall firewall add rule name="Mayak P2P Call Media UDP 42072" dir=in action=allow protocol=UDP localport=42072 profile=public,private,domain';
 
       final res = await Process.run('powershell', [
         '-NoProfile',
@@ -4674,60 +5604,70 @@ try {
         final mode = (envelope['mode'] ?? 'voice').toString();
         incomingCallFromPeerId = senderId;
         incomingCallMode = mode;
+        _incomingCallId = (envelope['callId'] ?? '').toString();
+        _incomingCallUdpPort =
+            (envelope['udpPort'] as num?)?.toInt() ?? callMediaUdpPort;
+        unawaited(_startIncomingRingtone());
         unawaited(_triggerIncomingNotification(
           senderId,
           contact.displayTitle,
-          mode == 'video' ? '📹 Входящий видеочат (ВЧ)' : '📞 Входящий голосовой чат (ГЧ)',
+          mode == 'video'
+              ? '📹 Входящий видеочат (ВЧ)'
+              : '📞 Входящий голосовой чат (ГЧ)',
         ));
       } else if (kind == 'CALL_ACCEPT') {
         if (activeCallPeerId == senderId) {
           isCallAccepted = true;
+          _activeCallPeerIp = _resolvePeerIp(senderId);
+          _activeCallPeerUdpPort =
+              (envelope['udpPort'] as num?)?.toInt() ?? callMediaUdpPort;
+          final remoteCallId = (envelope['callId'] ?? '').toString();
+          if (remoteCallId.isNotEmpty && remoteCallId != _activeCallId) {
+            _activeCallId = remoteCallId;
+            _activeCallMediaKey =
+                await _deriveCallMediaKey(senderId, _activeCallId);
+          }
           callStatusText = activeCallMode == 'video'
-              ? 'ВЧ активен (Видео + Голос)'
+              ? 'ВЧ активен (HD Видео + Голос)'
               : 'ГЧ активен (Голос)';
+          await _stopCallTonesOutgoing();
+          await _startCallMediaPipelines();
+        }
+      } else if (kind == 'CALL_STATE') {
+        if (activeCallPeerId == senderId) {
+          remoteCallMicMuted = envelope['micMuted'] == true;
+          remoteCallVideoMuted = envelope['videoMuted'] == true;
+          if (remoteCallVideoMuted) {
+            remoteVideoFrameBytes = null;
+          }
         }
       } else if (kind == 'CALL_REJECT') {
         if (activeCallPeerId == senderId) {
           activeCallPeerId = null;
           isCallAccepted = false;
           remoteVideoFrameBytes = null;
+          _activeCallMediaKey = null;
           callStatusText = 'Вызов отклонён';
+          unawaited(_stopCallTonesOutgoing());
+          unawaited(_stopCallMediaPipelines());
+          unawaited(_playCallEndTone());
         }
       } else if (kind == 'CALL_END') {
         if (activeCallPeerId == senderId || incomingCallFromPeerId == senderId) {
           activeCallPeerId = null;
           incomingCallFromPeerId = null;
           isCallAccepted = false;
+          isCallMicMuted = false;
+          isCallVideoMuted = false;
+          remoteCallMicMuted = false;
+          remoteCallVideoMuted = false;
           remoteVideoFrameBytes = null;
+          _activeCallMediaKey = null;
           callStatusText = '';
-          unawaited(stopAudioPlayback());
-        }
-      } else if (kind == 'CALL_AUDIO_CHUNK') {
-        if (activeCallPeerId == senderId && isCallAccepted) {
-          final b64 = (envelope['b64'] ?? '').toString();
-          if (b64.isNotEmpty) {
-            try {
-              final nowMs = DateTime.now().millisecondsSinceEpoch;
-              if (nowMs - _lastCallAudioPlayMs > 450) {
-                _lastCallAudioPlayMs = nowMs;
-                final bytes = base64Decode(b64);
-                final ext = Platform.isWindows ? 'wav' : 'm4a';
-                final f = File(
-                    '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_call_rx.$ext');
-                await f.writeAsBytes(bytes, flush: true);
-                await togglePlayAudioFile(f.path);
-              }
-            } catch (_) {}
-          }
-        }
-      } else if (kind == 'CALL_VIDEO_FRAME') {
-        if (activeCallPeerId == senderId && isCallAccepted) {
-          final b64 = (envelope['b64'] ?? '').toString();
-          if (b64.isNotEmpty) {
-            try {
-              remoteVideoFrameBytes = base64Decode(b64);
-            } catch (_) {}
-          }
+          unawaited(_stopCallTonesOutgoing());
+          unawaited(_stopIncomingRingtone());
+          unawaited(_stopCallMediaPipelines());
+          unawaited(_playCallEndTone());
         }
       } else if (kind == 'FILE_MISSING') {
         final fid = (envelope['fid'] ?? '').toString();

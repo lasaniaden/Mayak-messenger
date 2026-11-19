@@ -38,13 +38,16 @@ class MayakTheme {
   );
 }
 
+final GlobalKey<NavigatorState> mayakNavigatorKey = GlobalKey<NavigatorState>();
+
 class MayakMeshApp extends StatelessWidget {
   const MayakMeshApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Маяк P2P v1.5',
+      navigatorKey: mayakNavigatorKey,
+      title: 'Маяк P2P v1.8',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -91,6 +94,27 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
       onStateChanged: () {
         if (mounted) setState(() {});
         MeshEngineListenerExt.notifyExtra();
+        if (engine.incomingCallFromPeerId != null &&
+            !IncomingCallScreen.isShowing) {
+          IncomingCallScreen.isShowing = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            final nav = mayakNavigatorKey.currentState;
+            if (nav == null || engine.incomingCallFromPeerId == null) {
+              IncomingCallScreen.isShowing = false;
+              return;
+            }
+            nav
+                .push(
+                  MaterialPageRoute(
+                    fullscreenDialog: true,
+                    builder: (_) => IncomingCallScreen(engine: engine),
+                  ),
+                )
+                .whenComplete(() {
+              IncomingCallScreen.isShowing = false;
+            });
+          });
+        }
       },
     );
     engine.init();
@@ -4889,6 +4913,230 @@ class _GroupConversationScreenState extends State<GroupConversationScreen> {
 }
 
 
+class IncomingCallScreen extends StatefulWidget {
+  static bool isShowing = false;
+  final MeshEngine engine;
+  const IncomingCallScreen({super.key, required this.engine});
+
+  @override
+  State<IncomingCallScreen> createState() => _IncomingCallScreenState();
+}
+
+class _IncomingCallScreenState extends State<IncomingCallScreen>
+    with SingleTickerProviderStateMixin {
+  MeshEngine get engine => widget.engine;
+  bool _hasClosed = false;
+  late final AnimationController _pulseCtrl;
+
+  void _onUpdate() {
+    if (!mounted || _hasClosed) return;
+    if (engine.incomingCallFromPeerId == null &&
+        engine.activeCallPeerId == null) {
+      _hasClosed = true;
+      engine.removeListenerState(_onUpdate);
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      return;
+    }
+    setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat(reverse: true);
+    engine.addListenerState(_onUpdate);
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onUpdate);
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final peerId = engine.incomingCallFromPeerId ?? '';
+    final peerName = engine.knownContacts[peerId]?.displayTitle ?? peerId;
+    final isVideo = engine.incomingCallMode == 'video';
+
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        backgroundColor: MayakTheme.bgDeep,
+        body: Container(
+          width: double.infinity,
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF0A1024), Color(0xFF0F2940), Color(0xFF070B14)],
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+            ),
+          ),
+          child: SafeArea(
+            child: Column(
+              children: [
+                const SizedBox(height: 36),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: MayakTheme.accentCyan.withOpacity(0.16),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                        color: MayakTheme.accentCyan.withOpacity(0.4)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isVideo ? Icons.videocam_rounded : Icons.call_rounded,
+                        color: MayakTheme.accentCyan,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        isVideo
+                            ? 'Входящий видеочат (ВЧ) • E2EE'
+                            : 'Входящий голосовой чат (ГЧ) • E2EE',
+                        style: const TextStyle(
+                          color: MayakTheme.accentCyan,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                ScaleTransition(
+                  scale: Tween<double>(begin: 0.94, end: 1.08).animate(
+                    CurvedAnimation(
+                        parent: _pulseCtrl, curve: Curves.easeInOut),
+                  ),
+                  child: Container(
+                    width: 132,
+                    height: 132,
+                    decoration: BoxDecoration(
+                      gradient: MayakTheme.primaryGradient,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: MayakTheme.accentCyan.withOpacity(0.35),
+                          blurRadius: 34,
+                          spreadRadius: 6,
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      isVideo
+                          ? Icons.videocam_rounded
+                          : Icons.phone_in_talk_rounded,
+                      size: 62,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 28),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Text(
+                    peerName.isNotEmpty ? peerName : 'Узел Маяк',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Звонит по защищённому P2P-каналу...',
+                  style: TextStyle(fontSize: 14, color: Colors.white70),
+                ),
+                const Spacer(),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(36, 0, 36, 48),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FloatingActionButton.large(
+                            heroTag: 'inc_reject',
+                            backgroundColor: MayakTheme.accentRed,
+                            onPressed: () async {
+                              if (_hasClosed) return;
+                              _hasClosed = true;
+                              engine.removeListenerState(_onUpdate);
+                              await engine.rejectIncomingCall();
+                              if (mounted && Navigator.of(context).canPop()) {
+                                Navigator.of(context).pop();
+                              }
+                            },
+                            child: const Icon(Icons.call_end_rounded,
+                                color: Colors.white, size: 34),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text('Сбросить',
+                              style: TextStyle(
+                                  color: Colors.white70, fontSize: 13)),
+                        ],
+                      ),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FloatingActionButton.large(
+                            heroTag: 'inc_accept',
+                            backgroundColor: MayakTheme.accentEmerald,
+                            onPressed: () async {
+                              if (_hasClosed) return;
+                              _hasClosed = true;
+                              engine.removeListenerState(_onUpdate);
+                              await engine.acceptIncomingCall();
+                              if (!mounted) return;
+                              Navigator.of(context).pushReplacement(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      CallSessionScreen(engine: engine),
+                                ),
+                              );
+                            },
+                            child: Icon(
+                              isVideo
+                                  ? Icons.videocam_rounded
+                                  : Icons.call_rounded,
+                              color: Colors.white,
+                              size: 34,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text('Принять',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class CallSessionScreen extends StatefulWidget {
   final MeshEngine engine;
   const CallSessionScreen({super.key, required this.engine});
@@ -4899,17 +5147,23 @@ class CallSessionScreen extends StatefulWidget {
 
 class _CallSessionScreenState extends State<CallSessionScreen> {
   MeshEngine get engine => widget.engine;
-  bool _micMuted = false;
-  bool _videoPaused = false;
-  Timer? _audioLoopTimer;
-  Timer? _videoLoopTimer;
   Timer? _secTimer;
   int _seconds = 0;
+  bool _hasPopped = false;
+
+  void _safeClose() {
+    if (_hasPopped) return;
+    _hasPopped = true;
+    engine.removeListenerState(_onUpdate);
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
+  }
 
   void _onUpdate() {
-    if (!mounted) return;
+    if (!mounted || _hasPopped) return;
     if (engine.activeCallPeerId == null) {
-      Navigator.of(context).pop();
+      _safeClose();
       return;
     }
     setState(() {});
@@ -4924,43 +5178,11 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
         setState(() => _seconds++);
       }
     });
-    _audioLoopTimer =
-        Timer.periodic(const Duration(milliseconds: 1400), (_) async {
-      if (!mounted || !engine.isCallAccepted || _micMuted) return;
-      try {
-        final started = await engine.startVoiceRecording();
-        if (!started) return;
-        await Future.delayed(const Duration(milliseconds: 1050));
-        final res = await engine.stopVoiceRecording();
-        if (res != null && res['path'] != null) {
-          final f = File(res['path'].toString());
-          if (await f.exists()) {
-            final bytes = await f.readAsBytes();
-            await engine.sendCallAudioChunk(bytes);
-          }
-        }
-      } catch (_) {}
-    });
-    _videoLoopTimer =
-        Timer.periodic(const Duration(milliseconds: 650), (_) async {
-      if (!mounted ||
-          !engine.isCallAccepted ||
-          engine.activeCallMode != 'video' ||
-          _videoPaused) {
-        return;
-      }
-      final frame = await engine.capturePlatformVideoFrame();
-      if (frame != null && frame.isNotEmpty) {
-        await engine.sendCallVideoFrame(frame);
-      }
-    });
   }
 
   @override
   void dispose() {
     engine.removeListenerState(_onUpdate);
-    _audioLoopTimer?.cancel();
-    _videoLoopTimer?.cancel();
     _secTimer?.cancel();
     super.dispose();
   }
@@ -4972,100 +5194,258 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     final isVideo = engine.activeCallMode == 'video';
     final mm = (_seconds ~/ 60).toString().padLeft(2, '0');
     final ss = (_seconds % 60).toString().padLeft(2, '0');
+    final hasRemoteVideo = isVideo &&
+        !engine.remoteCallVideoMuted &&
+        engine.remoteVideoFrameBytes != null;
 
-    return Scaffold(
-      backgroundColor: MayakTheme.bgDeep,
-      appBar: AppBar(
-        title: Text(isVideo ? 'Видеочат (ВЧ)' : 'Голосовой чат (ГЧ)'),
-        automaticallyImplyLeading: false,
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: isVideo && engine.remoteVideoFrameBytes != null
-                  ? ClipRRect(
-                      borderRadius: BorderRadius.circular(18),
-                      child: Image.memory(
-                        engine.remoteVideoFrameBytes!,
-                        gaplessPlayback: true,
-                        fit: BoxFit.contain,
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        backgroundColor: MayakTheme.bgDeep,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (hasRemoteVideo)
+              Image.memory(
+                engine.remoteVideoFrameBytes!,
+                gaplessPlayback: true,
+                fit: BoxFit.contain,
+              )
+            else
+              Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 118,
+                      height: 118,
+                      decoration: BoxDecoration(
+                        gradient: MayakTheme.primaryGradient,
+                        shape: BoxShape.circle,
                       ),
-                    )
-                  : Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 110,
-                          height: 110,
-                          decoration: BoxDecoration(
-                            gradient: MayakTheme.primaryGradient,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            isVideo
-                                ? Icons.videocam_rounded
-                                : Icons.graphic_eq_rounded,
-                            size: 52,
-                            color: Colors.white,
-                          ),
-                        ),
-                        const SizedBox(height: 18),
-                        Text(
-                          peerName,
-                          style: const TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          engine.isCallAccepted
-                              ? '${engine.callStatusText} • $mm:$ss'
-                              : engine.callStatusText,
-                          style: const TextStyle(
-                              fontSize: 14, color: MayakTheme.accentCyan),
-                        ),
-                      ],
+                      child: Icon(
+                        isVideo
+                            ? (engine.remoteCallVideoMuted
+                                ? Icons.videocam_off_rounded
+                                : Icons.videocam_rounded)
+                            : Icons.graphic_eq_rounded,
+                        size: 54,
+                        color: Colors.white,
+                      ),
                     ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                FloatingActionButton(
-                  heroTag: 'call_mute',
-                  backgroundColor:
-                      _micMuted ? MayakTheme.accentAmber : MayakTheme.bgElevated,
-                  onPressed: () => setState(() => _micMuted = !_micMuted),
-                  child: Icon(_micMuted ? Icons.mic_off_rounded : Icons.mic_rounded),
+                    const SizedBox(height: 18),
+                    Text(
+                      peerName.isNotEmpty ? peerName : 'Собеседник',
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      engine.isCallAccepted
+                          ? '${engine.callStatusText} • $mm:$ss'
+                          : engine.callStatusText,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: MayakTheme.accentCyan,
+                      ),
+                    ),
+                  ],
                 ),
-                if (isVideo)
-                  FloatingActionButton(
-                    heroTag: 'call_vid',
-                    backgroundColor: _videoPaused
-                        ? MayakTheme.accentAmber
-                        : MayakTheme.bgElevated,
-                    onPressed: () =>
-                        setState(() => _videoPaused = !_videoPaused),
-                    child: Icon(_videoPaused
-                        ? Icons.videocam_off_rounded
-                        : Icons.videocam_rounded),
+              ),
+            // Верхняя плашка статуса
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.55),
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.lock_rounded,
+                                size: 14, color: MayakTheme.accentEmerald),
+                            const SizedBox(width: 6),
+                            Text(
+                              engine.isCallAccepted
+                                  ? '$peerName • $mm:$ss'
+                                  : '$peerName • Гудки...',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Spacer(),
+                      if (engine.remoteCallMicMuted)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: MayakTheme.accentRed.withOpacity(0.85),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.mic_off_rounded,
+                                  size: 14, color: Colors.white),
+                              SizedBox(width: 4),
+                              Text('Микро выкл',
+                                  style: TextStyle(
+                                      color: Colors.white, fontSize: 11)),
+                            ],
+                          ),
+                        ),
+                    ],
                   ),
-                FloatingActionButton.large(
-                  heroTag: 'call_end',
-                  backgroundColor: MayakTheme.accentRed,
-                  onPressed: () async {
-                    await engine.endActiveCall();
-                  },
-                  child: const Icon(Icons.call_end_rounded, color: Colors.white),
                 ),
-              ],
+              ),
             ),
-          ),
-        ],
+            // Нижняя панель управления звонком
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 26),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [
+                        Colors.transparent,
+                        Colors.black.withOpacity(0.82),
+                      ],
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FloatingActionButton(
+                            heroTag: 'call_mute',
+                            backgroundColor: engine.isCallMicMuted
+                                ? MayakTheme.accentAmber
+                                : MayakTheme.bgElevated,
+                            onPressed: () => engine.toggleCallMicMute(),
+                            child: Icon(
+                              engine.isCallMicMuted
+                                  ? Icons.mic_off_rounded
+                                  : Icons.mic_rounded,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            engine.isCallMicMuted ? 'Микро выкл' : 'Микрофон',
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 11),
+                          ),
+                        ],
+                      ),
+                      if (isVideo)
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            FloatingActionButton(
+                              heroTag: 'call_vid',
+                              backgroundColor: engine.isCallVideoMuted
+                                  ? MayakTheme.accentAmber
+                                  : MayakTheme.bgElevated,
+                              onPressed: () => engine.toggleCallVideoMute(),
+                              child: Icon(
+                                engine.isCallVideoMuted
+                                    ? Icons.videocam_off_rounded
+                                    : Icons.videocam_rounded,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              engine.isCallVideoMuted
+                                  ? 'Камера выкл'
+                                  : 'Камера',
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      if (isVideo)
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            FloatingActionButton(
+                              heroTag: 'call_switch',
+                              backgroundColor: MayakTheme.bgElevated,
+                              onPressed: () =>
+                                  engine.switchCallCameraOrSource(),
+                              child: Icon(
+                                Platform.isWindows
+                                    ? (engine.windowsVideoSource == 'camera'
+                                        ? Icons.screen_share_rounded
+                                        : Icons.videocam_rounded)
+                                    : Icons.cameraswitch_rounded,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              Platform.isWindows
+                                  ? (engine.windowsVideoSource == 'camera'
+                                      ? 'Экран'
+                                      : 'Веб-камера')
+                                  : 'Смена',
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FloatingActionButton.large(
+                            heroTag: 'call_end',
+                            backgroundColor: MayakTheme.accentRed,
+                            onPressed: () async {
+                              await engine.endActiveCall();
+                              _safeClose();
+                            },
+                            child: const Icon(Icons.call_end_rounded,
+                                color: Colors.white, size: 32),
+                          ),
+                          const SizedBox(height: 6),
+                          const Text('Завершить',
+                              style: TextStyle(
+                                  color: Colors.white70, fontSize: 11)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
