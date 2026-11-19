@@ -1142,6 +1142,9 @@ class MeshEngine {
   int _lastRenderedVideoSeq = -1;
   ServerSocket? _winVideoServer;
   Process? _winVideoProcess;
+  bool _isSendingVideoFrame = false;
+  Process? _winAudioProc;
+  StreamSubscription<String>? _winAudioSub;
   Timer? _udpPunchTimer;
   Uint8List? remoteVideoFrameBytes;
   String callStatusText = '';
@@ -1591,8 +1594,10 @@ class MeshEngine {
           WindowsPcmAudioBridge.playPcm(pcm);
         }
       } else if (type == 0x02 && chunkTotal > 0 && chunkIdx < chunkTotal) {
-        // Chunked JPEG video frame
-        if (seq < _lastRenderedVideoSeq - 2) return;
+        // Chunked JPEG video frame (v1.8.1 resilient reassembly)
+        if (seq <= _lastRenderedVideoSeq) return;
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        _udpVideoAssemblies.removeWhere((_, v) => nowMs - v.createdMs > 700);
         final asm = _udpVideoAssemblies.putIfAbsent(
             seq, () => _UdpVideoAssembly(chunkTotal));
         if (asm.chunks[chunkIdx] == null) {
@@ -1608,7 +1613,7 @@ class MeshEngine {
           _lastRenderedVideoSeq = seq;
           _udpVideoAssemblies.removeWhere((k, _) => k <= seq);
           onStateChanged();
-        } else if (_udpVideoAssemblies.length > 4) {
+        } else if (_udpVideoAssemblies.length > 8) {
           final oldestKey = _udpVideoAssemblies.keys.reduce(min);
           _udpVideoAssemblies.remove(oldestKey);
         }
@@ -1627,19 +1632,35 @@ class MeshEngine {
         !isCallAccepted ||
         activeCallMode != 'video' ||
         isCallVideoMuted ||
-        jpeg.isEmpty) {
+        jpeg.isEmpty ||
+        _isSendingVideoFrame) {
       return;
     }
-    _callVideoSeq++;
-    final seq = _callVideoSeq;
-    const maxChunk = 1150;
-    final total = (jpeg.length + maxChunk - 1) ~/ maxChunk;
-    if (total <= 0 || total > 120) return;
-    for (int i = 0; i < total; i++) {
-      final start = i * maxChunk;
-      final end = min(start + maxChunk, jpeg.length);
-      final part = Uint8List.sublistView(jpeg, start, end);
-      unawaited(_sendCallUdpPacket(0x02, seq, i, total, part));
+    _isSendingVideoFrame = true;
+    unawaited(_sendVideoFramePaced(jpeg));
+  }
+
+  Future<void> _sendVideoFramePaced(Uint8List jpeg) async {
+    try {
+      _callVideoSeq++;
+      final seq = _callVideoSeq;
+      const maxChunk = 1250;
+      final total = (jpeg.length + maxChunk - 1) ~/ maxChunk;
+      if (total <= 0 || total > 120) return;
+      for (int i = 0; i < total; i++) {
+        if (activeCallPeerId == null || !isCallAccepted || isCallVideoMuted) {
+          break;
+        }
+        final start = i * maxChunk;
+        final end = min(start + maxChunk, jpeg.length);
+        final part = Uint8List.sublistView(jpeg, start, end);
+        await _sendCallUdpPacket(0x02, seq, i, total, part);
+        if ((i & 3) == 3) {
+          await Future.delayed(const Duration(milliseconds: 2));
+        }
+      }
+    } finally {
+      _isSendingVideoFrame = false;
     }
   }
 
@@ -1729,24 +1750,182 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Threading;
 using System.Windows.Forms;
 
+public class MayakDirectShowCam : IDisposable {
+    [StructLayout(LayoutKind.Sequential)]
+    public class AMMediaType {
+        public Guid majorType;
+        public Guid subType;
+        [MarshalAs(UnmanagedType.Bool)] public bool fixedSizeSamples;
+        [MarshalAs(UnmanagedType.Bool)] public bool temporalCompression;
+        public int sampleSize;
+        public Guid formatType;
+        public IntPtr unkPtr;
+        public int formatSize;
+        public IntPtr formatPtr;
+    }
+
+    [ComImport, Guid("29840822-5B84-11D0-BD3B-00A0C911CE86"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface ICreateDevEnum {
+        [PreserveSig]
+        int CreateClassEnumerator(ref Guid pType, out IEnumMoniker ppEnumMoniker, int dwFlags);
+    }
+
+    [ComImport, Guid("56a868a9-0ad4-11ce-b03a-0020af0ba770"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IGraphBuilder {
+        [PreserveSig] int AddFilter([MarshalAs(UnmanagedType.IUnknown)] object pFilter, [MarshalAs(UnmanagedType.LPWStr)] string pName);
+        [PreserveSig] int RemoveFilter([MarshalAs(UnmanagedType.IUnknown)] object pFilter);
+        [PreserveSig] int EnumFilters(out IntPtr ppEnum);
+        [PreserveSig] int FindFilterByName([MarshalAs(UnmanagedType.LPWStr)] string pName, out IntPtr ppFilter);
+        [PreserveSig] int ConnectDirect(IntPtr ppinOut, IntPtr ppinIn, IntPtr pmt);
+        [PreserveSig] int Reconnect(IntPtr ppin);
+        [PreserveSig] int Disconnect(IntPtr ppin);
+        [PreserveSig] int SetDefaultSyncSource();
+        [PreserveSig] int Connect(IntPtr ppinOut, IntPtr ppinIn);
+        [PreserveSig] int Render(IntPtr ppinOut);
+        [PreserveSig] int RenderFile([MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFile, [MarshalAs(UnmanagedType.LPWStr)] string lpcwstrPlayList);
+        [PreserveSig] int AddSourceFilter([MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFileName, [MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFilterName, out IntPtr ppFilter);
+        [PreserveSig] int SetLogFile(IntPtr hFile);
+        [PreserveSig] int Abort();
+        [PreserveSig] int ShouldOperationContinue();
+    }
+
+    [ComImport, Guid("93E5A4E0-2D50-11d2-ABFA-00A0C9C6E38D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface ICaptureGraphBuilder2 {
+        [PreserveSig] int SetFiltergraph(IGraphBuilder pfg);
+        [PreserveSig] int GetFiltergraph(out IGraphBuilder ppfg);
+        [PreserveSig] int SetOutputFileName(ref Guid pType, [MarshalAs(UnmanagedType.LPWStr)] string lpstrFile, out IntPtr ppbf, out IntPtr ppSink);
+        [PreserveSig] int FindInterface(IntPtr pCategory, IntPtr pType, [MarshalAs(UnmanagedType.IUnknown)] object pbf, ref Guid riid, out IntPtr ppint);
+        [PreserveSig] int RenderStream(ref Guid pCategory, ref Guid pType, [MarshalAs(UnmanagedType.IUnknown)] object pSource, [MarshalAs(UnmanagedType.IUnknown)] object pfCompressor, [MarshalAs(UnmanagedType.IUnknown)] object pfRenderer);
+    }
+
+    [ComImport, Guid("6B652FFF-11FE-4fce-92AD-0266B5D7C78F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface ISampleGrabber {
+        [PreserveSig] int SetOneShot([MarshalAs(UnmanagedType.Bool)] bool OneShot);
+        [PreserveSig] int SetMediaType([MarshalAs(UnmanagedType.LPStruct)] AMMediaType pmt);
+        [PreserveSig] int GetConnectedMediaType([Out, MarshalAs(UnmanagedType.LPStruct)] AMMediaType pmt);
+        [PreserveSig] int SetBufferSamples([MarshalAs(UnmanagedType.Bool)] bool BufferThem);
+        [PreserveSig] int GetCurrentBuffer(ref int pBufferSize, IntPtr pBuffer);
+        [PreserveSig] int GetCurrentSample(out IntPtr ppSample);
+        [PreserveSig] int SetCallback(IntPtr pCallback, int WhichMethodToCallback);
+    }
+
+    [ComImport, Guid("56a868b1-0ad4-11ce-b03a-0020af0ba770"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    interface IMediaControl {
+        [PreserveSig] int Run();
+        [PreserveSig] int Pause();
+        [PreserveSig] int Stop();
+    }
+
+    private IGraphBuilder _graph;
+    private ICaptureGraphBuilder2 _capGraph;
+    private ISampleGrabber _grabber;
+    private IMediaControl _mediaCtrl;
+    public int Width { get; private set; }
+    public int Height { get; private set; }
+    private IntPtr _bufPtr = IntPtr.Zero;
+    private int _bufCap = 0;
+
+    public bool Start() {
+        try {
+            var clsidDevEnum = new Guid("62BE5D10-60EB-11d0-BD3B-00A0C911CE86");
+            var clsidVideoIn = new Guid("860BB310-5D01-11d0-BD3B-00A0C911CE86");
+            var iidBaseFilter = new Guid("56a86895-0ad4-11ce-b03a-0020af0ba770");
+
+            var devEnum = (ICreateDevEnum)Activator.CreateInstance(Type.GetTypeFromCLSID(clsidDevEnum));
+            IEnumMoniker enumMon;
+            if (devEnum.CreateClassEnumerator(ref clsidVideoIn, out enumMon, 0) != 0 || enumMon == null) return false;
+
+            IMoniker[] mon = new IMoniker[1];
+            IntPtr fetched = IntPtr.Zero;
+            if (enumMon.Next(1, mon, fetched) != 0 || mon[0] == null) return false;
+
+            object camObj;
+            mon[0].BindToObject(null, null, ref iidBaseFilter, out camObj);
+            if (camObj == null) return false;
+
+            _graph = (IGraphBuilder)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("e436ebb3-524f-11ce-9f53-0020af0ba770")));
+            _capGraph = (ICaptureGraphBuilder2)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("BF87B6E1-8C27-11d0-B3F0-00AA003761C5")));
+            object grabObj = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("C1F400A0-3F08-11d3-9F0B-006008039E37")));
+            object nullObj = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("C1F400A4-3F08-11d3-9F0B-006008039E37")));
+            _grabber = (ISampleGrabber)grabObj;
+
+            var mt = new AMMediaType();
+            mt.majorType = new Guid("73646976-0000-0010-8000-00AA00389B71"); // MEDIATYPE_Video
+            mt.subType = new Guid("e436eb7d-524f-11ce-9f53-0020af0ba770");   // MEDIASUBTYPE_RGB24
+            mt.formatType = new Guid("05589f80-c356-11ce-bf01-00aa0055595a"); // FORMAT_VideoInfo
+            _grabber.SetMediaType(mt);
+            _grabber.SetBufferSamples(true);
+            _grabber.SetOneShot(false);
+
+            _capGraph.SetFiltergraph(_graph);
+            _graph.AddFilter(camObj, "Cam");
+            _graph.AddFilter(grabObj, "Grabber");
+            _graph.AddFilter(nullObj, "Null");
+
+            var pinCat = new Guid("fb6c4281-0353-11d1-905f-0000c0cc16ba"); // PIN_CATEGORY_CAPTURE
+            var medVid = new Guid("73646976-0000-0010-8000-00AA00389B71");
+            int hr = _capGraph.RenderStream(ref pinCat, ref medVid, camObj, grabObj, nullObj);
+            if (hr < 0) return false;
+
+            var connMt = new AMMediaType();
+            if (_grabber.GetConnectedMediaType(connMt) == 0 && connMt.formatPtr != IntPtr.Zero && connMt.formatSize >= 64) {
+                Width = Marshal.ReadInt32(connMt.formatPtr, 52);
+                Height = Math.Abs(Marshal.ReadInt32(connMt.formatPtr, 56));
+                Marshal.FreeCoTaskMem(connMt.formatPtr);
+            }
+            if (Width <= 0 || Height <= 0) { Width = 640; Height = 480; }
+
+            _mediaCtrl = (IMediaControl)_graph;
+            _mediaCtrl.Run();
+            Thread.Sleep(250);
+            return true;
+        } catch {
+            Dispose();
+            return false;
+        }
+    }
+
+    public byte[] GrabJpeg(ImageCodecInfo codec, EncoderParameters ep) {
+        if (_grabber == null) return null;
+        int size = 0;
+        if (_grabber.GetCurrentBuffer(ref size, IntPtr.Zero) != 0 || size <= 0) return null;
+        if (size > _bufCap) {
+            if (_bufPtr != IntPtr.Zero) Marshal.FreeHGlobal(_bufPtr);
+            _bufPtr = Marshal.AllocHGlobal(size);
+            _bufCap = size;
+        }
+        if (_grabber.GetCurrentBuffer(ref size, _bufPtr) != 0) return null;
+
+        int stride = ((Width * 3) + 3) & ~3;
+        if (size < stride * Height) return null;
+        using (var raw = new Bitmap(Width, Height, stride, PixelFormat.Format24bppRgb, _bufPtr)) {
+            raw.RotateFlip(RotateFlipType.RotateNoneFlipY);
+            int tw = 480;
+            int th = Math.Max(180, (int)Math.Round(Height * (480.0 / Math.Max(1, Width))));
+            if (th > 360) th = 360;
+            using (var dst = new Bitmap(tw, th))
+            using (var g = Graphics.FromImage(dst))
+            using (var ms = new MemoryStream()) {
+                g.InterpolationMode = InterpolationMode.Bilinear;
+                g.DrawImage(raw, 0, 0, tw, th);
+                dst.Save(ms, codec, ep);
+                return ms.ToArray();
+            }
+        }
+    }
+
+    public void Dispose() {
+        try { if (_mediaCtrl != null) _mediaCtrl.Stop(); } catch {}
+        if (_bufPtr != IntPtr.Zero) { Marshal.FreeHGlobal(_bufPtr); _bufPtr = IntPtr.Zero; _bufCap = 0; }
+        _mediaCtrl = null; _grabber = null; _capGraph = null; _graph = null;
+    }
+}
+
 public class MayakWinVideo {
-    [DllImport("avicap32.dll")]
-    public static extern IntPtr capCreateCaptureWindowA(string lpszWindowName, int dwStyle, int x, int y, int nWidth, int nHeight, IntPtr hwndParent, int nID);
-    [DllImport("user32.dll")]
-    public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
-    public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, string lParam);
-    [DllImport("user32.dll")]
-    public static extern bool DestroyWindow(IntPtr hWnd);
-
-    const int WM_CAP_DRIVER_CONNECT = 0x040A;
-    const int WM_CAP_DRIVER_DISCONNECT = 0x040B;
-    const int WM_CAP_SAVEDIB = 0x0419;
-    const int WM_CAP_GRAB_FRAME = 0x043C;
-
     static ImageCodecInfo GetJpegCodec() {
         foreach (var c in ImageCodecInfo.GetImageEncoders()) {
             if (c.MimeType == "image/jpeg") return c;
@@ -1756,20 +1935,18 @@ public class MayakWinVideo {
 
     public static void Run(int port, bool tryCam) {
         var codec = GetJpegCodec();
-        var ep = new EncoderParameters(1);
-        ep.Param[0] = new EncoderParameter(Encoder.Quality, 75L);
+        var epCam = new EncoderParameters(1);
+        epCam.Param[0] = new EncoderParameter(Encoder.Quality, 64L);
+        var epScr = new EncoderParameters(1);
+        epScr.Param[0] = new EncoderParameter(Encoder.Quality, 60L);
 
-        IntPtr hCam = IntPtr.Zero;
+        MayakDirectShowCam cam = null;
         bool camOk = false;
-        string dibPath = Path.Combine(Path.GetTempPath(), "mayak_cam_" + port + ".bmp");
+        int emptyCamTicks = 0;
         if (tryCam) {
-            try {
-                hCam = capCreateCaptureWindowA("MayakCam", 0, 0, 0, 640, 480, IntPtr.Zero, 0);
-                if (hCam != IntPtr.Zero) {
-                    var res = SendMessage(hCam, WM_CAP_DRIVER_CONNECT, IntPtr.Zero, IntPtr.Zero);
-                    camOk = (res != IntPtr.Zero);
-                }
-            } catch { camOk = false; }
+            cam = new MayakDirectShowCam();
+            camOk = cam.Start();
+            if (!camOk) { cam.Dispose(); cam = null; }
         }
 
         try {
@@ -1779,39 +1956,40 @@ public class MayakWinVideo {
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     byte[] jpg = null;
                     try {
-                        if (camOk) {
-                            SendMessage(hCam, WM_CAP_GRAB_FRAME, IntPtr.Zero, IntPtr.Zero);
-                            SendMessage(hCam, WM_CAP_SAVEDIB, IntPtr.Zero, dibPath);
-                            if (File.Exists(dibPath)) {
-                                using (var fs = new FileStream(dibPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                                using (var raw = Image.FromStream(fs))
-                                using (var dst = new Bitmap(640, 480))
-                                using (var g = Graphics.FromImage(dst))
-                                using (var ms = new MemoryStream()) {
-                                    g.InterpolationMode = InterpolationMode.HighQualityBilinear;
-                                    g.DrawImage(raw, 0, 0, 640, 480);
-                                    dst.Save(ms, codec, ep);
-                                    jpg = ms.ToArray();
+                        if (camOk && cam != null) {
+                            jpg = cam.GrabJpeg(codec, epCam);
+                            if (jpg == null || jpg.Length == 0) {
+                                emptyCamTicks++;
+                                if (emptyCamTicks > 30) {
+                                    camOk = false;
+                                    cam.Dispose();
+                                    cam = null;
                                 }
                             } else {
-                                camOk = false;
+                                emptyCamTicks = 0;
                             }
                         }
                         if (!camOk) {
                             var bounds = Screen.PrimaryScreen.Bounds;
                             using (var scr = new Bitmap(bounds.Width, bounds.Height))
                             using (var g1 = Graphics.FromImage(scr))
-                            using (var dst = new Bitmap(640, 360))
+                            using (var dst = new Bitmap(512, 288))
                             using (var g2 = Graphics.FromImage(dst))
                             using (var ms = new MemoryStream()) {
                                 g1.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
-                                g2.InterpolationMode = InterpolationMode.HighQualityBilinear;
-                                g2.DrawImage(scr, 0, 0, 640, 360);
-                                dst.Save(ms, codec, ep);
+                                g2.InterpolationMode = InterpolationMode.Bilinear;
+                                g2.DrawImage(scr, 0, 0, 512, 288);
+                                dst.Save(ms, codec, epScr);
                                 jpg = ms.ToArray();
                             }
                         }
-                    } catch { camOk = false; }
+                    } catch {
+                        if (camOk) {
+                            camOk = false;
+                            try { if (cam != null) cam.Dispose(); } catch {}
+                            cam = null;
+                        }
+                    }
 
                     if (jpg != null && jpg.Length > 0) {
                         int n = jpg.Length;
@@ -1820,17 +1998,13 @@ public class MayakWinVideo {
                         ns.Write(jpg, 0, n);
                         ns.Flush();
                     }
-                    int sleepMs = 70 - (int)sw.ElapsedMilliseconds;
-                    if (sleepMs > 5) Thread.Sleep(sleepMs);
+                    int sleepMs = 80 - (int)sw.ElapsedMilliseconds;
+                    if (sleepMs > 10) Thread.Sleep(sleepMs);
                 }
             }
         } catch {
         } finally {
-            if (hCam != IntPtr.Zero) {
-                try { SendMessage(hCam, WM_CAP_DRIVER_DISCONNECT, IntPtr.Zero, IntPtr.Zero); } catch {}
-                try { DestroyWindow(hCam); } catch {}
-            }
-            try { if (File.Exists(dibPath)) File.Delete(dibPath); } catch {}
+            if (cam != null) { try { cam.Dispose(); } catch {} }
         }
     }
 }
@@ -1849,6 +2023,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
           'Bypass',
           '-WindowStyle',
           'Hidden',
+          '-STA',
           '-File',
           tmpScript.path,
         ],
@@ -3996,6 +4171,123 @@ try {
     return null;
   }
 
+  Future<void> _ensureWinMediaAudioPlayer() async {
+    if (!Platform.isWindows || _winAudioProc != null) return;
+    try {
+      const psAudio = r'''
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+$player = New-Object System.Windows.Media.MediaPlayer
+$dispatcher = [System.Windows.Threading.Dispatcher]::CurrentDispatcher
+$script:isPlaying = $false
+$script:loadedPath = ""
+
+$player.Add_MediaEnded({
+    $script:isPlaying = $false
+    [Console]::Out.WriteLine('{"ended":true,"playing":false,"pos":0,"dur":0}')
+    [Console]::Out.Flush()
+})
+
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromMilliseconds(250)
+$timer.Add_Tick({
+    if ($script:isPlaying) {
+        $pos = [int]$player.Position.TotalMilliseconds
+        $dur = if ($player.NaturalDuration.HasTimeSpan) { [int]$player.NaturalDuration.TimeSpan.TotalMilliseconds } else { 1000 }
+        [Console]::Out.WriteLine("{`"ended`":false,`"playing`":true,`"pos`":$pos,`"dur`":$dur}")
+        [Console]::Out.Flush()
+    }
+})
+$timer.Start()
+
+$reader = [System.Threading.Tasks.Task]::Run([Action]{
+    while ($true) {
+        $line = [Console]::In.ReadLine()
+        if ($null -eq $line) {
+            $dispatcher.Invoke([Action]{ $dispatcher.InvokeShutdown() })
+            break
+        }
+        $cmdLine = $line
+        $dispatcher.Invoke([Action]{
+            if ($cmdLine.StartsWith("LOAD|")) {
+                $p = $cmdLine.Substring(5)
+                $player.Stop()
+                $player.Open([Uri]::new($p))
+                $player.Play()
+                $script:loadedPath = $p
+                $script:isPlaying = $true
+            } elseif ($cmdLine -eq "PAUSE") {
+                $player.Pause()
+                $script:isPlaying = $false
+            } elseif ($cmdLine -eq "PLAY") {
+                $player.Play()
+                $script:isPlaying = $true
+            } elseif ($cmdLine.StartsWith("SEEK|")) {
+                $ms = [double]$cmdLine.Substring(5)
+                $player.Position = [TimeSpan]::FromMilliseconds($ms)
+            } elseif ($cmdLine -eq "STOP") {
+                $player.Stop()
+                $player.Close()
+                $script:isPlaying = $false
+                $script:loadedPath = ""
+            } elseif ($cmdLine -eq "QUIT") {
+                $player.Stop()
+                $player.Close()
+                $dispatcher.InvokeShutdown()
+            }
+        })
+    }
+})
+
+[System.Windows.Threading.Dispatcher]::Run()
+''';
+      final tmpPs = File(
+          '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_wpf_audio.ps1');
+      await tmpPs.writeAsString(psAudio, flush: true);
+      final proc = await Process.start(
+        'powershell',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-STA',
+          '-File',
+          tmpPs.path,
+        ],
+      );
+      _winAudioProc = proc;
+      _winAudioSub = proc.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+        try {
+          final map = jsonDecode(line) as Map<String, dynamic>;
+          if (map['ended'] == true) {
+            currentlyPlayingAudioPath = null;
+            isAudioPlaying = false;
+            audioPositionMs = 0;
+            onStateChanged();
+            return;
+          }
+          if (currentlyPlayingAudioPath != null) {
+            audioPositionMs = (map['pos'] as num?)?.toInt() ?? audioPositionMs;
+            final d = (map['dur'] as num?)?.toInt() ?? 0;
+            if (d > 0) audioDurationMs = d;
+            isAudioPlaying = map['playing'] == true;
+            onStateChanged();
+          }
+        } catch (_) {}
+      });
+      unawaited(proc.exitCode.then((_) {
+        if (_winAudioProc == proc) {
+          _winAudioProc = null;
+        }
+      }));
+    } catch (_) {}
+  }
+
   Future<void> togglePlayAudioFile(String filePath) async {
     if (Platform.isAndroid) {
       final info = await _nativeChannel
@@ -4009,28 +4301,25 @@ try {
         onStateChanged();
       }
     } else if (Platform.isWindows) {
+      await _ensureWinMediaAudioPlayer();
+      if (_winAudioProc == null) return;
       if (currentlyPlayingAudioPath == filePath) {
         if (isAudioPlaying) {
-          WindowsMciAudioBridge.cmd('pause mayak_audio');
+          _winAudioProc!.stdin.writeln('PAUSE');
           isAudioPlaying = false;
         } else {
-          WindowsMciAudioBridge.cmd('resume mayak_audio');
+          _winAudioProc!.stdin.writeln('PLAY');
           isAudioPlaying = true;
         }
         onStateChanged();
         return;
       }
-      WindowsMciAudioBridge.cmd('close mayak_audio');
-      final cleanPath = filePath.replaceAll('/', '\\');
-      WindowsMciAudioBridge.cmd(
-          'open "$cleanPath" type mpegvideo alias mayak_audio');
-      final lenStr = WindowsMciAudioBridge.cmd('status mayak_audio length');
-      audioDurationMs = max(int.tryParse(lenStr) ?? 1000, 1);
+      final absPath = File(filePath).absolute.path;
       audioPositionMs = 0;
-      WindowsMciAudioBridge.cmd('play mayak_audio');
+      audioDurationMs = 1000;
       currentlyPlayingAudioPath = filePath;
       isAudioPlaying = true;
-      _startAudioProgressPolling();
+      _winAudioProc!.stdin.writeln('LOAD|$absPath');
       onStateChanged();
     }
   }
@@ -4042,11 +4331,10 @@ try {
     if (Platform.isAndroid) {
       await _nativeChannel
           .invokeMethod('seekAudioFile', {'positionMs': targetMs});
-    } else if (Platform.isWindows && currentlyPlayingAudioPath != null) {
-      WindowsMciAudioBridge.cmd('seek mayak_audio to $targetMs');
-      if (isAudioPlaying) {
-        WindowsMciAudioBridge.cmd('play mayak_audio');
-      }
+    } else if (Platform.isWindows &&
+        currentlyPlayingAudioPath != null &&
+        _winAudioProc != null) {
+      _winAudioProc!.stdin.writeln('SEEK|$targetMs');
     }
   }
 
@@ -4060,46 +4348,34 @@ try {
         await _nativeChannel.invokeMethod('stopAudioFile');
       } catch (_) {}
     } else if (Platform.isWindows) {
-      WindowsMciAudioBridge.cmd('close mayak_audio');
+      try {
+        _winAudioProc?.stdin.writeln('STOP');
+      } catch (_) {}
     }
     onStateChanged();
   }
 
   void _startAudioProgressPolling() {
     _audioProgressTimer?.cancel();
+    if (!Platform.isAndroid) return;
     _audioProgressTimer =
         Timer.periodic(const Duration(milliseconds: 300), (_) async {
       if (currentlyPlayingAudioPath == null) {
         _audioProgressTimer?.cancel();
         return;
       }
-      if (Platform.isAndroid) {
-        final st = await _nativeChannel
-            .invokeMapMethod<String, dynamic>('getAudioStatus');
-        if (st == null) {
-          currentlyPlayingAudioPath = null;
-          isAudioPlaying = false;
-          _audioProgressTimer?.cancel();
-        } else {
-          isAudioPlaying = (st['isPlaying'] as bool?) ?? false;
-          audioPositionMs = (st['positionMs'] as int?) ?? 0;
-          audioDurationMs = max((st['durationMs'] as int?) ?? 1, 1);
-        }
-        onStateChanged();
-      } else if (Platform.isWindows) {
-        final posStr = WindowsMciAudioBridge.cmd('status mayak_audio position');
-        final modeStr = WindowsMciAudioBridge.cmd('status mayak_audio mode');
-        final pos = int.tryParse(posStr) ?? audioPositionMs;
-        audioPositionMs = pos;
-        if (modeStr.contains('stopped') && pos >= audioDurationMs - 200) {
-          WindowsMciAudioBridge.cmd('close mayak_audio');
-          currentlyPlayingAudioPath = null;
-          isAudioPlaying = false;
-          audioPositionMs = 0;
-          _audioProgressTimer?.cancel();
-        }
-        onStateChanged();
+      final st = await _nativeChannel
+          .invokeMapMethod<String, dynamic>('getAudioStatus');
+      if (st == null) {
+        currentlyPlayingAudioPath = null;
+        isAudioPlaying = false;
+        _audioProgressTimer?.cancel();
+      } else {
+        isAudioPlaying = (st['isPlaying'] as bool?) ?? false;
+        audioPositionMs = (st['positionMs'] as int?) ?? 0;
+        audioDurationMs = max((st['durationMs'] as int?) ?? 1, 1);
       }
+      onStateChanged();
     });
   }
 
@@ -5591,6 +5867,12 @@ try {
             contact.unreadCount++;
           }
           onMessageReceived(offerMsg);
+          final lowerFn = fn.toLowerCase();
+          if ((lowerFn.startsWith('voice_') || lowerFn.endsWith('.m4a') || lowerFn.endsWith('.wav')) &&
+              fs > 0 &&
+              fs <= 2 * 1024 * 1024) {
+            unawaited(requestDownloadOrRevealMedia(offerMsg));
+          }
           unawaited(_triggerIncomingNotification(
               senderId, contact.displayTitle, '📎 Медиа/файл: $fn'));
           unawaited(_saveContactsAndChats());
