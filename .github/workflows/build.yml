@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.6.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.7.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "1.6.0"
+                  versionName = "1.7.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "1.6.0"
+                  versionName "1.7.0"
               }}
 
               packagingOptions {{
@@ -816,6 +816,61 @@ jobs:
                               "stopNearby" -> {
                                   stopNearbySafe()
                                   result.success(true)
+                              }
+                              "captureCameraFrame" -> {
+                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                      result.success(null)
+                                  } else {
+                                      Thread {
+                                          try {
+                                              @Suppress("DEPRECATION")
+                                              val camCount = android.hardware.Camera.getNumberOfCameras()
+                                              if (camCount <= 0) {
+                                                  runOnUiThread { result.success(null) }
+                                                  return@Thread
+                                              }
+                                              @Suppress("DEPRECATION")
+                                              val info = android.hardware.Camera.CameraInfo()
+                                              var targetId = 0
+                                              for (cid in 0 until camCount) {
+                                                  @Suppress("DEPRECATION")
+                                                  android.hardware.Camera.getCameraInfo(cid, info)
+                                                  @Suppress("DEPRECATION")
+                                                  if (info.facing == android.hardware.Camera.CameraInfo.CAMERA_FACING_FRONT) {
+                                                      targetId = cid
+                                                      break
+                                                  }
+                                              }
+                                              @Suppress("DEPRECATION")
+                                              val cam = android.hardware.Camera.open(targetId)
+                                              val st = android.graphics.SurfaceTexture(0)
+                                              cam.setPreviewTexture(st)
+                                              cam.startPreview()
+                                              cam.takePicture(null, null) { data, c ->
+                                                  try { c.release() } catch (_: Throwable) {}
+                                                  try { st.release() } catch (_: Throwable) {}
+                                                  if (data != null && data.isNotEmpty()) {
+                                                      try {
+                                                          val bmp = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+                                                          val scale = 320f / Math.max(1, bmp.width)
+                                                          val h = Math.max(1, (bmp.height * scale).toInt())
+                                                          val small = android.graphics.Bitmap.createScaledBitmap(bmp, 320, h, true)
+                                                          val baos = java.io.ByteArrayOutputStream()
+                                                          small.compress(android.graphics.Bitmap.CompressFormat.JPEG, 55, baos)
+                                                          val outBytes = baos.toByteArray()
+                                                          runOnUiThread { result.success(outBytes) }
+                                                      } catch (_: Throwable) {
+                                                          runOnUiThread { result.success(null) }
+                                                      }
+                                                  } else {
+                                                      runOnUiThread { result.success(null) }
+                                                  }
+                                              }
+                                          } catch (_: Throwable) {
+                                              runOnUiThread { result.success(null) }
+                                          }
+                                      }.start()
+                                  }
                               }
                               else -> result.notImplemented()
                           }
@@ -1586,7 +1641,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=1.6.0 --build-number=$((1600 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=1.7.0 --build-number=$((1700 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
