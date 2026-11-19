@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.7.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.8.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "1.7.0"
+                  versionName = "1.8.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "1.7.0"
+                  versionName "1.8.0"
               }}
 
               packagingOptions {{
@@ -541,6 +541,28 @@ jobs:
               private val connectedBleEndpoints = mutableSetOf<String>()
               private val mainHandler = Handler(Looper.getMainLooper())
 
+              // v1.8.0: Полнодуплексный аудио/видео движок звонков + рингтон и гудки
+              private val callAudioRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+              private val callAudioMuted = java.util.concurrent.atomic.AtomicBoolean(false)
+              private var callAudioRecord: android.media.AudioRecord? = null
+              private var callAudioTrack: android.media.AudioTrack? = null
+              private var callAec: android.media.audiofx.AcousticEchoCanceler? = null
+              private var callNs: android.media.audiofx.NoiseSuppressor? = null
+              private val callPlayQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray>(24)
+
+              @Suppress("DEPRECATION")
+              private var callCamera: android.hardware.Camera? = null
+              private var callCameraSurface: android.graphics.SurfaceTexture? = null
+              private val callCameraRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+              private val callCameraEncoding = java.util.concurrent.atomic.AtomicBoolean(false)
+              private var callCameraFront: Boolean = true
+              private var lastCallFrameMs: Long = 0L
+              private var callCameraOrientation: Int = 270
+
+              private var incomingRingtone: android.media.Ringtone? = null
+              private val ringbackRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+              private var ringbackToneGen: android.media.ToneGenerator? = null
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   currentInstance = this
@@ -817,60 +839,71 @@ jobs:
                                   stopNearbySafe()
                                   result.success(true)
                               }
-                              "captureCameraFrame" -> {
-                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-                                      result.success(null)
+                              "startCallAudio" -> {
+                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 4202)
+                                      result.success(false)
                                   } else {
-                                      Thread {
-                                          try {
-                                              @Suppress("DEPRECATION")
-                                              val camCount = android.hardware.Camera.getNumberOfCameras()
-                                              if (camCount <= 0) {
-                                                  runOnUiThread { result.success(null) }
-                                                  return@Thread
-                                              }
-                                              @Suppress("DEPRECATION")
-                                              val info = android.hardware.Camera.CameraInfo()
-                                              var targetId = 0
-                                              for (cid in 0 until camCount) {
-                                                  @Suppress("DEPRECATION")
-                                                  android.hardware.Camera.getCameraInfo(cid, info)
-                                                  @Suppress("DEPRECATION")
-                                                  if (info.facing == android.hardware.Camera.CameraInfo.CAMERA_FACING_FRONT) {
-                                                      targetId = cid
-                                                      break
-                                                  }
-                                              }
-                                              @Suppress("DEPRECATION")
-                                              val cam = android.hardware.Camera.open(targetId)
-                                              val st = android.graphics.SurfaceTexture(0)
-                                              cam.setPreviewTexture(st)
-                                              cam.startPreview()
-                                              cam.takePicture(null, null) { data, c ->
-                                                  try { c.release() } catch (_: Throwable) {}
-                                                  try { st.release() } catch (_: Throwable) {}
-                                                  if (data != null && data.isNotEmpty()) {
-                                                      try {
-                                                          val bmp = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
-                                                          val scale = 320f / Math.max(1, bmp.width)
-                                                          val h = Math.max(1, (bmp.height * scale).toInt())
-                                                          val small = android.graphics.Bitmap.createScaledBitmap(bmp, 320, h, true)
-                                                          val baos = java.io.ByteArrayOutputStream()
-                                                          small.compress(android.graphics.Bitmap.CompressFormat.JPEG, 55, baos)
-                                                          val outBytes = baos.toByteArray()
-                                                          runOnUiThread { result.success(outBytes) }
-                                                      } catch (_: Throwable) {
-                                                          runOnUiThread { result.success(null) }
-                                                      }
-                                                  } else {
-                                                      runOnUiThread { result.success(null) }
-                                                  }
-                                              }
-                                          } catch (_: Throwable) {
-                                              runOnUiThread { result.success(null) }
-                                          }
-                                      }.start()
+                                      result.success(startCallAudioInternal())
                                   }
+                              }
+                              "stopCallAudio" -> {
+                                  stopCallAudioInternal()
+                                  result.success(true)
+                              }
+                              "setCallAudioMuted" -> {
+                                  val muted = call.argument<Boolean>("muted") ?: false
+                                  callAudioMuted.set(muted)
+                                  result.success(true)
+                              }
+                              "playCallAudioPcm" -> {
+                                  val pcm = call.arguments as? ByteArray
+                                  if (pcm != null && pcm.isNotEmpty() && callAudioRunning.get()) {
+                                      if (callPlayQueue.remainingCapacity() == 0) {
+                                          callPlayQueue.poll()
+                                      }
+                                      callPlayQueue.offer(pcm)
+                                  }
+                                  result.success(true)
+                              }
+                              "startCallCamera" -> {
+                                  val front = call.argument<Boolean>("front") ?: true
+                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 4203)
+                                      result.success(false)
+                                  } else {
+                                      callCameraFront = front
+                                      result.success(startCallCameraInternal(front))
+                                  }
+                              }
+                              "stopCallCamera" -> {
+                                  stopCallCameraInternal()
+                                  result.success(true)
+                              }
+                              "switchCallCamera" -> {
+                                  callCameraFront = !callCameraFront
+                                  stopCallCameraInternal()
+                                  result.success(startCallCameraInternal(callCameraFront))
+                              }
+                              "startIncomingRingtone" -> {
+                                  startIncomingRingtoneInternal()
+                                  result.success(true)
+                              }
+                              "stopIncomingRingtone" -> {
+                                  stopIncomingRingtoneInternal()
+                                  result.success(true)
+                              }
+                              "startOutgoingRingback" -> {
+                                  startOutgoingRingbackInternal()
+                                  result.success(true)
+                              }
+                              "stopOutgoingRingback" -> {
+                                  stopOutgoingRingbackInternal()
+                                  result.success(true)
+                              }
+                              "playCallEndTone" -> {
+                                  playCallEndToneInternal()
+                                  result.success(true)
                               }
                               else -> result.notImplemented()
                           }
@@ -1624,8 +1657,405 @@ jobs:
                   } catch (_: Throwable) {}
               }
 
+              // ==================== v1.8.0 FULL-DUPLEX CALL ENGINE ====================
+              private fun startCallAudioInternal(): Boolean {
+                  stopCallAudioInternal()
+                  return try {
+                      val sampleRate = 16000
+                      val chunkBytes = 1280 // 40ms @ 16kHz 16-bit mono PCM
+                      val minRec = android.media.AudioRecord.getMinBufferSize(
+                          sampleRate,
+                          android.media.AudioFormat.CHANNEL_IN_MONO,
+                          android.media.AudioFormat.ENCODING_PCM_16BIT
+                      ).coerceAtLeast(chunkBytes * 4)
+
+                      val minPlay = android.media.AudioTrack.getMinBufferSize(
+                          sampleRate,
+                          android.media.AudioFormat.CHANNEL_OUT_MONO,
+                          android.media.AudioFormat.ENCODING_PCM_16BIT
+                      ).coerceAtLeast(chunkBytes * 4)
+
+                      try {
+                          val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                          am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+                          @Suppress("DEPRECATION")
+                          am.isSpeakerphoneOn = true
+                      } catch (_: Throwable) {}
+
+                      val rec = android.media.AudioRecord(
+                          android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                          sampleRate,
+                          android.media.AudioFormat.CHANNEL_IN_MONO,
+                          android.media.AudioFormat.ENCODING_PCM_16BIT,
+                          minRec
+                      )
+                      if (rec.state != android.media.AudioRecord.STATE_INITIALIZED) {
+                          rec.release()
+                          return false
+                      }
+                      callAudioRecord = rec
+
+                      try {
+                          if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                              callAec = android.media.audiofx.AcousticEchoCanceler.create(rec.audioSessionId)?.apply {
+                                  enabled = true
+                              }
+                          }
+                      } catch (_: Throwable) {}
+                      try {
+                          if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                              callNs = android.media.audiofx.NoiseSuppressor.create(rec.audioSessionId)?.apply {
+                                  enabled = true
+                              }
+                          }
+                      } catch (_: Throwable) {}
+
+                      val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                          android.media.AudioTrack.Builder()
+                              .setAudioAttributes(
+                                  android.media.AudioAttributes.Builder()
+                                      .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                      .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                                      .build()
+                              )
+                              .setAudioFormat(
+                                  android.media.AudioFormat.Builder()
+                                      .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                                      .setSampleRate(sampleRate)
+                                      .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                                      .build()
+                              )
+                              .setBufferSizeInBytes(minPlay)
+                              .setTransferMode(android.media.AudioTrack.MODE_STREAM)
+                              .build()
+                      } else {
+                          @Suppress("DEPRECATION")
+                          android.media.AudioTrack(
+                              android.media.AudioManager.STREAM_VOICE_CALL,
+                              sampleRate,
+                              android.media.AudioFormat.CHANNEL_OUT_MONO,
+                              android.media.AudioFormat.ENCODING_PCM_16BIT,
+                              minPlay,
+                              android.media.AudioTrack.MODE_STREAM
+                          )
+                      }
+                      callAudioTrack = track
+                      callPlayQueue.clear()
+                      callAudioMuted.set(false)
+                      callAudioRunning.set(true)
+
+                      rec.startRecording()
+                      track.play()
+
+                      // Capture thread
+                      Thread {
+                          android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                          val buf = ByteArray(chunkBytes)
+                          while (callAudioRunning.get()) {
+                              try {
+                                  val read = rec.read(buf, 0, chunkBytes)
+                                  if (read > 0 && !callAudioMuted.get()) {
+                                      val copy = buf.copyOf(read)
+                                      mainHandler.post {
+                                          if (callAudioRunning.get()) {
+                                              methodChannel?.invokeMethod("onCallAudioPcm", copy)
+                                          }
+                                      }
+                                  }
+                              } catch (_: Throwable) {
+                                  break
+                              }
+                          }
+                      }.start()
+
+                      // Playback thread
+                      Thread {
+                          android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                          while (callAudioRunning.get()) {
+                              try {
+                                  val pkt = callPlayQueue.poll(120, java.util.concurrent.TimeUnit.MILLISECONDS)
+                                  if (pkt != null && callAudioRunning.get()) {
+                                      track.write(pkt, 0, pkt.size)
+                                  }
+                              } catch (_: Throwable) {
+                                  break
+                              }
+                          }
+                      }.start()
+
+                      true
+                  } catch (t: Throwable) {
+                      stopCallAudioInternal()
+                      false
+                  }
+              }
+
+              private fun stopCallAudioInternal() {
+                  callAudioRunning.set(false)
+                  callPlayQueue.clear()
+                  try { callAec?.release() } catch (_: Throwable) {}
+                  callAec = null
+                  try { callNs?.release() } catch (_: Throwable) {}
+                  callNs = null
+                  try { callAudioRecord?.stop() } catch (_: Throwable) {}
+                  try { callAudioRecord?.release() } catch (_: Throwable) {}
+                  callAudioRecord = null
+                  try { callAudioTrack?.pause() } catch (_: Throwable) {}
+                  try { callAudioTrack?.flush() } catch (_: Throwable) {}
+                  try { callAudioTrack?.stop() } catch (_: Throwable) {}
+                  try { callAudioTrack?.release() } catch (_: Throwable) {}
+                  callAudioTrack = null
+                  try {
+                      val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                      @Suppress("DEPRECATION")
+                      am.isSpeakerphoneOn = false
+                      am.mode = android.media.AudioManager.MODE_NORMAL
+                  } catch (_: Throwable) {}
+              }
+
+              private fun rotateNv21(src: ByteArray, w: Int, h: Int, deg: Int): Triple<ByteArray, Int, Int> {
+                  if (deg == 0) return Triple(src, w, h)
+                  val frameSize = w * h
+                  val out = ByteArray(src.size)
+                  if (deg == 90) {
+                      var idx = 0
+                      for (x in 0 until w) {
+                          for (y in h - 1 downTo 0) {
+                              out[idx++] = src[y * w + x]
+                          }
+                      }
+                      idx = frameSize
+                      var x = 0
+                      while (x < w) {
+                          for (y in (h / 2) - 1 downTo 0) {
+                              val uvPos = frameSize + y * w + x
+                              out[idx++] = src[uvPos]
+                              out[idx++] = src[uvPos + 1]
+                          }
+                          x += 2
+                      }
+                      return Triple(out, h, w)
+                  } else if (deg == 270) {
+                      var idx = 0
+                      for (x in w - 1 downTo 0) {
+                          for (y in 0 until h) {
+                              out[idx++] = src[y * w + x]
+                          }
+                      }
+                      idx = frameSize
+                      var x = w - 2
+                      while (x >= 0) {
+                          for (y in 0 until h / 2) {
+                              val uvPos = frameSize + y * w + x
+                              out[idx++] = src[uvPos]
+                              out[idx++] = src[uvPos + 1]
+                          }
+                          x -= 2
+                      }
+                      return Triple(out, h, w)
+                  } else if (deg == 180) {
+                      var idx = 0
+                      for (i in frameSize - 1 downTo 0) {
+                          out[idx++] = src[i]
+                      }
+                      idx = frameSize
+                      var i = src.size - 2
+                      while (i >= frameSize) {
+                          out[idx++] = src[i]
+                          out[idx++] = src[i + 1]
+                          i -= 2
+                      }
+                      return Triple(out, w, h)
+                  }
+                  return Triple(src, w, h)
+              }
+
+              @Suppress("DEPRECATION")
+              private fun startCallCameraInternal(front: Boolean): Boolean {
+                  stopCallCameraInternal()
+                  return try {
+                      val camCount = android.hardware.Camera.getNumberOfCameras()
+                      if (camCount <= 0) return false
+                      val info = android.hardware.Camera.CameraInfo()
+                      var targetId = 0
+                      val wantedFacing = if (front) {
+                          android.hardware.Camera.CameraInfo.CAMERA_FACING_FRONT
+                      } else {
+                          android.hardware.Camera.CameraInfo.CAMERA_FACING_BACK
+                      }
+                      for (cid in 0 until camCount) {
+                          android.hardware.Camera.getCameraInfo(cid, info)
+                          if (info.facing == wantedFacing) {
+                              targetId = cid
+                              break
+                          }
+                      }
+                      android.hardware.Camera.getCameraInfo(targetId, info)
+                      callCameraOrientation = info.orientation
+
+                      val cam = android.hardware.Camera.open(targetId)
+                      callCamera = cam
+                      val params = cam.parameters
+                      params.previewFormat = android.graphics.ImageFormat.NV21
+                      var bestW = 640
+                      var bestH = 480
+                      var bestDiff = Int.MAX_VALUE
+                      val sizes = params.supportedPreviewSizes
+                      if (sizes != null) {
+                          for (sz in sizes) {
+                              if (sz.width <= 720 && sz.height <= 720) {
+                                  val diff = Math.abs(sz.width - 640) + Math.abs(sz.height - 480)
+                                  if (diff < bestDiff) {
+                                      bestDiff = diff
+                                      bestW = sz.width
+                                      bestH = sz.height
+                                  }
+                              }
+                          }
+                      }
+                      params.setPreviewSize(bestW, bestH)
+                      try { cam.parameters = params } catch (_: Throwable) {}
+
+                      val actualSize = cam.parameters.previewSize
+                      val pw = actualSize.width
+                      val ph = actualSize.height
+                      val bufSize = pw * ph * 3 / 2
+
+                      val st = android.graphics.SurfaceTexture(42)
+                      callCameraSurface = st
+                      cam.setPreviewTexture(st)
+                      cam.addCallbackBuffer(ByteArray(bufSize))
+                      cam.addCallbackBuffer(ByteArray(bufSize))
+
+                      callCameraRunning.set(true)
+                      callCameraEncoding.set(false)
+                      lastCallFrameMs = 0L
+
+                      cam.setPreviewCallbackWithBuffer { data, c ->
+                          if (!callCameraRunning.get() || data == null) return@setPreviewCallbackWithBuffer
+                          val now = System.currentTimeMillis()
+                          if (now - lastCallFrameMs >= 68L && callCameraEncoding.compareAndSet(false, true)) {
+                              lastCallFrameMs = now
+                              val frameCopy = data.copyOf()
+                              try { c.addCallbackBuffer(data) } catch (_: Throwable) {}
+                              Thread {
+                                  try {
+                                      val (rotBytes, rw, rh) = rotateNv21(frameCopy, pw, ph, callCameraOrientation)
+                                      val yuv = android.graphics.YuvImage(rotBytes, android.graphics.ImageFormat.NV21, rw, rh, null)
+                                      val baos = java.io.ByteArrayOutputStream()
+                                      yuv.compressToJpeg(android.graphics.Rect(0, 0, rw, rh), 75, baos)
+                                      val jpg = baos.toByteArray()
+                                      mainHandler.post {
+                                          if (callCameraRunning.get()) {
+                                              methodChannel?.invokeMethod("onCallVideoFrame", jpg)
+                                          }
+                                      }
+                                  } catch (_: Throwable) {
+                                  } finally {
+                                      callCameraEncoding.set(false)
+                                  }
+                              }.start()
+                          } else {
+                              try { c.addCallbackBuffer(data) } catch (_: Throwable) {}
+                          }
+                      }
+                      cam.startPreview()
+                      true
+                  } catch (_: Throwable) {
+                      stopCallCameraInternal()
+                      false
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              private fun stopCallCameraInternal() {
+                  callCameraRunning.set(false)
+                  try { callCamera?.setPreviewCallbackWithBuffer(null) } catch (_: Throwable) {}
+                  try { callCamera?.stopPreview() } catch (_: Throwable) {}
+                  try { callCamera?.release() } catch (_: Throwable) {}
+                  callCamera = null
+                  try { callCameraSurface?.release() } catch (_: Throwable) {}
+                  callCameraSurface = null
+              }
+
+              private fun startIncomingRingtoneInternal() {
+                  stopIncomingRingtoneInternal()
+                  try {
+                      val uri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_RINGTONE)
+                          ?: android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
+                      val r = android.media.RingtoneManager.getRingtone(applicationContext, uri)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                          r?.isLooping = true
+                      }
+                      r?.play()
+                      incomingRingtone = r
+                  } catch (_: Throwable) {}
+                  try {
+                      @Suppress("DEPRECATION")
+                      val vib = getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                      val pattern = longArrayOf(0, 700, 500)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          vib?.vibrate(android.os.VibrationEffect.createWaveform(pattern, 0))
+                      } else {
+                          @Suppress("DEPRECATION")
+                          vib?.vibrate(pattern, 0)
+                      }
+                  } catch (_: Throwable) {}
+              }
+
+              private fun stopIncomingRingtoneInternal() {
+                  try { incomingRingtone?.stop() } catch (_: Throwable) {}
+                  incomingRingtone = null
+                  try {
+                      @Suppress("DEPRECATION")
+                      val vib = getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                      vib?.cancel()
+                  } catch (_: Throwable) {}
+              }
+
+              private fun startOutgoingRingbackInternal() {
+                  stopOutgoingRingbackInternal()
+                  ringbackRunning.set(true)
+                  Thread {
+                      try {
+                          val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_VOICE_CALL, 80)
+                          ringbackToneGen = tg
+                          while (ringbackRunning.get()) {
+                              tg.startTone(android.media.ToneGenerator.TONE_SUP_RINGTONE, 1000)
+                              var waited = 0
+                              while (waited < 3200 && ringbackRunning.get()) {
+                                  Thread.sleep(100)
+                                  waited += 100
+                              }
+                          }
+                      } catch (_: Throwable) {}
+                  }.start()
+              }
+
+              private fun stopOutgoingRingbackInternal() {
+                  ringbackRunning.set(false)
+                  try { ringbackToneGen?.stopTone() } catch (_: Throwable) {}
+                  try { ringbackToneGen?.release() } catch (_: Throwable) {}
+                  ringbackToneGen = null
+              }
+
+              private fun playCallEndToneInternal() {
+                  Thread {
+                      try {
+                          val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_VOICE_CALL, 75)
+                          tg.startTone(android.media.ToneGenerator.TONE_PROP_PROMPT, 260)
+                          Thread.sleep(320)
+                          tg.release()
+                      } catch (_: Throwable) {}
+                  }.start()
+              }
+
               override fun onDestroy() {
                   if (currentInstance == this) currentInstance = null
+                  stopCallAudioInternal()
+                  stopCallCameraInternal()
+                  stopIncomingRingtoneInternal()
+                  stopOutgoingRingbackInternal()
                   stopAudioInternal()
                   disposeInAppVideoInternal()
                   try {
@@ -1641,7 +2071,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=1.7.0 --build-number=$((1700 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=1.8.0 --build-number=$((1800 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -1682,7 +2112,9 @@ jobs:
           echo netsh advfirewall firewall delete rule name="Mayak P2P UDP 42069" ^>nul 2^>^&1 >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
           echo netsh advfirewall firewall add rule name="Mayak P2P TCP 42070" dir=in action=allow protocol=TCP localport=42070 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
           echo netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo echo Готово! Порты Маяк P2P (42069 UDP / 42070 TCP) открыты для Общественной сети! >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo netsh advfirewall firewall delete rule name="Mayak P2P Call Media UDP 42072" ^>nul 2^>^&1 >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo netsh advfirewall firewall add rule name="Mayak P2P Call Media UDP 42072" dir=in action=allow protocol=UDP localport=42072 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
+          echo echo Готово! Порты Маяк P2P (42069 UDP / 42070 TCP / 42072 UDP Звонки) открыты для Общественной сети! >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
           echo pause >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
 
       - name: Upload Windows Portable ZIP
