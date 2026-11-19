@@ -736,6 +736,16 @@ class MeshEngine {
   final Map<String, GroupChat> groupChats = {};
   final Map<String, int> unreadGroupCounts = {};
 
+  // v1.7.0: ГЧ (Голосовой чат) и ВЧ (Видеочат) в реальном времени
+  String? activeCallPeerId;
+  String activeCallMode = 'voice'; // 'voice' | 'video'
+  bool isCallAccepted = false;
+  String? incomingCallFromPeerId;
+  String incomingCallMode = 'voice';
+  Uint8List? remoteVideoFrameBytes;
+  String callStatusText = '';
+  int _lastCallAudioPlayMs = 0;
+
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
 
@@ -1004,6 +1014,228 @@ class MeshEngine {
     await _saveContactsAndChats();
     onStateChanged();
     return 'Профиль ($nickname) и переписка восстановлены!';
+  }
+
+
+  // ===========================================================================
+  // v1.7.0: ОЧИСТКА БУФЕРА И ПЕРИОДИЧЕСКИЙ ДОСЫЛ + ГЧ И ВЧ (VOICE/VIDEO CALLS)
+  // ===========================================================================
+  Future<int> clearOutboxAndTransitBuffer() async {
+    final removedCount = transitBuffer.length +
+        myPersistentOutbox.length +
+        pendingFileJobs.length;
+    transitBuffer.clear();
+    myPersistentOutbox.clear();
+    pendingFileJobs.clear();
+    await _saveContactsAndChats();
+    _addLog('Буфер отправки очищен ($removedCount пакетов/задач удалено).');
+    onStateChanged();
+    return removedCount;
+  }
+
+  void _flushBufferedPacketsToOnlinePeers() {
+    _evictExpired();
+    if (_tcpPeers.isEmpty && _blePeers.isEmpty) return;
+
+    // Удаляем пакеты, по которым уже есть ACK доставки
+    for (final ackId in deliveredAcks.keys) {
+      transitBuffer.remove(ackId);
+      myPersistentOutbox.remove(ackId);
+    }
+
+    final combined = <String, MeshPacket>{
+      ...myPersistentOutbox,
+      ...transitBuffer,
+    };
+    if (combined.isEmpty) return;
+
+    // Отправка на все активные TCP-сокеты с защитой от перегрузки
+    int sentCount = 0;
+    for (final entry in _tcpPeers.entries.toList()) {
+      final sock = entry.key;
+      final peerId = entry.value;
+      for (final pkt in combined.values) {
+        if (pkt.dstNodeId != '*' && pkt.dstNodeId != peerId && pkt.ttl <= 1) {
+          continue;
+        }
+        _sendTcpLine(sock, jsonEncode(pkt.toJson()));
+        sentCount++;
+        if (sentCount >= 24) break;
+      }
+    }
+  }
+
+  Future<void> startLiveCall(String peerId, String mode) async {
+    final contact = knownContacts[peerId];
+    if (contact == null) return;
+    activeCallPeerId = peerId;
+    activeCallMode = mode;
+    isCallAccepted = false;
+    remoteVideoFrameBytes = null;
+    callStatusText = mode == 'video'
+        ? 'Вызов ВЧ (Видеочат)...'
+        : 'Вызов ГЧ (Голосовой чат)...';
+    final payload = jsonEncode({
+      'v': 2,
+      'kind': 'CALL_INVITE',
+      'mode': mode,
+      'nick': nickname,
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: peerId,
+      contact: contact,
+      msgId: _randomHex(12),
+      sealedPayloadBytes: utf8.encode(payload),
+      persistInOutbox: false,
+      keepInTransitBuffer: false,
+    );
+    onStateChanged();
+  }
+
+  Future<void> acceptIncomingCall() async {
+    final pid = incomingCallFromPeerId;
+    if (pid == null) return;
+    final contact = knownContacts[pid];
+    activeCallPeerId = pid;
+    activeCallMode = incomingCallMode;
+    isCallAccepted = true;
+    remoteVideoFrameBytes = null;
+    incomingCallFromPeerId = null;
+    callStatusText = activeCallMode == 'video'
+        ? 'ВЧ активен (Видео + Голос)'
+        : 'ГЧ активен (Голос)';
+    if (contact != null) {
+      final payload = jsonEncode({
+        'v': 2,
+        'kind': 'CALL_ACCEPT',
+        'mode': activeCallMode,
+      });
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: pid,
+        contact: contact,
+        msgId: _randomHex(12),
+        sealedPayloadBytes: utf8.encode(payload),
+        persistInOutbox: false,
+      );
+    }
+    onStateChanged();
+  }
+
+  Future<void> rejectIncomingCall() async {
+    final pid = incomingCallFromPeerId;
+    incomingCallFromPeerId = null;
+    if (pid != null) {
+      final contact = knownContacts[pid];
+      if (contact != null) {
+        final payload = jsonEncode({'v': 2, 'kind': 'CALL_REJECT'});
+        await _encryptAndQueueSealedDataPacket(
+          targetNodeId: pid,
+          contact: contact,
+          msgId: _randomHex(12),
+          sealedPayloadBytes: utf8.encode(payload),
+          persistInOutbox: false,
+        );
+      }
+    }
+    onStateChanged();
+  }
+
+  Future<void> endActiveCall() async {
+    final pid = activeCallPeerId;
+    activeCallPeerId = null;
+    isCallAccepted = false;
+    remoteVideoFrameBytes = null;
+    callStatusText = '';
+    await stopAudioPlayback();
+    if (pid != null) {
+      final contact = knownContacts[pid];
+      if (contact != null) {
+        final payload = jsonEncode({'v': 2, 'kind': 'CALL_END'});
+        await _encryptAndQueueSealedDataPacket(
+          targetNodeId: pid,
+          contact: contact,
+          msgId: _randomHex(12),
+          sealedPayloadBytes: utf8.encode(payload),
+          persistInOutbox: false,
+        );
+      }
+    }
+    onStateChanged();
+  }
+
+  Future<void> sendCallAudioChunk(Uint8List bytes) async {
+    final pid = activeCallPeerId;
+    if (pid == null || !isCallAccepted || bytes.isEmpty) return;
+    final contact = knownContacts[pid];
+    if (contact == null) return;
+    final payload = jsonEncode({
+      'v': 2,
+      'kind': 'CALL_AUDIO_CHUNK',
+      'b64': base64Encode(bytes),
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: pid,
+      contact: contact,
+      msgId: _randomHex(10),
+      sealedPayloadBytes: utf8.encode(payload),
+      persistInOutbox: false,
+      keepInTransitBuffer: false,
+    );
+  }
+
+  Future<void> sendCallVideoFrame(Uint8List jpegBytes) async {
+    final pid = activeCallPeerId;
+    if (pid == null || !isCallAccepted || jpegBytes.isEmpty) return;
+    final contact = knownContacts[pid];
+    if (contact == null) return;
+    final payload = jsonEncode({
+      'v': 2,
+      'kind': 'CALL_VIDEO_FRAME',
+      'b64': base64Encode(jpegBytes),
+    });
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: pid,
+      contact: contact,
+      msgId: _randomHex(10),
+      sealedPayloadBytes: utf8.encode(payload),
+      persistInOutbox: false,
+      keepInTransitBuffer: false,
+    );
+  }
+
+  Future<Uint8List?> capturePlatformVideoFrame() async {
+    try {
+      if (Platform.isAndroid) {
+        final bytes =
+            await _nativeChannel.invokeMethod<Uint8List>('captureCameraFrame');
+        return bytes;
+      } else if (Platform.isWindows) {
+        final tmpPath =
+            '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_vframe.jpg';
+        final ps = r"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+\$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+\$bmp = New-Object System.Drawing.Bitmap \$b.Width, \$b.Height
+\$g = [System.Drawing.Graphics]::FromImage(\$bmp)
+\$g.CopyFromScreen(\$b.Location, [System.Drawing.Point]::Empty, \$b.Size)
+\$small = New-Object System.Drawing.Bitmap 320, 180
+\$g2 = [System.Drawing.Graphics]::FromImage(\$small)
+\$g2.DrawImage(\$bmp, 0, 0, 320, 180)
+\$small.Save('$tmpPath', [System.Drawing.Imaging.ImageFormat]::Jpeg)
+\$g2.Dispose(); \$small.Dispose(); \$g.Dispose(); \$bmp.Dispose()
+""";
+        final res = await Process.run(
+            'powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps]);
+        if (res.exitCode == 0) {
+          final f = File(tmpPath);
+          if (await f.exists()) {
+            return await f.readAsBytes();
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 
   Future<void> pingAllKnownNodes() async {
@@ -3556,8 +3788,14 @@ try {
                     for (final ack in deliveredAcks.values) {
                       _sendTcpLine(socket, jsonEncode(ack.toJson()));
                     }
-                    for (final entry in transitBuffer.entries.toList()) {
+                    final toFlush = <String, MeshPacket>{
+                      ...myPersistentOutbox,
+                      ...transitBuffer,
+                    };
+                    for (final entry in toFlush.entries) {
+                      if (deliveredAcks.containsKey(entry.key)) continue;
                       _sendTcpLine(socket, jsonEncode(entry.value.toJson()));
+                      await Future.delayed(const Duration(milliseconds: 10));
                     }
                   },
                   replyDirect: (replyJson) => _sendTcpLine(socket, replyJson),
@@ -4432,6 +4670,65 @@ try {
         if (fid.isNotEmpty) {
           unawaited(_streamFileChunksToPeer(senderId, fid));
         }
+      } else if (kind == 'CALL_INVITE') {
+        final mode = (envelope['mode'] ?? 'voice').toString();
+        incomingCallFromPeerId = senderId;
+        incomingCallMode = mode;
+        unawaited(_triggerIncomingNotification(
+          senderId,
+          contact.displayTitle,
+          mode == 'video' ? '📹 Входящий видеочат (ВЧ)' : '📞 Входящий голосовой чат (ГЧ)',
+        ));
+      } else if (kind == 'CALL_ACCEPT') {
+        if (activeCallPeerId == senderId) {
+          isCallAccepted = true;
+          callStatusText = activeCallMode == 'video'
+              ? 'ВЧ активен (Видео + Голос)'
+              : 'ГЧ активен (Голос)';
+        }
+      } else if (kind == 'CALL_REJECT') {
+        if (activeCallPeerId == senderId) {
+          activeCallPeerId = null;
+          isCallAccepted = false;
+          remoteVideoFrameBytes = null;
+          callStatusText = 'Вызов отклонён';
+        }
+      } else if (kind == 'CALL_END') {
+        if (activeCallPeerId == senderId || incomingCallFromPeerId == senderId) {
+          activeCallPeerId = null;
+          incomingCallFromPeerId = null;
+          isCallAccepted = false;
+          remoteVideoFrameBytes = null;
+          callStatusText = '';
+          unawaited(stopAudioPlayback());
+        }
+      } else if (kind == 'CALL_AUDIO_CHUNK') {
+        if (activeCallPeerId == senderId && isCallAccepted) {
+          final b64 = (envelope['b64'] ?? '').toString();
+          if (b64.isNotEmpty) {
+            try {
+              final nowMs = DateTime.now().millisecondsSinceEpoch;
+              if (nowMs - _lastCallAudioPlayMs > 450) {
+                _lastCallAudioPlayMs = nowMs;
+                final bytes = base64Decode(b64);
+                final ext = Platform.isWindows ? 'wav' : 'm4a';
+                final f = File(
+                    '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_call_rx.$ext');
+                await f.writeAsBytes(bytes, flush: true);
+                await togglePlayAudioFile(f.path);
+              }
+            } catch (_) {}
+          }
+        }
+      } else if (kind == 'CALL_VIDEO_FRAME') {
+        if (activeCallPeerId == senderId && isCallAccepted) {
+          final b64 = (envelope['b64'] ?? '').toString();
+          if (b64.isNotEmpty) {
+            try {
+              remoteVideoFrameBytes = base64Decode(b64);
+            } catch (_) {}
+          }
+        }
       } else if (kind == 'FILE_MISSING') {
         final fid = (envelope['fid'] ?? '').toString();
         for (final list in chatHistory.values) {
@@ -4863,6 +5160,7 @@ try {
         if (nodeId.isEmpty || listenPort <= 0) return;
         await refreshNetworkCache();
         _refreshOnlineStatuses();
+        _flushBufferedPacketsToOnlinePeers();
         final beacon = utf8.encode(jsonEncode({
           'id': nodeId,
           'nick': nickname,
