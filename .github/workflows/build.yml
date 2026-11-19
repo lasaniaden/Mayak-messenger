@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.8.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.8.1
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "1.8.0"
+                  versionName = "1.8.1"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "1.8.0"
+                  versionName "1.8.1"
               }}
 
               packagingOptions {{
@@ -1934,7 +1934,7 @@ jobs:
                       cam.setPreviewCallbackWithBuffer { data, c ->
                           if (!callCameraRunning.get() || data == null) return@setPreviewCallbackWithBuffer
                           val now = System.currentTimeMillis()
-                          if (now - lastCallFrameMs >= 68L && callCameraEncoding.compareAndSet(false, true)) {
+                          if (now - lastCallFrameMs >= 80L && callCameraEncoding.compareAndSet(false, true)) {
                               lastCallFrameMs = now
                               val frameCopy = data.copyOf()
                               try { c.addCallbackBuffer(data) } catch (_: Throwable) {}
@@ -1943,7 +1943,7 @@ jobs:
                                       val (rotBytes, rw, rh) = rotateNv21(frameCopy, pw, ph, callCameraOrientation)
                                       val yuv = android.graphics.YuvImage(rotBytes, android.graphics.ImageFormat.NV21, rw, rh, null)
                                       val baos = java.io.ByteArrayOutputStream()
-                                      yuv.compressToJpeg(android.graphics.Rect(0, 0, rw, rh), 75, baos)
+                                      yuv.compressToJpeg(android.graphics.Rect(0, 0, rw, rh), 62, baos)
                                       val jpg = baos.toByteArray()
                                       mainHandler.post {
                                           if (callCameraRunning.get()) {
@@ -2071,7 +2071,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=1.8.0 --build-number=$((1800 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=1.8.1 --build-number=$((1810 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
