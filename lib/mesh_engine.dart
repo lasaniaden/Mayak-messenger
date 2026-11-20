@@ -1182,6 +1182,14 @@ class MeshEngine {
   String pttChannelTarget = 'ALL'; // 'ALL' или nodeId
   String? pttActiveSpeakerName;
   Timer? _pttRxTimeoutTimer;
+  // v2.1.0: Security hardening (PTT E2EE, call replay window, DoS cap) + Saved Notes & Disappearing timer
+  static const int maxTransitBufferSize = 350;
+  final Map<String, SecretKey> _peerPttKeys = {};
+  int _lastCallAudioRxSeq = 0;
+  final Set<int> _callAudioSeenSeqs = {};
+  static const String savedChatKey = 'saved:self';
+  int defaultDisappearingSeconds = 0;
+  Timer? _disappearingSweeper;
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -1236,11 +1244,20 @@ class MeshEngine {
     return sb.toString();
   }
 
+  bool _constantTimeHexEquals(String a, String b) {
+    if (a.length != b.length) return false;
+    int diff = 0;
+    for (int i = 0; i < a.length; i++) {
+      diff |= a.codeUnitAt(i) ^ b.codeUnitAt(i);
+    }
+    return diff == 0;
+  }
+
   Future<bool> tryUnlockAdminConsole(String candidatePhrase) async {
     final clean = _normalizeAdminPhrase(candidatePhrase);
     final digest =
         await _sha256.hash(utf8.encode('MAYAK-ADMIN-AUTH-SALT-V1|$clean'));
-    if (_toHex(digest.bytes) != _adminAuthHashHex) {
+    if (!_constantTimeHexEquals(_toHex(digest.bytes), _adminAuthHashHex)) {
       return false;
     }
     final seedDigest =
@@ -1248,10 +1265,89 @@ class MeshEngine {
     _unlockedAdminMasterKeyPair =
         await _ed25519.newKeyPairFromSeed(seedDigest.bytes);
     isAdminUnlocked = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('mayak_adm_seed_v21', _toHex(seedDigest.bytes));
+    } catch (_) {}
     _refreshOnlineStatuses();
     unawaited(pingAllKnownNodes());
     onStateChanged();
     return true;
+  }
+
+  Future<bool> tryFastAdminUnlockFromCache() async {
+    if (isAdminUnlocked) return true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final seedHex = prefs.getString('mayak_adm_seed_v21') ?? '';
+      if (seedHex.length != 64) return false;
+      final kp = await _ed25519.newKeyPairFromSeed(_fromHex(seedHex));
+      final pub = await kp.extractPublicKey();
+      if (!_constantTimeHexEquals(_toHex(pub.bytes), _adminMasterPubHex)) {
+        return false;
+      }
+      _unlockedAdminMasterKeyPair = kp;
+      isAdminUnlocked = true;
+      _refreshOnlineStatuses();
+      unawaited(pingAllKnownNodes());
+      onStateChanged();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  List<ChatMessage> getSavedMessages() {
+    return chatHistory.putIfAbsent(savedChatKey, () => []);
+  }
+
+  Future<void> addSavedNote(String text) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+    getSavedMessages().add(ChatMessage(
+      msgId: _randomHex(12),
+      peerId: savedChatKey,
+      senderId: nodeId,
+      senderName: nickname,
+      text: clean,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      isMe: true,
+      isDelivered: true,
+    ));
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> deleteSavedNote(String msgId) async {
+    getSavedMessages().removeWhere((m) => m.msgId == msgId);
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> setDefaultDisappearingSeconds(int seconds) async {
+    defaultDisappearingSeconds = seconds;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('mayak_disappear_sec', seconds);
+    } catch (_) {}
+    onStateChanged();
+  }
+
+  void _sweepExpiredMessages() {
+    if (defaultDisappearingSeconds <= 0) return;
+    final cutoff = DateTime.now().millisecondsSinceEpoch -
+        (defaultDisappearingSeconds * 1000);
+    bool changed = false;
+    for (final entry in chatHistory.entries) {
+      if (entry.key == savedChatKey) continue;
+      final before = entry.value.length;
+      entry.value.removeWhere((m) => m.timestamp < cutoff);
+      if (entry.value.length != before) changed = true;
+    }
+    if (changed) {
+      unawaited(_saveContactsAndChats());
+      onStateChanged();
+    }
   }
 
 
@@ -1772,10 +1868,11 @@ class MeshEngine {
         remotePublicKey: peerDhPub,
       );
       final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+      final pairIds = [nodeId, peerId]..sort();
       return await hkdf.deriveKey(
         secretKey: shared,
-        nonce: utf8.encode('mayak-call-salt-v18'),
-        info: utf8.encode('mayak-call-key|$callId'),
+        nonce: utf8.encode('mayak-call-salt-v21'),
+        info: utf8.encode('mayak-call-key|${pairIds[0]}|${pairIds[1]}|$callId'),
       );
     } catch (_) {
       return null;
@@ -1950,6 +2047,16 @@ class MeshEngine {
       }
 
       if (type == 0x01 || type == 0x04) {
+        if (seq > 0) {
+          if (seq + 64 < _lastCallAudioRxSeq || _callAudioSeenSeqs.contains(seq)) {
+            return;
+          }
+          _callAudioSeenSeqs.add(seq);
+          if (seq > _lastCallAudioRxSeq) {
+            _lastCallAudioRxSeq = seq;
+            _callAudioSeenSeqs.removeWhere((k) => k + 64 < _lastCallAudioRxSeq);
+          }
+        }
         final rawBytes = Uint8List.fromList(plain);
         final pcm =
             (type == 0x04) ? _decodeUlaw8kToPcm16k(rawBytes) : rawBytes;
@@ -1988,13 +2095,7 @@ class MeshEngine {
   void _onLocalCapturedPcm(Uint8List pcm) {
     if (isPttTransmitting && activeCallPeerId == null) {
       final compressed = _encodePcm16kToUlaw8k(pcm);
-      final line = jsonEncode({
-        'ptt_bin': base64Encode(compressed),
-        'sn': nickname,
-        'sid': nodeId,
-        't': pttChannelTarget,
-      });
-      _broadcastRawLineToPttTargets(line);
+      unawaited(_sendEncryptedPttChunk(compressed));
       return;
     }
     if (activeCallPeerId == null || !isCallAccepted || isCallMicMuted) return;
@@ -2085,6 +2186,65 @@ class MeshEngine {
       } catch (_) {}
     } else if (Platform.isWindows) {
       WindowsPcmAudioBridge.playPttSound(isStart);
+    }
+  }
+
+  Future<SecretKey?> _getOrDerivePeerPttKey(String peerId) async {
+    final cached = _peerPttKeys[peerId];
+    if (cached != null) return cached;
+    final c = knownContacts[peerId];
+    if (c == null || c.dhPubHex.isEmpty) return null;
+    try {
+      final peerPub = SimplePublicKey(_fromHex(c.dhPubHex), type: KeyPairType.x25519);
+      final shared = await _x25519.sharedSecretKey(
+        keyPair: _dhKeyPair,
+        remotePublicKey: peerPub,
+      );
+      final pairIds = [nodeId, peerId]..sort();
+      final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+      final derived = await hkdf.deriveKey(
+        secretKey: shared,
+        nonce: utf8.encode('mayak-ptt-salt-v21'),
+        info: utf8.encode('mayak-ptt-key|${pairIds[0]}|${pairIds[1]}'),
+      );
+      _peerPttKeys[peerId] = derived;
+      return derived;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _sendEncryptedPttChunk(Uint8List ulawBytes) async {
+    final target = pttChannelTarget;
+    final rng = Random.secure();
+    final sentPeers = <String>{};
+    Future<void> sendToPeer(String pid, void Function(String line) emitter) async {
+      if (sentPeers.contains(pid)) return;
+      if (target != 'ALL' && pid != target) return;
+      final key = await _getOrDerivePeerPttKey(pid);
+      if (key == null) return;
+      sentPeers.add(pid);
+      final nonce = Uint8List(12);
+      for (int i = 0; i < 12; i++) {
+        nonce[i] = rng.nextInt(256);
+      }
+      final box = await _cipher.encrypt(ulawBytes, secretKey: key, nonce: nonce);
+      final line = jsonEncode({
+        'ptt_bin': base64Encode(box.cipherText),
+        'n': base64Encode(nonce),
+        'm': base64Encode(box.mac.bytes),
+        'sn': nickname,
+        'sid': nodeId,
+        't': target,
+      });
+      emitter(line);
+    }
+
+    for (final entry in _tcpPeers.entries.toList()) {
+      await sendToPeer(entry.value, (line) => _sendTcpLine(entry.key, line));
+    }
+    for (final entry in _blePeers.entries.toList()) {
+      await sendToPeer(entry.value, (line) => unawaited(_sendBleLine(entry.key, line)));
     }
   }
 
@@ -2184,7 +2344,25 @@ class MeshEngine {
       onStateChanged();
     }
     try {
-      final ulaw = base64Decode(b64);
+      Uint8List ulaw;
+      final sid = (map['sid'] ?? '').toString();
+      final nonceB64 = (map['n'] ?? '').toString();
+      final macB64 = (map['m'] ?? '').toString();
+      if (nonceB64.isNotEmpty && macB64.isNotEmpty && sid.isNotEmpty) {
+        final key = await _getOrDerivePeerPttKey(sid);
+        if (key == null) return;
+        final plain = await _cipher.decrypt(
+          SecretBox(
+            base64Decode(b64),
+            nonce: base64Decode(nonceB64),
+            mac: Mac(base64Decode(macB64)),
+          ),
+          secretKey: key,
+        );
+        ulaw = Uint8List.fromList(plain);
+      } else {
+        return; // Reject unencrypted PTT chunks (v2.1.0 strict E2EE)
+      }
       final pcm = _decodeUlaw8kToPcm16k(ulaw);
       if (Platform.isAndroid) {
         unawaited(_nativeChannel.invokeMethod('playCallAudioPcm', pcm));
@@ -2597,11 +2775,20 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
   }
 
   Future<void> _startCallMediaPipelines() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      defaultDisappearingSeconds = prefs.getInt('mayak_disappear_sec') ?? 0;
+    } catch (_) {}
+    _disappearingSweeper?.cancel();
+    _disappearingSweeper =
+        Timer.periodic(const Duration(seconds: 5), (_) => _sweepExpiredMessages());
     await _initCallUdpSocket();
     _udpVideoAssemblies.clear();
     _lastRenderedVideoSeq = -1;
     _callAudioSeq = 0;
     _callVideoSeq = 0;
+    _lastCallAudioRxSeq = 0;
+    _callAudioSeenSeqs.clear();
     _callStartedMs = DateTime.now().millisecondsSinceEpoch;
     _lastCallUdpRxMs = 0;
     activeCallTransport =
@@ -4040,7 +4227,10 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
           if (pkt.expiresAt > now &&
               !deletedContactIds.contains(pkt.dstNodeId)) {
             myPersistentOutbox[pkt.msgId] = pkt;
-            transitBuffer[pkt.msgId] = pkt;
+            if (transitBuffer.length >= maxTransitBufferSize) {
+        transitBuffer.remove(transitBuffer.keys.first);
+      }
+      transitBuffer[pkt.msgId] = pkt;
           }
         }
       } catch (_) {}
@@ -5309,7 +5499,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
 
   String _sanitizeFileName(String raw) {
     final cleaned = raw
-        .replaceAll(RegExp(r'[/\\:*?"<>|]'), '_')
+        .replaceAll(RegExp(r'[\x00/\\:*?"<>|]'), '_')
         .replaceAll('..', '_')
         .trim();
     if (cleaned.isEmpty || cleaned == '.' || cleaned == '_') {
@@ -6153,7 +6343,10 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       await _saveContactsAndChats();
       if (pkt.ttl > 1) {
         pkt.ttl -= 1;
-        transitBuffer[pkt.msgId] = pkt;
+        if (transitBuffer.length >= maxTransitBufferSize) {
+        transitBuffer.remove(transitBuffer.keys.first);
+      }
+      transitBuffer[pkt.msgId] = pkt;
         _floodAllTransports(
           pkt,
           excludeTcpSocket: excludeTcpSocket,
@@ -6194,7 +6387,10 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       }
       if (pkt.ttl > 1) {
         pkt.ttl -= 1;
-        transitBuffer[pkt.msgId] = pkt;
+        if (transitBuffer.length >= maxTransitBufferSize) {
+        transitBuffer.remove(transitBuffer.keys.first);
+      }
+      transitBuffer[pkt.msgId] = pkt;
         _floodAllTransports(
           pkt,
           excludeTcpSocket: excludeTcpSocket,
@@ -6230,7 +6426,10 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
 
       if (pkt.ttl > 1) {
         pkt.ttl -= 1;
-        transitBuffer[pkt.msgId] = pkt;
+        if (transitBuffer.length >= maxTransitBufferSize) {
+        transitBuffer.remove(transitBuffer.keys.first);
+      }
+      transitBuffer[pkt.msgId] = pkt;
         _floodAllTransports(
           pkt,
           excludeTcpSocket: excludeTcpSocket,
@@ -6856,6 +7055,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
 
     if (pkt.ttl > 1 && transitBuffer.length < maxBufferPackets) {
       pkt.ttl -= 1;
+      if (transitBuffer.length >= maxTransitBufferSize) {
+        transitBuffer.remove(transitBuffer.keys.first);
+      }
       transitBuffer[pkt.msgId] = pkt;
       _floodAllTransports(
         pkt,

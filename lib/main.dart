@@ -16,24 +16,24 @@ void main() {
 }
 
 class MayakTheme {
-  // Telegram Night Dark Blue Palette (clean, high contrast, zero eye strain)
-  static const Color bgDeep = Color(0xFF0E1621);
-  static const Color bgSurface = Color(0xFF17212B);
-  static const Color bgElevated = Color(0xFF242F3D);
-  static const Color accentCyan = Color(0xFF5EB5F7);
-  static const Color accentIndigo = Color(0xFF3E78B2);
-  static const Color accentEmerald = Color(0xFF4DCD5E);
-  static const Color accentAmber = Color(0xFFF5A623);
-  static const Color accentRed = Color(0xFFE53935);
+  // Gemini Monochrome Minimalism (pure OLED black, crisp white hairlines)
+  static const Color bgDeep = Color(0xFF000000);
+  static const Color bgSurface = Color(0xFF0C0C0C);
+  static const Color bgElevated = Color(0xFF171717);
+  static const Color accentCyan = Color(0xFFFFFFFF);
+  static const Color accentIndigo = Color(0xFFA3A3A3);
+  static const Color accentEmerald = Color(0xFF4ADE80);
+  static const Color accentAmber = Color(0xFFFBBF24);
+  static const Color accentRed = Color(0xFFEF4444);
 
   static const LinearGradient primaryGradient = LinearGradient(
-    colors: [Color(0xFF3E78B2), Color(0xFF5EB5F7)],
+    colors: [Color(0xFF262626), Color(0xFF121212)],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );
 
   static const LinearGradient myBubbleGradient = LinearGradient(
-    colors: [Color(0xFF2B5278), Color(0xFF23476B)],
+    colors: [Color(0xFF232323), Color(0xFF181818)],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );
@@ -49,7 +49,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.0',
+      title: 'Маяк P2P v2.1',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -66,7 +66,7 @@ class MayakMeshApp extends StatelessWidget {
           centerTitle: false,
         ),
         cardColor: MayakTheme.bgSurface,
-        dividerColor: const Color(0xFF1F2C38),
+        dividerColor: const Color(0x26FFFFFF),
         pageTransitionsTheme: const PageTransitionsTheme(
           builders: {
             TargetPlatform.android: CupertinoPageTransitionsBuilder(),
@@ -100,6 +100,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
   late final MeshEngine engine;
   final TextEditingController _searchCtrl = TextEditingController();
   String _searchQuery = '';
+  String _drawerSection = 'all'; // 'all' | 'direct' | 'groups'
 
   @override
   void initState() {
@@ -1199,6 +1200,260 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
     );
   }
 
+  void _openDedicatedSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MayakSettingsScreen(
+          engine: engine,
+          onEditNickname: _showEditNicknameDialog,
+          onShowQrAdd: _showAddContactSheet,
+          onOpenDiagnostics: _showNetworkDiagnosticsSheet,
+          onOpenAdminUnlock: _showAdminSecretKeyDialog,
+          onOpenAdminDashboard: _openFullAdminDashboard,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGeminiDrawer() {
+    return Drawer(
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.horizontal(right: Radius.circular(20)),
+        side: BorderSide(color: Color(0x26FFFFFF), width: 1),
+      ),
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 18, 16, 14),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showEditNicknameDialog();
+                },
+                child: Row(
+                  children: [
+                    Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white38, width: 1),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(11),
+                        child: Image.asset('assets/mayak_icon.png',
+                            fit: BoxFit.cover),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            engine.nickname.isEmpty ? 'Маяк' : engine.nickname,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'ID: ${engine.nodeId} • В сети: ${engine.connectedPeersCount}',
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.white54),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const Divider(height: 1, color: Color(0x22FFFFFF)),
+            const SizedBox(height: 8),
+            _drawerTile(
+              icon: Icons.chat_bubble_outline_rounded,
+              label: 'Все чаты',
+              selected: _drawerSection == 'all',
+              onTap: () {
+                setState(() => _drawerSection = 'all');
+                Navigator.pop(context);
+              },
+            ),
+            _drawerTile(
+              icon: Icons.person_outline_rounded,
+              label: 'Личные чаты',
+              selected: _drawerSection == 'direct',
+              onTap: () {
+                setState(() => _drawerSection = 'direct');
+                Navigator.pop(context);
+              },
+            ),
+            _drawerTile(
+              icon: Icons.groups_outlined,
+              label: 'Общие чаты',
+              selected: _drawerSection == 'groups',
+              onTap: () {
+                setState(() => _drawerSection = 'groups');
+                Navigator.pop(context);
+              },
+            ),
+            _drawerTile(
+              icon: Icons.bookmark_border_rounded,
+              label: 'Избранное',
+              selected: false,
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => SavedMessagesScreen(engine: engine),
+                  ),
+                );
+              },
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Divider(height: 1, color: Color(0x22FFFFFF)),
+            ),
+            _drawerTile(
+              icon: Icons.add_circle_outline_rounded,
+              label: 'Добавить чат / узел',
+              selected: false,
+              onTap: () {
+                Navigator.pop(context);
+                _showAddOrCreateMenu();
+              },
+            ),
+            _drawerTile(
+              icon: Icons.radio_rounded,
+              label: engine.isWalkieTalkieMode
+                  ? 'Рация (PTT): Вкл'
+                  : 'Режим Рации (PTT)',
+              selected: engine.isWalkieTalkieMode,
+              onTap: () {
+                engine.toggleWalkieTalkieMode();
+                Navigator.pop(context);
+              },
+            ),
+            const Spacer(),
+            const Divider(height: 1, color: Color(0x22FFFFFF)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 12),
+              child: _drawerTile(
+                icon: Icons.settings_outlined,
+                label: 'Настройки',
+                selected: false,
+                onTap: () {
+                  Navigator.pop(context);
+                  _openDedicatedSettings();
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _drawerTile({
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: Material(
+        color: selected ? const Color(0x1FFFFFFF) : Colors.transparent,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: selected
+                  ? Border.all(color: Colors.white30, width: 1)
+                  : null,
+            ),
+            child: Row(
+              children: [
+                Icon(icon,
+                    size: 20,
+                    color: selected ? Colors.white : Colors.white70),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight:
+                          selected ? FontWeight.w600 : FontWeight.normal,
+                      color: selected ? Colors.white : Colors.white70,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAddOrCreateMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        side: BorderSide(color: Color(0x26FFFFFF)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Добавить чат или узел',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 10),
+              ListTile(
+                leading: const Icon(Icons.qr_code_2_rounded, color: Colors.white),
+                title: const Text('Подключить по QR-коду или IP'),
+                subtitle: const Text('Прямое P2P-соединение в локальной сети',
+                    style: TextStyle(fontSize: 12, color: Colors.white54)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showAddContactSheet();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.group_add_outlined, color: Colors.white),
+                title: const Text('Создать групповой чат'),
+                subtitle: const Text('Multi-Hop E2EE комната для 3+ участников',
+                    style: TextStyle(fontSize: 12, color: Colors.white54)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showCreateGroupDialog();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final allContacts = engine.knownContacts.values.toList()
@@ -1221,15 +1476,11 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
         engine.getLastMessageFor(MeshEngine.broadcastChannelId);
 
     return Scaffold(
+      drawer: _buildGeminiDrawer(),
       appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF111827), Color(0xFF1E1B4B)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
+        toolbarHeight: 64,
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
         ),
         title: GestureDetector(
           onTap: _showEditNicknameDialog,
@@ -1237,20 +1488,17 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
           child: Row(
             children: [
               Container(
-                width: 38,
-                height: 38,
+                width: 36,
+                height: 36,
                 decoration: BoxDecoration(
-                  gradient: MayakTheme.primaryGradient,
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: MayakTheme.accentCyan.withOpacity(0.35),
-                      blurRadius: 10,
-                    ),
-                  ],
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white30, width: 1),
                 ),
-                child: const Icon(Icons.radar_rounded,
-                    color: Colors.white, size: 22),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(9),
+                  child: Image.asset('assets/mayak_icon.png', fit: BoxFit.cover),
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -1319,30 +1567,9 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
             ),
           ),
           IconButton(
-            tooltip: 'Сканировать Wi-Fi сеть',
-            onPressed: engine.isScanningSubnet
-                ? null
-                : () => engine.scanLocalSubnet(),
-            icon: engine.isScanningSubnet
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: MayakTheme.accentCyan,
-                    ),
-                  )
-                : const Icon(Icons.wifi_find, color: MayakTheme.accentCyan),
-          ),
-          IconButton(
-            tooltip: 'Мой QR-код и добавление по IP',
-            onPressed: _showAddContactSheet,
-            icon: const Icon(Icons.qr_code_2_rounded),
-          ),
-          IconButton(
-            tooltip: 'Настройки, память и диагностика',
-            onPressed: _showNetworkDiagnosticsSheet,
-            icon: const Icon(Icons.tune_rounded),
+            tooltip: 'Настройки',
+            onPressed: _openDedicatedSettings,
+            icon: const Icon(Icons.settings_outlined, color: Colors.white70),
           ),
         ],
       ),
@@ -1531,6 +1758,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               children: [
                 // Карточка Общего эфира
+                if (_drawerSection != 'direct')
                 Container(
                   margin: const EdgeInsets.only(bottom: 8),
                   decoration: BoxDecoration(
@@ -1611,6 +1839,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                             color: Colors.white38),
                   ),
                 ),
+                if (_drawerSection != 'direct')
                 ...engine.groupChats.values.map((grp) {
                   final gMsgs = engine.getGroupMessages(grp.groupId);
                   final lastG = gMsgs.isNotEmpty ? gMsgs.last : null;
@@ -1725,6 +1954,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                       ],
                     ),
                   ),
+                if (_drawerSection != 'groups')
                 ...contacts.map((c) {
                   final lastMsg = engine.getLastMessageFor(c.nodeId);
                   final isBanned = engine.isNodeBanned(c.nodeId);
@@ -6396,6 +6626,801 @@ class _MayakGlobalFloatingOverlayState
             ),
           ),
       ],
+    );
+  }
+}
+
+
+// =============================================================================
+// v2.1.0: СИСТЕМАТИЗИРОВАННЫЕ НАСТРОЙКИ, ПОДКЛЮЧЕНИЯ С ТУТОРИАЛАМИ И «О ПРИЛОЖЕНИИ»
+// =============================================================================
+
+class MayakSettingsScreen extends StatefulWidget {
+  final MeshEngine engine;
+  final VoidCallback onEditNickname;
+  final VoidCallback onShowQrAdd;
+  final VoidCallback onOpenDiagnostics;
+  final VoidCallback onOpenAdminUnlock;
+  final VoidCallback onOpenAdminDashboard;
+
+  const MayakSettingsScreen({
+    super.key,
+    required this.engine,
+    required this.onEditNickname,
+    required this.onShowQrAdd,
+    required this.onOpenDiagnostics,
+    required this.onOpenAdminUnlock,
+    required this.onOpenAdminDashboard,
+  });
+
+  @override
+  State<MayakSettingsScreen> createState() => _MayakSettingsScreenState();
+}
+
+class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
+  MeshEngine get engine => widget.engine;
+
+  void _onUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onUpdate);
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onUpdate);
+    super.dispose();
+  }
+
+  Widget _sectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 6),
+      child: Text(
+        title.toUpperCase(),
+        style: const TextStyle(
+          fontSize: 11,
+          letterSpacing: 1.1,
+          fontWeight: FontWeight.w600,
+          color: Colors.white54,
+        ),
+      ),
+    );
+  }
+
+  Widget _settingsCard(List<Widget> children) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      decoration: BoxDecoration(
+        color: MayakTheme.bgSurface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0x22FFFFFF), width: 1),
+      ),
+      child: Column(children: children),
+    );
+  }
+
+  String _disappearingLabel(int sec) {
+    if (sec <= 0) return 'Выключено';
+    if (sec == 30) return '30 секунд';
+    if (sec == 300) return '5 минут';
+    if (sec == 3600) return '1 час';
+    return '$sec сек';
+  }
+
+  void _pickDisappearingTimer() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        side: BorderSide(color: Color(0x26FFFFFF)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('Автоудаление сообщений',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+            for (final opt in [0, 30, 300, 3600])
+              ListTile(
+                title: Text(_disappearingLabel(opt)),
+                trailing: engine.defaultDisappearingSeconds == opt
+                    ? const Icon(Icons.check_rounded, color: Colors.white)
+                    : null,
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await engine.setDefaultDisappearingSeconds(opt);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Настройки',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.only(bottom: 32),
+        children: [
+          _sectionHeader('Профиль и ключи'),
+          _settingsCard([
+            ListTile(
+              leading: const Icon(Icons.badge_outlined, color: Colors.white),
+              title: Text(engine.nickname.isEmpty ? 'Узел Маяк' : engine.nickname),
+              subtitle: Text('ID узла: ${engine.nodeId} • Нажми, чтобы изменить',
+                  style: const TextStyle(fontSize: 12, color: Colors.white54)),
+              trailing: const Icon(Icons.chevron_right_rounded,
+                  color: Colors.white38),
+              onTap: widget.onEditNickname,
+            ),
+            const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            ListTile(
+              leading: const Icon(Icons.timer_outlined, color: Colors.white),
+              title: const Text('Исчезающие сообщения'),
+              subtitle: Text(
+                  _disappearingLabel(engine.defaultDisappearingSeconds),
+                  style: const TextStyle(fontSize: 12, color: Colors.white54)),
+              trailing: const Icon(Icons.chevron_right_rounded,
+                  color: Colors.white38),
+              onTap: _pickDisappearingTimer,
+            ),
+            const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            ListTile(
+              leading: const Icon(Icons.backup_outlined, color: Colors.white),
+              title: const Text('Резервная копия (.mayakbak)'),
+              subtitle: const Text('Экспорт ключей и истории чатов',
+                  style: TextStyle(fontSize: 12, color: Colors.white54)),
+              trailing: const Icon(Icons.chevron_right_rounded,
+                  color: Colors.white38),
+              onTap: () async {
+                final path = await engine.exportBackupJsonToDownloads();
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Бэкап сохранён: $path')),
+                );
+              },
+            ),
+          ]),
+          _sectionHeader('Сеть и подключения'),
+          _settingsCard([
+            ListTile(
+              leading: const Icon(Icons.hub_outlined, color: Colors.white),
+              title: const Text('Подключения и туториалы'),
+              subtitle: Text(
+                'Wi-Fi • Bluetooth (${engine.bleMeshActive ? 'Вкл' : 'Выкл'}) • QR/IP • Буфер (${engine.totalBufferedCount})',
+                style: const TextStyle(fontSize: 12, color: Colors.white54),
+              ),
+              trailing: const Icon(Icons.chevron_right_rounded,
+                  color: Colors.white38),
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => ConnectionsSettingsScreen(
+                      engine: engine,
+                      onShowQrAdd: widget.onShowQrAdd,
+                    ),
+                  ),
+                );
+              },
+            ),
+            const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            ListTile(
+              leading: const Icon(Icons.terminal_outlined, color: Colors.white),
+              title: const Text('Диагностика и журнал событий'),
+              subtitle: const Text('Логи BLE/Wi-Fi, пинг узлов, очистка кэша',
+                  style: TextStyle(fontSize: 12, color: Colors.white54)),
+              trailing: const Icon(Icons.chevron_right_rounded,
+                  color: Colors.white38),
+              onTap: widget.onOpenDiagnostics,
+            ),
+          ]),
+          _sectionHeader('Система'),
+          _settingsCard([
+            if (engine.isAdminUnlocked) ...[
+              ListTile(
+                leading: const Icon(Icons.admin_panel_settings_outlined,
+                    color: MayakTheme.accentAmber),
+                title: const Text('Панель управления сетью'),
+                trailing: const Icon(Icons.chevron_right_rounded,
+                    color: Colors.white38),
+                onTap: widget.onOpenAdminDashboard,
+              ),
+              const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            ],
+            ListTile(
+              leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
+              title: const Text('О приложении'),
+              subtitle: const Text('Маяк v2.1.0 • Шифрование и справка',
+                  style: TextStyle(fontSize: 12, color: Colors.white54)),
+              trailing: const Icon(Icons.chevron_right_rounded,
+                  color: Colors.white38),
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => AboutMayakScreen(
+                      engine: engine,
+                      onOpenAdminUnlock: widget.onOpenAdminUnlock,
+                      onOpenAdminDashboard: widget.onOpenAdminDashboard,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+class ConnectionsSettingsScreen extends StatefulWidget {
+  final MeshEngine engine;
+  final VoidCallback onShowQrAdd;
+
+  const ConnectionsSettingsScreen({
+    super.key,
+    required this.engine,
+    required this.onShowQrAdd,
+  });
+
+  @override
+  State<ConnectionsSettingsScreen> createState() =>
+      _ConnectionsSettingsScreenState();
+}
+
+class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
+  MeshEngine get engine => widget.engine;
+
+  void _onUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onUpdate);
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onUpdate);
+    super.dispose();
+  }
+
+  Widget _connectionCard({
+    required IconData icon,
+    required String title,
+    required String statusText,
+    required Color statusColor,
+    required String tutorial,
+    required Widget actionButton,
+  }) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+      decoration: BoxDecoration(
+        color: MayakTheme.bgSurface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0x26FFFFFF), width: 1),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+          leading: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: MayakTheme.bgElevated,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0x26FFFFFF)),
+            ),
+            child: Icon(icon, color: Colors.white, size: 22),
+          ),
+          title: Text(title,
+              style:
+                  const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+          subtitle: Text(statusText,
+              style: TextStyle(fontSize: 12, color: statusColor)),
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: MayakTheme.bgDeep,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0x1FFFFFFF)),
+              ),
+              child: Text(
+                tutorial,
+                style: const TextStyle(
+                    fontSize: 12.5, height: 1.45, color: Colors.white70),
+              ),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(width: double.infinity, child: actionButton),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Подключения',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.only(top: 6, bottom: 32),
+        children: [
+          _connectionCard(
+            icon: Icons.wifi_rounded,
+            title: 'Wi-Fi / Локальная сеть (LAN)',
+            statusText: engine.cachedIps.isNotEmpty
+                ? 'IP: ${engine.cachedIps.first}:${engine.listenPort} • В сети: ${engine.connectedPeersCount}'
+                : 'Подключись к Wi-Fi или раздай точку доступа',
+            statusColor: engine.connectedPeersCount > 0
+                ? MayakTheme.accentEmerald
+                : Colors.white54,
+            tutorial:
+                'Как подключиться по Wi-Fi (максимальная скорость и 15–18 FPS в ВЧ):\n'
+                '1. Подключите оба устройства к одному Wi-Fi роутеру — или раздайте точку доступа с одного телефона (интернет не нужен!).\n'
+                '2. На ПК с Windows один раз нажмите «Открыть порты Windows», чтобы Брандмауэр пропустил 42069/42070/42072.\n'
+                '3. Нажмите «Сканировать Wi-Fi» ниже — узлы найдутся за 2–5 секунд.',
+            actionButton: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: engine.isScanningSubnet
+                      ? null
+                      : () => engine.scanLocalSubnet(),
+                  icon: const Icon(Icons.wifi_find_rounded, size: 18),
+                  label: Text(engine.isScanningSubnet
+                      ? 'Сканирование...'
+                      : 'Сканировать Wi-Fi'),
+                ),
+                if (Platform.isWindows)
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final r = await engine.configureWindowsPublicFirewall();
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Брандмауэр Windows: $r')),
+                      );
+                    },
+                    icon: const Icon(Icons.security_rounded, size: 18),
+                    label: const Text('Открыть порты Windows'),
+                  ),
+              ],
+            ),
+          ),
+          if (Platform.isAndroid)
+            _connectionCard(
+              icon: Icons.bluetooth_searching_rounded,
+              title: 'Bluetooth / Устройства рядом (BLE + RFCOMM)',
+              statusText: engine.bleMeshActive
+                  ? 'Активен (Google Nearby + нативный BT RFCOMM)'
+                  : 'Выключен — нажми, чтобы включить',
+              statusColor: engine.bleMeshActive
+                  ? MayakTheme.accentEmerald
+                  : Colors.white54,
+              tutorial:
+                  'Как соединить телефоны без Wi-Fi (работает на Tecno, Xiaomi, Samsung, Huawei):\n'
+                  '1. Включите Bluetooth на обоих телефонах.\n'
+                  '2. Для автопоиска Google Nearby также включите Геолокацию (GPS) в шторке.\n'
+                  '3. Если на каком-то телефоне Nearby не находит соседа — просто один раз сопрягите телефоны в обычных настройках Bluetooth: встроенный движок BT RFCOMM соединит их сам без GPS и без Google Play.',
+              actionButton: OutlinedButton.icon(
+                onPressed: () => engine.toggleAndroidBleMesh(),
+                icon: Icon(
+                  engine.bleMeshActive
+                      ? Icons.bluetooth_disabled_rounded
+                      : Icons.bluetooth_rounded,
+                  size: 18,
+                ),
+                label: Text(engine.bleMeshActive
+                    ? 'Выключить Bluetooth Mesh'
+                    : 'Включить Bluetooth Mesh'),
+              ),
+            ),
+          _connectionCard(
+            icon: Icons.qr_code_2_rounded,
+            title: 'QR-код и прямой IP',
+            statusText: 'Мгновенная привязка узла и обмен ключами',
+            statusColor: Colors.white54,
+            tutorial:
+                'Когда автопоиск заблокирован в гостевом Wi-Fi:\n'
+                '1. На одном устройстве откройте «QR-код и IP» и покажите QR.\n'
+                '2. На втором отсканируйте QR-код (или введите IP:порт вручную).\n'
+                '3. Узлы мгновенно обменяются ключами X25519/Ed25519 и подключатся напрямую.',
+            actionButton: OutlinedButton.icon(
+              onPressed: widget.onShowQrAdd,
+              icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
+              label: const Text('Открыть QR-код / Ввести IP'),
+            ),
+          ),
+          _connectionCard(
+            icon: Icons.inventory_2_outlined,
+            title: 'Mesh-буфер (Офлайн-доставка)',
+            statusText: 'В буфере сейчас: ${engine.totalBufferedCount} пакет(ов)',
+            statusColor: engine.totalBufferedCount > 0
+                ? MayakTheme.accentAmber
+                : MayakTheme.accentEmerald,
+            tutorial:
+                'Как работает Store-and-Forward буфер:\n'
+                '• Если собеседник не в сети, зашифрованный пакет хранится в буфере и автоматически досылается при встрече (или через промежуточный узел в цепочке A ↔ B ↔ C).\n'
+                '• Если накопились старые неактуальные пакеты — очистите буфер кнопкой ниже.',
+            actionButton: OutlinedButton.icon(
+              onPressed: engine.totalBufferedCount == 0
+                  ? null
+                  : () async {
+                      final n = await engine.clearOutboxAndTransitBuffer();
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Буфер очищен ($n шт.)')),
+                      );
+                    },
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+              label: const Text('Очистить буфер отправки'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AboutMayakScreen extends StatefulWidget {
+  final MeshEngine engine;
+  final VoidCallback onOpenAdminUnlock;
+  final VoidCallback onOpenAdminDashboard;
+
+  const AboutMayakScreen({
+    super.key,
+    required this.engine,
+    required this.onOpenAdminUnlock,
+    required this.onOpenAdminDashboard,
+  });
+
+  @override
+  State<AboutMayakScreen> createState() => _AboutMayakScreenState();
+}
+
+class _AboutMayakScreenState extends State<AboutMayakScreen> {
+  int _logoTaps = 0;
+  int _verTaps = 0;
+  int _seqStartMs = 0;
+
+  void _resetIfExpired() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_seqStartMs == 0 || now - _seqStartMs > 5000) {
+      _logoTaps = 0;
+      _verTaps = 0;
+      _seqStartMs = now;
+    }
+  }
+
+  void _onLogoTap() {
+    _resetIfExpired();
+    if (_verTaps > 0) {
+      _logoTaps = 1;
+      _verTaps = 0;
+      _seqStartMs = DateTime.now().millisecondsSinceEpoch;
+    } else {
+      _logoTaps++;
+    }
+  }
+
+  Future<void> _onVersionTap() async {
+    _resetIfExpired();
+    if (_logoTaps >= 3) {
+      _verTaps++;
+      if (_verTaps >= 2) {
+        _logoTaps = 0;
+        _verTaps = 0;
+        final fastOk = await widget.engine.tryFastAdminUnlockFromCache();
+        if (!mounted) return;
+        if (fastOk) {
+          widget.onOpenAdminDashboard();
+        } else {
+          widget.onOpenAdminUnlock();
+        }
+      }
+    } else {
+      _logoTaps = 0;
+      _verTaps = 0;
+    }
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 130,
+            child: Text(label,
+                style: const TextStyle(fontSize: 12.5, color: Colors.white54)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: const TextStyle(
+                    fontSize: 12.5,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('О приложении',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(18),
+        children: [
+          Center(
+            child: GestureDetector(
+              onTap: _onLogoTap,
+              child: Container(
+                width: 88,
+                height: 88,
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: Colors.white38, width: 1.2),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: Image.asset('assets/mayak_icon.png', fit: BoxFit.cover),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          const Center(
+            child: Text(
+              'МАЯК',
+              style: TextStyle(
+                fontSize: 22,
+                letterSpacing: 3.5,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Center(
+            child: GestureDetector(
+              onTap: _onVersionTap,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                child: Text(
+                  'Версия 2.1.0 • Автономный P2P & Mesh мессенджер',
+                  style: TextStyle(fontSize: 12, color: Colors.white54),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: MayakTheme.bgSurface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0x24FFFFFF)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Криптография и защита (E2EE)',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 10),
+                _infoRow('Обмен ключами', 'Double X25519 (эпимерный + статический) + HKDF-SHA256'),
+                _infoRow('Шифрование', 'ChaCha20-Poly1305 AEAD (256-бит ключ, 96-бит nonce)'),
+                _infoRow('Подпись', 'Ed25519 (проверка подлинности каждого пакета)'),
+                _infoRow('Приватность', 'Sealed Sender + защита от replay-атак (окно seq)'),
+                _infoRow('Звонки и Рация', 'Сквозное шифрование UDP 42072 и BLE/TCP call_bin/ptt_bin'),
+                _infoRow('Серверы', '0 серверов • Без номера телефона и регистрации'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: MayakTheme.bgSurface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0x24FFFFFF)),
+            ),
+            child: const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Возможности узла',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                SizedBox(height: 8),
+                Text(
+                  '• Прямые чаты, Multi-Hop групповые комнаты (до 5 ретрансляций) и «Избранное».\n'
+                  '• Голосовые и видеозвонки (ВЧ с PiP-окошком своей камеры, сворачиванием в чат и звонком поверх экрана).\n'
+                  '• Глобальная Рация (PTT) со звуками эфира и Roger Beep.\n'
+                  '• Передача файлов до 1 ГБ без сжатия по модели Telegram (заблюренное превью + скачивание по нажатию).',
+                  style: TextStyle(
+                      fontSize: 12.5, height: 1.5, color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SavedMessagesScreen extends StatefulWidget {
+  final MeshEngine engine;
+  const SavedMessagesScreen({super.key, required this.engine});
+
+  @override
+  State<SavedMessagesScreen> createState() => _SavedMessagesScreenState();
+}
+
+class _SavedMessagesScreenState extends State<SavedMessagesScreen> {
+  final _ctrl = TextEditingController();
+  MeshEngine get engine => widget.engine;
+
+  void _onUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onUpdate);
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onUpdate);
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final notes = engine.getSavedMessages();
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Избранное',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: notes.isEmpty
+                ? const Center(
+                    child: Text('Личные локальные заметки (хранятся только на устройстве)',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white54)),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(14),
+                    itemCount: notes.length,
+                    itemBuilder: (_, i) {
+                      final n = notes[i];
+                      return Align(
+                        alignment: Alignment.centerRight,
+                        child: GestureDetector(
+                          onLongPress: () => engine.deleteSavedNote(n.msgId),
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            constraints: const BoxConstraints(maxWidth: 320),
+                            decoration: BoxDecoration(
+                              color: MayakTheme.bgElevated,
+                              borderRadius: BorderRadius.circular(14),
+                              border:
+                                  Border.all(color: const Color(0x2AFFFFFF)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text(n.text,
+                                    style:
+                                        const TextStyle(color: Colors.white)),
+                                const SizedBox(height: 3),
+                                Text(n.timeFormatted,
+                                    style: const TextStyle(
+                                        fontSize: 10, color: Colors.white54)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            decoration: const BoxDecoration(
+              color: MayakTheme.bgSurface,
+              border: Border(top: BorderSide(color: Color(0x22FFFFFF))),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _ctrl,
+                    decoration: InputDecoration(
+                      hintText: 'Заметка в Избранное...',
+                      filled: true,
+                      fillColor: MayakTheme.bgDeep,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(20),
+                        borderSide:
+                            const BorderSide(color: Color(0x26FFFFFF)),
+                      ),
+                    ),
+                    onSubmitted: (_) async {
+                      final t = _ctrl.text;
+                      _ctrl.clear();
+                      await engine.addSavedNote(t);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: Colors.black,
+                  ),
+                  icon: const Icon(Icons.send_rounded),
+                  onPressed: () async {
+                    final t = _ctrl.text;
+                    _ctrl.clear();
+                    await engine.addSavedNote(t);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
