@@ -47,7 +47,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v1.8',
+      title: 'Маяк P2P v1.9',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -4771,11 +4771,19 @@ class GroupConversationScreen extends StatefulWidget {
 class _GroupConversationScreenState extends State<GroupConversationScreen> {
   final _ctrl = TextEditingController();
   final _scroll = ScrollController();
+  ChatMessage? _replyingTo;
+  ChatMessage? _editingMsg;
 
   MeshEngine get engine => widget.engine;
+  GroupChat? get _group => engine.groupChats[widget.group.groupId];
 
   void _onUpdate() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    if (_group == null) {
+      if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+      return;
+    }
+    setState(() {});
   }
 
   @override
@@ -4793,22 +4801,384 @@ class _GroupConversationScreenState extends State<GroupConversationScreen> {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final msgs = engine.getGroupMessages(widget.group.groupId);
-    return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  String _fmtTime(int ts) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(ts);
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _sendOrSave() async {
+    final txt = _ctrl.text.trim();
+    if (txt.isEmpty) return;
+    _ctrl.clear();
+    if (_editingMsg != null) {
+      final mid = _editingMsg!.msgId;
+      setState(() => _editingMsg = null);
+      await engine.editGroupMessage(widget.group.groupId, mid, txt);
+    } else {
+      final rId = _replyingTo?.msgId;
+      final rTxt = _replyingTo != null
+          ? '${_replyingTo!.senderName}: ${_replyingTo!.text}'
+          : null;
+      setState(() => _replyingTo = null);
+      await engine.sendGroupMessage(
+        widget.group.groupId,
+        txt,
+        replyToId: rId,
+        replyToPreview: rTxt,
+      );
+    }
+  }
+
+  void _showForwardDialog(ChatMessage m) {
+    final contacts = engine.knownContacts.values.toList();
+    final groups = engine.groupChats.values
+        .where((g) => g.groupId != widget.group.groupId)
+        .toList();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.all(14),
           children: [
-            Text(widget.group.title,
-                style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            Text('Участников: ${widget.group.memberIds.length} • E2EE Mesh',
-                style:
-                    const TextStyle(fontSize: 11, color: MayakTheme.accentCyan)),
+            const Text('Переслать сообщение',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            for (final c in contacts)
+              ListTile(
+                leading: const Icon(Icons.person_rounded,
+                    color: MayakTheme.accentCyan),
+                title: Text(c.displayTitle),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await engine.sendMessage(
+                    c.nodeId,
+                    m.text,
+                    forwardedFrom: m.senderName,
+                  );
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                          content: Text('Переслано пользователю ${c.displayTitle}')),
+                    );
+                  }
+                },
+              ),
+            for (final g in groups)
+              ListTile(
+                leading: const Icon(Icons.groups_rounded,
+                    color: MayakTheme.accentEmerald),
+                title: Text('Группа: ${g.title}'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await engine.sendGroupMessage(
+                    g.groupId,
+                    m.text,
+                    forwardedFrom: m.senderName,
+                  );
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Переслано в «${g.title}»')),
+                    );
+                  }
+                },
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showMessageMenu(ChatMessage m) {
+    final grp = _group ?? widget.group;
+    final canDeleteForAll = m.isMe || grp.creatorId == engine.nodeId;
+    const quickEmojis = ['👍', '❤️', '🔥', '😂', '😮', '👌'];
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final em in quickEmojis)
+                    InkWell(
+                      borderRadius: BorderRadius.circular(20),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        engine.toggleGroupReaction(
+                            widget.group.groupId, m.msgId, em);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(6),
+                        child: Text(em, style: const TextStyle(fontSize: 24)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.reply_rounded,
+                  color: MayakTheme.accentCyan),
+              title: const Text('Ответить'),
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _editingMsg = null;
+                  _replyingTo = m;
+                });
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_rounded, color: Colors.white70),
+              title: const Text('Копировать текст'),
+              onTap: () {
+                Navigator.pop(ctx);
+                Clipboard.setData(ClipboardData(text: m.text));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Скопировано')),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.forward_rounded,
+                  color: MayakTheme.accentEmerald),
+              title: const Text('Переслать'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showForwardDialog(m);
+              },
+            ),
+            if (m.isMe)
+              ListTile(
+                leading: const Icon(Icons.edit_rounded,
+                    color: MayakTheme.accentAmber),
+                title: const Text('Редактировать'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    _replyingTo = null;
+                    _editingMsg = m;
+                    _ctrl.text = m.text;
+                  });
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline_rounded,
+                  color: MayakTheme.accentRed),
+              title: Text(canDeleteForAll
+                  ? 'Удалить для всех'
+                  : 'Удалить у себя'),
+              onTap: () {
+                Navigator.pop(ctx);
+                engine.deleteGroupMessage(
+                  widget.group.groupId,
+                  m.msgId,
+                  forEveryone: canDeleteForAll,
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showGroupInfoSheet() {
+    final grp = _group ?? widget.group;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: MayakTheme.bgSurface,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.groups_rounded,
+                      color: MayakTheme.accentCyan, size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(grp.title,
+                        style: const TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.edit_rounded,
+                        color: MayakTheme.accentAmber),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _showRenameDialog(grp);
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text('Участники (${grp.memberIds.length}) — Multi-Hop Mesh:',
+                  style: const TextStyle(
+                      fontSize: 12, color: MayakTheme.accentCyan)),
+              const SizedBox(height: 6),
+              for (final pid in grp.memberIds)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    Icons.circle,
+                    size: 10,
+                    color: (pid == engine.nodeId || engine.isNodeOnline(pid))
+                        ? MayakTheme.accentEmerald
+                        : Colors.white38,
+                  ),
+                  title: Text(pid == engine.nodeId
+                      ? '${engine.nickname} (Вы)'
+                      : (engine.knownContacts[pid]?.displayTitle ?? 'Узел $pid')),
+                  trailing: pid == grp.creatorId
+                      ? const Text('Создатель',
+                          style: TextStyle(
+                              fontSize: 11, color: MayakTheme.accentAmber))
+                      : null,
+                ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _showAddMemberDialog(grp);
+                    },
+                    icon: const Icon(Icons.person_add_rounded, size: 18),
+                    label: const Text('Добавить'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      Navigator.pop(ctx);
+                      await engine.clearGroupHistory(grp.groupId);
+                    },
+                    icon: const Icon(Icons.cleaning_services_rounded, size: 18),
+                    label: const Text('Очистить чат'),
+                  ),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                        foregroundColor: MayakTheme.accentRed),
+                    onPressed: () async {
+                      Navigator.pop(ctx);
+                      await engine.leaveOrDeleteGroupChat(grp.groupId);
+                      if (mounted && Navigator.of(context).canPop()) {
+                        Navigator.of(context).pop();
+                      }
+                    },
+                    icon: const Icon(Icons.exit_to_app_rounded, size: 18),
+                    label: const Text('Покинуть'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showRenameDialog(GroupChat grp) {
+    final tCtrl = TextEditingController(text: grp.title);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        title: const Text('Переименовать группу'),
+        content: TextField(controller: tCtrl),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await engine.renameGroupChat(grp.groupId, tCtrl.text);
+            },
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAddMemberDialog(GroupChat grp) {
+    final candidates = engine.knownContacts.values
+        .where((c) => !grp.memberIds.contains(c.nodeId))
+        .toList();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: MayakTheme.bgSurface,
+        title: const Text('Добавить участника'),
+        content: candidates.isEmpty
+            ? const Text('Все известные узлы уже в группе')
+            : SizedBox(
+                width: 300,
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final c in candidates)
+                      ListTile(
+                        title: Text(c.displayTitle),
+                        subtitle: Text(c.nodeId,
+                            style: const TextStyle(fontSize: 11)),
+                        onTap: () async {
+                          Navigator.pop(ctx);
+                          await engine.addMemberToGroupChat(
+                              grp.groupId, c.nodeId);
+                        },
+                      ),
+                  ],
+                ),
+              ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Закрыть')),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final grp = _group ?? widget.group;
+    final msgs = engine.getGroupMessages(grp.groupId);
+    return Scaffold(
+      appBar: AppBar(
+        title: InkWell(
+          onTap: _showGroupInfoSheet,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(grp.title,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold)),
+              Text('Участников: ${grp.memberIds.length} • Multi-Hop E2EE Mesh',
+                  style: const TextStyle(
+                      fontSize: 11, color: MayakTheme.accentCyan)),
+            ],
+          ),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.info_outline_rounded),
+            tooltip: 'Управление группой',
+            onPressed: _showGroupInfoSheet,
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -4830,41 +5200,157 @@ class _GroupConversationScreenState extends State<GroupConversationScreen> {
                         alignment: m.isMe
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(vertical: 4),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 8),
-                          constraints: const BoxConstraints(maxWidth: 300),
-                          decoration: BoxDecoration(
-                            color: m.isMe
-                                ? const Color(0xFF1E3A8A)
-                                : MayakTheme.bgSurface,
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              if (!m.isMe)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 2),
-                                  child: Text(
-                                    m.senderName,
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                      color: MayakTheme.accentCyan,
+                        child: GestureDetector(
+                          onLongPress: () => _showMessageMenu(m),
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            constraints: const BoxConstraints(maxWidth: 310),
+                            decoration: BoxDecoration(
+                              color: m.isMe
+                                  ? const Color(0xFF1E3A8A)
+                                  : MayakTheme.bgSurface,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (!m.isMe)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 2),
+                                    child: Text(
+                                      m.senderName,
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: MayakTheme.accentCyan,
+                                      ),
                                     ),
                                   ),
+                                if (m.forwardedFrom != null &&
+                                    m.forwardedFrom!.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 3),
+                                    child: Text(
+                                      'Переслано от ${m.forwardedFrom}',
+                                      style: const TextStyle(
+                                          fontSize: 10,
+                                          fontStyle: FontStyle.italic,
+                                          color: Colors.white70),
+                                    ),
+                                  ),
+                                if (m.replyToText != null &&
+                                    m.replyToText!.isNotEmpty)
+                                  Container(
+                                    margin: const EdgeInsets.only(bottom: 4),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black26,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: const Border(
+                                        left: BorderSide(
+                                            color: MayakTheme.accentCyan,
+                                            width: 2.5),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      m.replyToText!,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontSize: 11, color: Colors.white70),
+                                    ),
+                                  ),
+                                Text(m.text,
+                                    style:
+                                        const TextStyle(color: Colors.white)),
+                                const SizedBox(height: 3),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (m.isEdited)
+                                      const Text('ред. • ',
+                                          style: TextStyle(
+                                              fontSize: 10,
+                                              color: Colors.white54)),
+                                    Text(
+                                      _fmtTime(m.timestamp),
+                                      style: const TextStyle(
+                                          fontSize: 10, color: Colors.white54),
+                                    ),
+                                  ],
                                 ),
-                              Text(m.text,
-                                  style: const TextStyle(color: Colors.white)),
-                            ],
+                                if (m.reactions.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 4),
+                                    child: Wrap(
+                                      spacing: 4,
+                                      children: [
+                                        for (final em
+                                            in m.reactions.values.toSet())
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 6, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: Colors.black38,
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                            ),
+                                            child: Text(
+                                              '$em ${m.reactions.values.where((v) => v == em).length}',
+                                              style:
+                                                  const TextStyle(fontSize: 11),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
                           ),
                         ),
                       );
                     },
                   ),
           ),
+          if (_replyingTo != null || _editingMsg != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              color: MayakTheme.bgElevated,
+              child: Row(
+                children: [
+                  Icon(
+                    _editingMsg != null
+                        ? Icons.edit_rounded
+                        : Icons.reply_rounded,
+                    size: 16,
+                    color: MayakTheme.accentCyan,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _editingMsg != null
+                          ? 'Редактирование: ${_editingMsg!.text}'
+                          : 'Ответ ${_replyingTo!.senderName}: ${_replyingTo!.text}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          const TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                    onPressed: () => setState(() {
+                      _replyingTo = null;
+                      _editingMsg = null;
+                      _ctrl.clear();
+                    }),
+                  ),
+                ],
+              ),
+            ),
           Container(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             color: MayakTheme.bgSurface,
@@ -4874,7 +5360,9 @@ class _GroupConversationScreenState extends State<GroupConversationScreen> {
                   child: TextField(
                     controller: _ctrl,
                     decoration: InputDecoration(
-                      hintText: 'Сообщение в группу...',
+                      hintText: _editingMsg != null
+                          ? 'Изменить сообщение...'
+                          : 'Сообщение в группу...',
                       filled: true,
                       fillColor: MayakTheme.bgDeep,
                       border: OutlineInputBorder(
@@ -4882,12 +5370,7 @@ class _GroupConversationScreenState extends State<GroupConversationScreen> {
                         borderSide: BorderSide.none,
                       ),
                     ),
-                    onSubmitted: (_) async {
-                      final txt = _ctrl.text;
-                      _ctrl.clear();
-                      await engine.sendGroupMessage(
-                          widget.group.groupId, txt);
-                    },
+                    onSubmitted: (_) => _sendOrSave(),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -4896,12 +5379,10 @@ class _GroupConversationScreenState extends State<GroupConversationScreen> {
                     backgroundColor: MayakTheme.accentCyan,
                     foregroundColor: Colors.black,
                   ),
-                  icon: const Icon(Icons.send_rounded),
-                  onPressed: () async {
-                    final txt = _ctrl.text;
-                    _ctrl.clear();
-                    await engine.sendGroupMessage(widget.group.groupId, txt);
-                  },
+                  icon: Icon(_editingMsg != null
+                      ? Icons.check_rounded
+                      : Icons.send_rounded),
+                  onPressed: _sendOrSave,
                 ),
               ],
             ),
@@ -4911,7 +5392,6 @@ class _GroupConversationScreenState extends State<GroupConversationScreen> {
     );
   }
 }
-
 
 class IncomingCallScreen extends StatefulWidget {
   static bool isShowing = false;
@@ -5281,7 +5761,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                             const SizedBox(width: 6),
                             Text(
                               engine.isCallAccepted
-                                  ? '$peerName • $mm:$ss'
+                                  ? '$peerName • $mm:$ss • ${engine.activeCallTransport}'
                                   : '$peerName • Гудки...',
                               style: const TextStyle(
                                 color: Colors.white,
@@ -5363,6 +5843,33 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                           ),
                         ],
                       ),
+                      if (Platform.isAndroid)
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            FloatingActionButton(
+                              heroTag: 'call_speaker',
+                              backgroundColor: engine.isCallSpeakerOn
+                                  ? MayakTheme.accentCyan
+                                  : MayakTheme.bgElevated,
+                              onPressed: () => engine.toggleCallSpeaker(),
+                              child: Icon(
+                                engine.isCallSpeakerOn
+                                    ? Icons.volume_up_rounded
+                                    : Icons.hearing_rounded,
+                                color: engine.isCallSpeakerOn
+                                    ? Colors.black
+                                    : Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              engine.isCallSpeakerOn ? 'Громкая' : 'Динамик',
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 11),
+                            ),
+                          ],
+                        ),
                       if (isVideo)
                         Column(
                           mainAxisSize: MainAxisSize.min,

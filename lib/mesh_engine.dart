@@ -473,6 +473,8 @@ class ChatMessage {
   bool isDownloading;
   bool isEdited;
   String? forwardedFrom;
+  String? replyToMsgId;
+  String? replyToText;
   double transferProgress;
   Map<String, String> reactions;
 
@@ -493,6 +495,8 @@ class ChatMessage {
     this.isDownloading = false,
     this.isEdited = false,
     this.forwardedFrom,
+    this.replyToMsgId,
+    this.replyToText,
     this.transferProgress = 1.0,
     Map<String, String>? reactions,
   })  : isMediaRevealed = isMediaRevealed ?? isMe,
@@ -557,6 +561,8 @@ class ChatMessage {
         'rev': isMediaRevealed,
         'edt': isEdited,
         'fwd': forwardedFrom,
+        'rid': replyToMsgId,
+        'rtxt': replyToText,
         'pr': transferProgress,
         'rx': reactions,
       };
@@ -1125,6 +1131,11 @@ class MeshEngine {
   bool remoteCallMicMuted = false;
   bool remoteCallVideoMuted = false;
   bool isCallFrontCamera = true;
+  bool isCallSpeakerOn = true;
+  int _callStartedMs = 0;
+  int _lastCallUdpRxMs = 0;
+  int _lastBleVideoTxMs = 0;
+  String activeCallTransport = 'Wi-Fi UDP';
   String windowsVideoSource = 'camera'; // 'camera' | 'screen'
   String? incomingCallFromPeerId;
   String incomingCallMode = 'voice';
@@ -1166,6 +1177,8 @@ class MeshEngine {
   int get totalBufferedCount => transitBuffer.length + pendingFileJobs.length;
 
   bool get isSelfBanned => isNodeBanned(nodeId, myHwFingerprint);
+
+  bool isNodeOnline(String pid) => knownContacts[pid]?.isOnline ?? false;
 
   bool isNodeBanned(String targetNodeId, [String hw = '']) {
     if (targetNodeId.isNotEmpty && bannedNodeIds.contains(targetNodeId)) {
@@ -1233,6 +1246,75 @@ class MeshEngine {
     onStateChanged();
   }
 
+  List<Map<String, String>> _buildGroupMemberProfiles(List<String> memberIds) {
+    final list = <Map<String, String>>[];
+    list.add({
+      'id': nodeId,
+      'nick': nickname,
+      'dh': dhPubHex,
+      'sg': signPubHex,
+    });
+    for (final pid in memberIds) {
+      if (pid == nodeId) continue;
+      final c = knownContacts[pid];
+      if (c != null && c.dhPubHex.isNotEmpty && c.signPubHex.isNotEmpty) {
+        list.add({
+          'id': c.nodeId,
+          'nick': c.nickname,
+          'dh': c.dhPubHex,
+          'sg': c.signPubHex,
+        });
+      }
+    }
+    return list;
+  }
+
+  void _absorbGroupMemberProfiles(dynamic rawProfiles) {
+    if (rawProfiles is! List) return;
+    for (final item in rawProfiles) {
+      if (item is! Map) continue;
+      final pid = (item['id'] ?? '').toString();
+      final dh = (item['dh'] ?? '').toString();
+      final sg = (item['sg'] ?? '').toString();
+      final nick = (item['nick'] ?? '').toString();
+      if (pid.isEmpty || pid == nodeId || dh.isEmpty || sg.isEmpty) continue;
+      final existing = knownContacts[pid];
+      if (existing == null) {
+        knownContacts[pid] = ContactProfile(
+          nodeId: pid,
+          dhPubHex: dh,
+          signPubHex: sg,
+          nickname: nick.isNotEmpty ? nick : 'Узел $pid',
+          lastSeenTimestamp: DateTime.now().millisecondsSinceEpoch,
+        );
+      } else if (nick.isNotEmpty && existing.nickname.startsWith('Узел ')) {
+        existing.nickname = nick;
+      }
+    }
+  }
+
+  Future<void> _relayGroupPayloadToMembers(
+    GroupChat group,
+    Map<String, dynamic> payloadMap,
+    String baseEventId, {
+    Set<String> excludeIds = const {},
+  }) async {
+    final encoded = utf8.encode(jsonEncode(payloadMap));
+    for (final pid in group.memberIds) {
+      if (pid == nodeId || excludeIds.contains(pid)) continue;
+      final c = knownContacts[pid];
+      if (c == null) continue;
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: pid,
+        contact: c,
+        msgId: '${baseEventId}_$pid',
+        sealedPayloadBytes: encoded,
+        keepInTransitBuffer: true,
+        persistInOutbox: true,
+      );
+    }
+  }
+
   Future<GroupChat> createGroupChat(String title, List<String> memberIds) async {
     final cleanTitle = title.trim().isEmpty ? 'Mesh-комната' : title.trim();
     final gid = _randomHex(12);
@@ -1246,33 +1328,30 @@ class MeshEngine {
     );
     groupChats[gid] = group;
 
-    final invitePayload = jsonEncode({
+    final inviteMap = {
       'v': 2,
       'kind': 'GROUP_INVITE',
       'gid': gid,
       'title': cleanTitle,
       'creator': nodeId,
       'members': members,
+      'mprof': _buildGroupMemberProfiles(members),
+      'hop': 0,
       'ts': group.createdAt,
-    });
-    for (final pid in members) {
-      if (pid == nodeId) continue;
-      final c = knownContacts[pid];
-      if (c == null) continue;
-      await _encryptAndQueueSealedDataPacket(
-        targetNodeId: pid,
-        contact: c,
-        msgId: _randomHex(12),
-        sealedPayloadBytes: utf8.encode(invitePayload),
-        persistInOutbox: true,
-      );
-    }
+    };
+    await _relayGroupPayloadToMembers(group, inviteMap, 'ginv_$gid');
     await _saveContactsAndChats();
     onStateChanged();
     return group;
   }
 
-  Future<void> sendGroupMessage(String groupId, String text) async {
+  Future<void> sendGroupMessage(
+    String groupId,
+    String text, {
+    String? replyToId,
+    String? replyToPreview,
+    String? forwardedFrom,
+  }) async {
     final clean = text.trim();
     final group = groupChats[groupId];
     if (clean.isEmpty || group == null) return;
@@ -1288,33 +1367,185 @@ class MeshEngine {
       timestamp: now,
       isMe: true,
       isDelivered: true,
+      replyToMsgId: replyToId,
+      replyToText: replyToPreview,
+      forwardedFrom: forwardedFrom,
     );
     getGroupMessages(groupId).add(msg);
     _inspectMessageForTriggers(msg, gKey);
 
-    final payload = jsonEncode({
+    final payloadMap = <String, dynamic>{
       'v': 2,
       'kind': 'GROUP_MSG',
       'gid': groupId,
       'title': group.title,
+      'creator': group.creatorId,
       'members': group.memberIds,
+      'mprof': _buildGroupMemberProfiles(group.memberIds),
       'mid': msgId,
+      'osid': nodeId,
       'sn': nickname,
       'txt': clean,
+      'hop': 0,
       'ts': now,
-    });
-    for (final pid in group.memberIds) {
-      if (pid == nodeId) continue;
-      final c = knownContacts[pid];
-      if (c == null) continue;
-      await _encryptAndQueueSealedDataPacket(
-        targetNodeId: pid,
-        contact: c,
-        msgId: '${msgId}_$pid',
-        sealedPayloadBytes: utf8.encode(payload),
-        persistInOutbox: true,
-      );
+    };
+    if (replyToId != null) payloadMap['rid'] = replyToId;
+    if (replyToPreview != null) payloadMap['rtxt'] = replyToPreview;
+    if (forwardedFrom != null) payloadMap['fwd'] = forwardedFrom;
+
+    await _relayGroupPayloadToMembers(group, payloadMap, msgId);
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> editGroupMessage(
+      String groupId, String msgId, String newText) async {
+    final clean = newText.trim();
+    final group = groupChats[groupId];
+    if (clean.isEmpty || group == null) return;
+    final list = getGroupMessages(groupId);
+    for (final m in list) {
+      if (m.msgId == msgId && m.isMe) {
+        m.text = clean;
+        m.isEdited = true;
+        break;
+      }
     }
+    final payloadMap = {
+      'v': 2,
+      'kind': 'GROUP_EDIT',
+      'gid': groupId,
+      'mid': msgId,
+      'osid': nodeId,
+      'txt': clean,
+      'hop': 0,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    };
+    await _relayGroupPayloadToMembers(group, payloadMap, 'gedit_$msgId');
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> deleteGroupMessage(String groupId, String msgId,
+      {bool forEveryone = true}) async {
+    final group = groupChats[groupId];
+    if (group == null) return;
+    deletedMessageIds.add(msgId);
+    getGroupMessages(groupId).removeWhere((m) => m.msgId == msgId);
+    if (forEveryone) {
+      final payloadMap = {
+        'v': 2,
+        'kind': 'GROUP_DELETE',
+        'gid': groupId,
+        'mid': msgId,
+        'osid': nodeId,
+        'hop': 0,
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      };
+      await _relayGroupPayloadToMembers(group, payloadMap, 'gdel_$msgId');
+    }
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> toggleGroupReaction(
+      String groupId, String msgId, String emoji) async {
+    final group = groupChats[groupId];
+    if (group == null) return;
+    for (final m in getGroupMessages(groupId)) {
+      if (m.msgId == msgId) {
+        if (m.reactions[nodeId] == emoji) {
+          m.reactions.remove(nodeId);
+        } else {
+          m.reactions[nodeId] = emoji;
+        }
+        break;
+      }
+    }
+    final payloadMap = {
+      'v': 2,
+      'kind': 'GROUP_REACTION',
+      'gid': groupId,
+      'mid': msgId,
+      'osid': nodeId,
+      'emoji': emoji,
+      'hop': 0,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    };
+    await _relayGroupPayloadToMembers(
+        group, payloadMap, 'grx_${msgId}_${_randomHex(4)}');
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> renameGroupChat(String groupId, String newTitle) async {
+    final clean = newTitle.trim();
+    final group = groupChats[groupId];
+    if (clean.isEmpty || group == null) return;
+    group.title = clean;
+    final payloadMap = {
+      'v': 2,
+      'kind': 'GROUP_INVITE',
+      'gid': groupId,
+      'title': clean,
+      'creator': group.creatorId,
+      'members': group.memberIds,
+      'mprof': _buildGroupMemberProfiles(group.memberIds),
+      'hop': 0,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    };
+    await _relayGroupPayloadToMembers(
+        group, payloadMap, 'gren_${groupId}_${_randomHex(4)}');
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> addMemberToGroupChat(String groupId, String memberId) async {
+    final group = groupChats[groupId];
+    if (group == null || group.memberIds.contains(memberId)) return;
+    group.memberIds.add(memberId);
+    final payloadMap = {
+      'v': 2,
+      'kind': 'GROUP_INVITE',
+      'gid': groupId,
+      'title': group.title,
+      'creator': group.creatorId,
+      'members': group.memberIds,
+      'mprof': _buildGroupMemberProfiles(group.memberIds),
+      'hop': 0,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+    };
+    await _relayGroupPayloadToMembers(
+        group, payloadMap, 'gadd_${groupId}_${_randomHex(4)}');
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> clearGroupHistory(String groupId) async {
+    chatHistory[groupChatKey(groupId)]?.clear();
+    unreadGroupCounts[groupId] = 0;
+    await _saveContactsAndChats();
+    onStateChanged();
+  }
+
+  Future<void> leaveOrDeleteGroupChat(String groupId) async {
+    final group = groupChats[groupId];
+    if (group != null) {
+      final payloadMap = {
+        'v': 2,
+        'kind': 'GROUP_LEAVE',
+        'gid': groupId,
+        'osid': nodeId,
+        'sn': nickname,
+        'hop': 0,
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      };
+      await _relayGroupPayloadToMembers(
+          group, payloadMap, 'glv_${groupId}_${_randomHex(4)}');
+    }
+    groupChats.remove(groupId);
+    chatHistory.remove(groupChatKey(groupId));
+    unreadGroupCounts.remove(groupId);
     await _saveContactsAndChats();
     onStateChanged();
   }
@@ -1528,13 +1759,86 @@ class MeshEngine {
     }
   }
 
-  Future<void> _sendCallUdpPacket(
-      int type, int seq, int chunkIdx, int chunkTotal, Uint8List payload) async {
-    final sock = _callUdpSocket;
-    final key = _activeCallMediaKey;
+  static int _linearToUlaw(int pcm) {
+    const int bias = 0x84;
+    const int clip = 32635;
+    int sign = (pcm >> 8) & 0x80;
+    if (sign != 0) pcm = -pcm;
+    if (pcm > clip) pcm = clip;
+    pcm += bias;
+    int exponent = 7;
+    for (int expMask = 0x4000;
+        (pcm & expMask) == 0 && exponent > 0;
+        exponent--, expMask >>= 1) {}
+    int mantissa = (pcm >> (exponent + 3)) & 0x0F;
+    return (~(sign | (exponent << 4) | mantissa)) & 0xFF;
+  }
+
+  static int _ulawToLinear(int uVal) {
+    uVal = (~uVal) & 0xFF;
+    int t = ((uVal & 0x0F) << 3) + 0x84;
+    t <<= (uVal & 0x70) >> 4;
+    return ((uVal & 0x80) != 0) ? (0x84 - t) : (t - 0x84);
+  }
+
+  static Uint8List _encodePcm16kToUlaw8k(Uint8List pcm16k) {
+    final samples16k = pcm16k.length ~/ 2;
+    final out = Uint8List(samples16k ~/ 2);
+    for (int i = 0; i < out.length; i++) {
+      final b = i * 4;
+      int s1 = pcm16k[b] | (pcm16k[b + 1] << 8);
+      if (s1 >= 32768) s1 -= 65536;
+      out[i] = _linearToUlaw(s1);
+    }
+    return out;
+  }
+
+  static Uint8List _decodeUlaw8kToPcm16k(Uint8List ulaw8k) {
+    final out = Uint8List(ulaw8k.length * 4);
+    int prev = 0;
+    for (int i = 0; i < ulaw8k.length; i++) {
+      final cur = _ulawToLinear(ulaw8k[i]);
+      final mid = (prev + cur) >> 1;
+      final b = i * 4;
+      out[b] = mid & 0xFF;
+      out[b + 1] = (mid >> 8) & 0xFF;
+      out[b + 2] = cur & 0xFF;
+      out[b + 3] = (cur >> 8) & 0xFF;
+      prev = cur;
+    }
+    return out;
+  }
+
+  bool get _shouldUseRelayCallTransport {
     final ip = _activeCallPeerIp ??
         (activeCallPeerId != null ? _resolvePeerIp(activeCallPeerId!) : null);
-    if (sock == null || key == null || ip == null || ip.isEmpty) return;
+    if (ip == null || ip.isEmpty) return true;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastCallUdpRxMs > 0 && now - _lastCallUdpRxMs < 3500) return false;
+    if (now - _callStartedMs < 2200) return false;
+    return true;
+  }
+
+  void _sendDirectCallBinToPeer(String peerId, Uint8List encryptedPacket) {
+    final line = jsonEncode({'call_bin': base64Encode(encryptedPacket)});
+    for (final entry in _tcpPeers.entries) {
+      if (entry.value == peerId) {
+        _sendTcpLine(entry.key, line);
+        return;
+      }
+    }
+    for (final entry in _blePeers.entries) {
+      if (entry.value == peerId) {
+        unawaited(_sendBleLine(entry.key, line));
+        return;
+      }
+    }
+  }
+
+  Future<Uint8List?> _buildEncryptedCallPacket(
+      int type, int seq, int chunkIdx, int chunkTotal, Uint8List payload) async {
+    final key = _activeCallMediaKey;
+    if (key == null) return null;
     try {
       final nonce = Uint8List(12);
       final rng = Random.secure();
@@ -1558,15 +1862,43 @@ class MeshEngine {
       out.setRange(8, 20, nonce);
       out.setRange(20, 20 + box.cipherText.length, box.cipherText);
       out.setRange(20 + box.cipherText.length, out.length, box.mac.bytes);
-      sock.send(out, InternetAddress(ip), _activeCallPeerUdpPort);
-    } catch (_) {}
+      return out;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _sendCallUdpPacket(
+      int type, int seq, int chunkIdx, int chunkTotal, Uint8List payload,
+      {bool forceRelay = false}) async {
+    final pid = activeCallPeerId;
+    if (pid == null) return;
+    final out = await _buildEncryptedCallPacket(
+        type, seq, chunkIdx, chunkTotal, payload);
+    if (out == null) return;
+
+    final ip = _activeCallPeerIp ?? _resolvePeerIp(pid);
+    final sock = _callUdpSocket;
+    if (!forceRelay && sock != null && ip != null && ip.isNotEmpty) {
+      try {
+        sock.send(out, InternetAddress(ip), _activeCallPeerUdpPort);
+      } catch (_) {}
+    }
+    if (forceRelay || _shouldUseRelayCallTransport) {
+      _sendDirectCallBinToPeer(pid, out);
+    }
   }
 
   Future<void> _onCallUdpDatagram(Datagram dg) async {
+    await _processEncryptedCallMediaBytes(
+        dg.data, dg.address.address, dg.port);
+  }
+
+  Future<void> _processEncryptedCallMediaBytes(
+      Uint8List data, String? fromIp, int fromPort) async {
     if (activeCallPeerId == null || !isCallAccepted) return;
     final key = _activeCallMediaKey;
     if (key == null) return;
-    final data = dg.data;
     if (data.length < 36 || data[0] != 0x4D) return;
     final type = data[1];
     final seq = (data[2] << 24) | (data[3] << 16) | (data[4] << 8) | data[5];
@@ -1581,20 +1913,29 @@ class MeshEngine {
         SecretBox(ct, nonce: nonce, mac: Mac(macBytes)),
         secretKey: key,
       );
-      // Автоматически запоминаем обратный UDP-адрес собеседника (NAT punch)
-      _activeCallPeerIp = dg.address.address;
-      _activeCallPeerUdpPort = dg.port;
+      if (fromIp != null && fromPort > 0) {
+        _activeCallPeerIp = fromIp;
+        _activeCallPeerUdpPort = fromPort;
+        _lastCallUdpRxMs = DateTime.now().millisecondsSinceEpoch;
+        if (activeCallTransport != 'Wi-Fi UDP') {
+          activeCallTransport = 'Wi-Fi UDP';
+          onStateChanged();
+        }
+      } else if (activeCallTransport != 'Bluetooth / Mesh') {
+        activeCallTransport = 'Bluetooth / Mesh';
+        onStateChanged();
+      }
 
-      if (type == 0x01) {
-        // PCM 16kHz 16-bit mono audio
-        final pcm = Uint8List.fromList(plain);
+      if (type == 0x01 || type == 0x04) {
+        final rawBytes = Uint8List.fromList(plain);
+        final pcm =
+            (type == 0x04) ? _decodeUlaw8kToPcm16k(rawBytes) : rawBytes;
         if (Platform.isAndroid) {
           unawaited(_nativeChannel.invokeMethod('playCallAudioPcm', pcm));
         } else if (Platform.isWindows) {
           WindowsPcmAudioBridge.playPcm(pcm);
         }
       } else if (type == 0x02 && chunkTotal > 0 && chunkIdx < chunkTotal) {
-        // Chunked JPEG video frame (v1.8.1 resilient reassembly)
         if (seq <= _lastRenderedVideoSeq) return;
         final nowMs = DateTime.now().millisecondsSinceEpoch;
         _udpVideoAssemblies.removeWhere((_, v) => nowMs - v.createdMs > 700);
@@ -1624,7 +1965,14 @@ class MeshEngine {
   void _onLocalCapturedPcm(Uint8List pcm) {
     if (activeCallPeerId == null || !isCallAccepted || isCallMicMuted) return;
     _callAudioSeq++;
-    unawaited(_sendCallUdpPacket(0x01, _callAudioSeq, 0, 1, pcm));
+    if (_shouldUseRelayCallTransport) {
+      // 4x compression (8kHz u-law = 8 KB/s) for smooth Bluetooth/Nearby calls!
+      final compressed = _encodePcm16kToUlaw8k(pcm);
+      unawaited(_sendCallUdpPacket(0x04, _callAudioSeq, 0, 1, compressed,
+          forceRelay: true));
+    } else {
+      unawaited(_sendCallUdpPacket(0x01, _callAudioSeq, 0, 1, pcm));
+    }
   }
 
   void _onLocalCapturedVideoFrame(Uint8List jpeg) {
@@ -1636,15 +1984,29 @@ class MeshEngine {
         _isSendingVideoFrame) {
       return;
     }
+    final useRelay = _shouldUseRelayCallTransport;
+    if (useRelay) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - _lastBleVideoTxMs < 180) return;
+      _lastBleVideoTxMs = now;
+    }
     _isSendingVideoFrame = true;
-    unawaited(_sendVideoFramePaced(jpeg));
+    unawaited(_sendVideoFramePaced(jpeg, useRelay: useRelay));
   }
 
-  Future<void> _sendVideoFramePaced(Uint8List jpeg) async {
+  Future<void> _sendVideoFramePaced(Uint8List jpeg,
+      {bool useRelay = false}) async {
     try {
       _callVideoSeq++;
       final seq = _callVideoSeq;
-      const maxChunk = 1250;
+      if (useRelay) {
+        // Send single compact frame over BLE/TCP relay (avoid flooding BLE)
+        if (jpeg.length <= 24000) {
+          await _sendCallUdpPacket(0x02, seq, 0, 1, jpeg, forceRelay: true);
+        }
+        return;
+      }
+      const maxChunk = 1280;
       final total = (jpeg.length + maxChunk - 1) ~/ maxChunk;
       if (total <= 0 || total > 120) return;
       for (int i = 0; i < total; i++) {
@@ -1655,13 +2017,24 @@ class MeshEngine {
         final end = min(start + maxChunk, jpeg.length);
         final part = Uint8List.sublistView(jpeg, start, end);
         await _sendCallUdpPacket(0x02, seq, i, total, part);
-        if ((i & 3) == 3) {
-          await Future.delayed(const Duration(milliseconds: 2));
+        if ((i % 6) == 5) {
+          await Future.delayed(const Duration(milliseconds: 1));
         }
       }
     } finally {
       _isSendingVideoFrame = false;
     }
+  }
+
+  Future<void> toggleCallSpeaker() async {
+    isCallSpeakerOn = !isCallSpeakerOn;
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel
+            .invokeMethod('setCallSpeaker', {'enabled': isCallSpeakerOn});
+      } catch (_) {}
+    }
+    onStateChanged();
   }
 
   Future<void> _startCallTonesOutgoing() async {
@@ -2048,10 +2421,17 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     _lastRenderedVideoSeq = -1;
     _callAudioSeq = 0;
     _callVideoSeq = 0;
+    _callStartedMs = DateTime.now().millisecondsSinceEpoch;
+    _lastCallUdpRxMs = 0;
+    activeCallTransport =
+        (_activeCallPeerIp != null && _activeCallPeerIp!.isNotEmpty)
+            ? 'Wi-Fi UDP'
+            : 'Bluetooth / Mesh';
 
     // 1. Полнодуплексный аудио-поток 16 kHz 16-bit Mono PCM
     if (Platform.isAndroid) {
       try {
+        await _nativeChannel.invokeMethod('setCallSpeaker', {'enabled': isCallSpeakerOn});
         await _nativeChannel.invokeMethod('startCallAudio');
         await _nativeChannel
             .invokeMethod('setCallAudioMuted', {'muted': isCallMicMuted});
@@ -5025,6 +5405,13 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     try {
       final map = jsonDecode(line) as Map<String, dynamic>;
 
+      if (map.containsKey('call_bin')) {
+        final b64 = (map['call_bin'] ?? '').toString();
+        if (b64.isNotEmpty) {
+          unawaited(_processEncryptedCallMediaBytes(base64Decode(b64), null, 0));
+        }
+        return;
+      }
       if (map.containsKey('file_win_ack')) {
         final key = map['file_win_ack'] as String;
         final waiter = _fileWindowAckWaiters.remove(key);
@@ -5967,52 +6354,89 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         final gid = (envelope['gid'] ?? '').toString();
         final gtitle = (envelope['title'] ?? 'Mesh-комната').toString();
         final gcreator = (envelope['creator'] ?? senderId).toString();
+        final hop = (envelope['hop'] as num?)?.toInt() ?? 0;
+        _absorbGroupMemberProfiles(envelope['mprof']);
         final gmembers = (envelope['members'] is List)
-            ? (envelope['members'] as List).map((e) => e.toString()).toList()
+            ? (envelope['members'] as List).map((e) => e.toString()).toSet().toList()
             : <String>[nodeId, senderId];
+        if (!gmembers.contains(nodeId)) gmembers.add(nodeId);
         if (gid.isNotEmpty) {
-          groupChats[gid] = GroupChat(
+          final existing = groupChats[gid];
+          final mergedMembers = <String>{
+            ...?existing?.memberIds,
+            ...gmembers,
+          }.toList();
+          final grp = GroupChat(
             groupId: gid,
             title: gtitle,
             creatorId: gcreator,
-            memberIds: gmembers,
+            memberIds: mergedMembers,
             createdAt: (envelope['ts'] as num?)?.toInt() ??
+                existing?.createdAt ??
                 DateTime.now().millisecondsSinceEpoch,
           );
+          groupChats[gid] = grp;
           await _saveContactsAndChats();
+          if (hop < 4) {
+            final relayMap = Map<String, dynamic>.from(envelope);
+            relayMap['hop'] = hop + 1;
+            relayMap['members'] = mergedMembers;
+            relayMap['mprof'] = _buildGroupMemberProfiles(mergedMembers);
+            unawaited(_relayGroupPayloadToMembers(
+              grp,
+              relayMap,
+              'ginv_${gid}_${(envelope['ts'] ?? 0)}',
+              excludeIds: {senderId},
+            ));
+          }
         }
       } else if (kind == 'GROUP_MSG') {
         final gid = (envelope['gid'] ?? '').toString();
         final gtitle = (envelope['title'] ?? 'Mesh-комната').toString();
+        final gcreator = (envelope['creator'] ?? senderId).toString();
         final mid = (envelope['mid'] ?? pkt.msgId).toString();
+        final origSenderId = (envelope['osid'] ?? senderId).toString();
+        final hop = (envelope['hop'] as num?)?.toInt() ?? 0;
+        _absorbGroupMemberProfiles(envelope['mprof']);
         final gmembers = (envelope['members'] is List)
-            ? (envelope['members'] as List).map((e) => e.toString()).toList()
-            : <String>[nodeId, senderId];
+            ? (envelope['members'] as List).map((e) => e.toString()).toSet().toList()
+            : <String>[nodeId, senderId, origSenderId];
+        if (!gmembers.contains(nodeId)) gmembers.add(nodeId);
         if (gid.isNotEmpty && !deletedMessageIds.contains(mid)) {
-          groupChats.putIfAbsent(
+          final grp = groupChats.putIfAbsent(
             gid,
             () => GroupChat(
               groupId: gid,
               title: gtitle,
-              creatorId: senderId,
+              creatorId: gcreator,
               memberIds: gmembers,
               createdAt: DateTime.now().millisecondsSinceEpoch,
             ),
           );
+          for (final mId in gmembers) {
+            if (!grp.memberIds.contains(mId)) grp.memberIds.add(mId);
+          }
           final gList = getGroupMessages(gid);
-          if (!gList.any((m) => m.msgId == mid)) {
+          final isNew = !gList.any((m) => m.msgId == mid);
+          if (isNew && origSenderId != nodeId) {
             final txt = (envelope['txt'] ?? '').toString();
-            final sn = (envelope['sn'] ?? contact.displayTitle).toString();
+            final sn = (envelope['sn'] ??
+                    knownContacts[origSenderId]?.displayTitle ??
+                    contact.displayTitle)
+                .toString();
             final gMsg = ChatMessage(
               msgId: mid,
               peerId: groupChatKey(gid),
-              senderId: senderId,
+              senderId: origSenderId,
               senderName: sn,
               text: txt,
               timestamp: (envelope['ts'] as num?)?.toInt() ??
                   DateTime.now().millisecondsSinceEpoch,
               isMe: false,
               isDelivered: true,
+              replyToMsgId: envelope['rid'] as String?,
+              replyToText: envelope['rtxt'] as String?,
+              forwardedFrom: envelope['fwd'] as String?,
             );
             gList.add(gMsg);
             unreadGroupCounts[gid] = (unreadGroupCounts[gid] ?? 0) + 1;
@@ -6020,6 +6444,120 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             unawaited(_triggerIncomingNotification(
                 groupChatKey(gid), '$gtitle • $sn', txt));
             await _saveContactsAndChats();
+          }
+          // Multi-hop Mesh Relay: forward to all other group members so A <-> B <-> C works!
+          if (isNew && hop < 5) {
+            final relayMap = Map<String, dynamic>.from(envelope);
+            relayMap['hop'] = hop + 1;
+            relayMap['osid'] = origSenderId;
+            relayMap['members'] = grp.memberIds;
+            relayMap['mprof'] = _buildGroupMemberProfiles(grp.memberIds);
+            unawaited(_relayGroupPayloadToMembers(
+              grp,
+              relayMap,
+              mid,
+              excludeIds: {senderId, origSenderId},
+            ));
+          }
+        }
+      } else if (kind == 'GROUP_EDIT') {
+        final gid = (envelope['gid'] ?? '').toString();
+        final mid = (envelope['mid'] ?? '').toString();
+        final origSenderId = (envelope['osid'] ?? senderId).toString();
+        final newTxt = (envelope['txt'] ?? '').toString();
+        final hop = (envelope['hop'] as num?)?.toInt() ?? 0;
+        final grp = groupChats[gid];
+        if (grp != null && mid.isNotEmpty) {
+          bool changed = false;
+          for (final m in getGroupMessages(gid)) {
+            if (m.msgId == mid && m.senderId == origSenderId && m.text != newTxt) {
+              m.text = newTxt;
+              m.isEdited = true;
+              changed = true;
+              break;
+            }
+          }
+          if (changed) {
+            await _saveContactsAndChats();
+            if (hop < 5) {
+              final relayMap = Map<String, dynamic>.from(envelope);
+              relayMap['hop'] = hop + 1;
+              unawaited(_relayGroupPayloadToMembers(
+                grp,
+                relayMap,
+                'gedit_$mid',
+                excludeIds: {senderId, origSenderId},
+              ));
+            }
+          }
+        }
+      } else if (kind == 'GROUP_DELETE') {
+        final gid = (envelope['gid'] ?? '').toString();
+        final mid = (envelope['mid'] ?? '').toString();
+        final origSenderId = (envelope['osid'] ?? senderId).toString();
+        final hop = (envelope['hop'] as num?)?.toInt() ?? 0;
+        final grp = groupChats[gid];
+        if (grp != null && mid.isNotEmpty && !deletedMessageIds.contains(mid)) {
+          deletedMessageIds.add(mid);
+          getGroupMessages(gid).removeWhere((m) => m.msgId == mid);
+          await _saveContactsAndChats();
+          if (hop < 5) {
+            final relayMap = Map<String, dynamic>.from(envelope);
+            relayMap['hop'] = hop + 1;
+            unawaited(_relayGroupPayloadToMembers(
+              grp,
+              relayMap,
+              'gdel_$mid',
+              excludeIds: {senderId, origSenderId},
+            ));
+          }
+        }
+      } else if (kind == 'GROUP_REACTION') {
+        final gid = (envelope['gid'] ?? '').toString();
+        final mid = (envelope['mid'] ?? '').toString();
+        final origSenderId = (envelope['osid'] ?? senderId).toString();
+        final emoji = (envelope['emoji'] ?? '').toString();
+        final hop = (envelope['hop'] as num?)?.toInt() ?? 0;
+        final grp = groupChats[gid];
+        if (grp != null && mid.isNotEmpty && emoji.isNotEmpty) {
+          for (final m in getGroupMessages(gid)) {
+            if (m.msgId == mid) {
+              if (m.reactions[origSenderId] == emoji) {
+                m.reactions.remove(origSenderId);
+              } else {
+                m.reactions[origSenderId] = emoji;
+              }
+              break;
+            }
+          }
+          await _saveContactsAndChats();
+          if (hop < 4) {
+            final relayMap = Map<String, dynamic>.from(envelope);
+            relayMap['hop'] = hop + 1;
+            unawaited(_relayGroupPayloadToMembers(
+              grp,
+              relayMap,
+              'grx_${mid}_${(envelope['ts'] ?? 0)}',
+              excludeIds: {senderId, origSenderId},
+            ));
+          }
+        }
+      } else if (kind == 'GROUP_LEAVE') {
+        final gid = (envelope['gid'] ?? '').toString();
+        final origSenderId = (envelope['osid'] ?? senderId).toString();
+        final hop = (envelope['hop'] as num?)?.toInt() ?? 0;
+        final grp = groupChats[gid];
+        if (grp != null && grp.memberIds.remove(origSenderId)) {
+          await _saveContactsAndChats();
+          if (hop < 4) {
+            final relayMap = Map<String, dynamic>.from(envelope);
+            relayMap['hop'] = hop + 1;
+            unawaited(_relayGroupPayloadToMembers(
+              grp,
+              relayMap,
+              'glv_${gid}_$origSenderId',
+              excludeIds: {senderId, origSenderId},
+            ));
           }
         }
       } else if (kind == 'FILE_CHUNK') {
