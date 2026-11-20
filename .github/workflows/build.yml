@@ -1847,7 +1847,8 @@ jobs:
                       btWriteExec.execute {
                           try {
                               val os = sock.outputStream
-                              os.write((data + "\n").toByteArray(Charsets.UTF_8))
+                              os.write(data.toByteArray(Charsets.UTF_8))
+                              os.write(10)
                               os.flush()
                           } catch (_: Throwable) {
                               btSockets.remove(endpointId)
