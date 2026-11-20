@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.0.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.1.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.0.0"
+                  versionName = "2.1.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.0.0"
+                  versionName "2.1.0"
               }}
 
               packagingOptions {{
@@ -266,8 +266,8 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
-              <uses-permission android:name="android.permission.BLUETOOTH"/>
-              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
               <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
               <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
@@ -302,7 +302,7 @@ jobs:
                       android:name=".MayakBackgroundService"
                       android:enabled="true"
                       android:exported="false"
-                      android:foregroundServiceType="dataSync" />
+                      android:foregroundServiceType="dataSync|connectedDevice" />
 
                   <activity
                       android:name=".MainActivity"
@@ -545,6 +545,12 @@ jobs:
               private val connectedBleEndpoints = mutableSetOf<String>()
               private val pendingBleEndpoints = mutableSetOf<String>()
               private var pendingNearbyAutoStart: Boolean = false
+              // v2.0.1: Нативный Bluetooth RFCOMM-движок (резерв к Google Nearby — работает без GPS и без Google Play Services!)
+              private val btRfcommUuid: java.util.UUID = java.util.UUID.fromString("a7e3c510-8b2d-4c9a-9f11-420690000001")
+              private val btMeshRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+              private var btServerSocket: android.bluetooth.BluetoothServerSocket? = null
+              private val btSockets = java.util.concurrent.ConcurrentHashMap<String, android.bluetooth.BluetoothSocket>()
+              private val btWriteExec = java.util.concurrent.Executors.newSingleThreadExecutor()
               private val mainHandler = Handler(Looper.getMainLooper())
 
               // v1.8.0: Полнодуплексный аудио/видео движок звонков + рингтон и гудки
@@ -855,7 +861,8 @@ jobs:
                                   }
                               }
                               "stopCallAudio" -> {
-                                  stopCallAudioInternal()
+                                  stopNativeBtRfcommMesh()
+                  stopCallAudioInternal()
                                   result.success(true)
                               }
                               "setCallAudioMuted" -> {
@@ -1573,12 +1580,14 @@ jobs:
                   override fun onConnectionResult(endpointId: String, resolution: ConnectionResolution) {
                       try {
                           mainHandler.post {
+                              pendingBleEndpoints.remove(endpointId)
                               if (resolution.status.isSuccess) {
-                                  pendingBleEndpoints.remove(endpointId)
                                   connectedBleEndpoints.add(endpointId)
+                                  methodChannel?.invokeMethod("onNativeLog", "BLE Nearby: Подключён узел $endpointId")
                                   methodChannel?.invokeMethod("onNearbyConnected", endpointId)
                               } else {
                                   connectedBleEndpoints.remove(endpointId)
+                                  methodChannel?.invokeMethod("onNativeLog", "BLE Nearby: Сбой подключения к $endpointId (код ${resolution.status.statusCode})")
                                   methodChannel?.invokeMethod("onNearbyDisconnected", endpointId)
                               }
                           }
@@ -1603,7 +1612,11 @@ jobs:
                               !connectedBleEndpoints.contains(endpointId) &&
                               !pendingBleEndpoints.contains(endpointId)) {
                               pendingBleEndpoints.add(endpointId)
-                              val delayMs = if (localNodeId < info.endpointName) 120L else 1800L
+                              mainHandler.post {
+                                  methodChannel?.invokeMethod("onNativeLog", "BLE Nearby: Обнаружен узел ${info.endpointName} ($endpointId)")
+                              }
+                              val jitter = (Math.random() * 600).toLong()
+                              val delayMs = (if (localNodeId < info.endpointName) 150L else 1900L) + jitter
                               mainHandler.postDelayed({
                                   try {
                                       if (!connectedBleEndpoints.contains(endpointId)) {
@@ -1649,6 +1662,7 @@ jobs:
               }
 
               private fun startNearbyInternalOnly() {
+                  startNativeBtRfcommMesh()
                   try {
                       val client = Nearby.getConnectionsClient(applicationContext)
                       client.stopAdvertising()
@@ -1662,7 +1676,27 @@ jobs:
                       mainHandler.postDelayed({
                           try {
                               client.startAdvertising(localNodeId, serviceId, connectionLifecycleCallback, advOptions)
+                                  .addOnSuccessListener {
+                                      mainHandler.post {
+                                          methodChannel?.invokeMethod("onNativeLog", "BLE Nearby: Реклама запущена (P2P_CLUSTER)")
+                                      }
+                                  }
+                                  .addOnFailureListener { e ->
+                                      mainHandler.post {
+                                          methodChannel?.invokeMethod("onNativeLog", "BLE Advertising: ${e.message}")
+                                      }
+                                  }
                               client.startDiscovery(serviceId, endpointDiscoveryCallback, discOptions)
+                                  .addOnSuccessListener {
+                                      mainHandler.post {
+                                          methodChannel?.invokeMethod("onNativeLog", "BLE Nearby: Поиск устройств запущен")
+                                      }
+                                  }
+                                  .addOnFailureListener { e ->
+                                      mainHandler.post {
+                                          methodChannel?.invokeMethod("onNativeLog", "BLE Discovery: ${e.message}")
+                                      }
+                                  }
                           } catch (_: Throwable) {}
                       }, 450L)
                   } catch (_: Throwable) {}
@@ -1682,62 +1716,149 @@ jobs:
                   }
                   if (!isLocationTurnedOn()) {
                       mainHandler.post {
-                          methodChannel?.invokeMethod("onNativeLog", "ВНИМАНИЕ: Включи значок Геолокации (GPS) в верхней шторке телефона для поиска по Bluetooth!")
+                          methodChannel?.invokeMethod("onNativeLog", "ПОДСКАЗКА: Для Google Nearby включи Геолокацию (GPS). Параллельно запущен нативный Bluetooth RFCOMM (работает и без GPS)!")
                       }
                   }
-                  localNodeId = nodeIdArg
-                  serviceId = srvIdArg
                   try {
-                      try {
-                          val btMgr = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
-                          if (btMgr?.adapter?.isEnabled == false) {
-                              mainHandler.post {
-                                  methodChannel?.invokeMethod("onNativeLog", "ВНИМАНИЕ: Bluetooth выключен! Включи Bluetooth для поиска устройств рядом.")
-                              }
+                      val btMgr = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+                      if (btMgr?.adapter?.isEnabled == false) {
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNativeLog", "ВНИМАНИЕ: Bluetooth выключен! Включи Bluetooth в шторке телефона.")
                           }
-                      } catch (_: Throwable) {}
-                      val client = Nearby.getConnectionsClient(applicationContext)
-                      client.stopAdvertising()
-                      client.stopDiscovery()
+                      }
+                  } catch (_: Throwable) {}
+                  startNearbyInternalOnly()
+                  result.success("OK")
+              }
 
-                      val advOptions = AdvertisingOptions.Builder()
-                          .setStrategy(Strategy.P2P_CLUSTER)
-                          .build()
-                      val discOptions = DiscoveryOptions.Builder()
-                          .setStrategy(Strategy.P2P_CLUSTER)
-                          .build()
+              @Suppress("MissingPermission")
+              private fun startNativeBtRfcommMesh() {
+                  stopNativeBtRfcommMesh()
+                  try {
+                      val btMgr = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+                      val adapter = btMgr?.adapter ?: return
+                      if (!adapter.isEnabled) return
+                      btMeshRunning.set(true)
 
-                      mainHandler.postDelayed({
+                      // 1. Входящий Bluetooth RFCOMM-сервер (Insecure — без запроса PIN!)
+                      Thread {
                           try {
-                              client.startAdvertising(
-                                  localNodeId,
-                                  serviceId,
-                                  connectionLifecycleCallback,
-                                  advOptions
-                              ).addOnFailureListener { e ->
-                                  mainHandler.post {
-                                      methodChannel?.invokeMethod("onNativeLog", "BLE Advertising: ${e.message}")
-                                  }
+                              val srv = adapter.listenUsingInsecureRfcommWithServiceRecord("MayakMesh", btRfcommUuid)
+                              btServerSocket = srv
+                              mainHandler.post {
+                                  methodChannel?.invokeMethod("onNativeLog", "BT RFCOMM: Сервер активен (готов к приёму узлов)")
                               }
-                              client.startDiscovery(
-                                  serviceId,
-                                  endpointDiscoveryCallback,
-                                  discOptions
-                              ).addOnFailureListener { e ->
-                                  mainHandler.post {
-                                      methodChannel?.invokeMethod("onNativeLog", "BLE Discovery: ${e.message}")
+                              while (btMeshRunning.get()) {
+                                  val sock = try { srv.accept() } catch (_: Throwable) { break }
+                                  if (sock != null) {
+                                      handleBtSocketConnected(sock)
                                   }
                               }
                           } catch (_: Throwable) {}
-                      }, 450L)
+                      }.start()
 
-                      result.success("OK")
-                  } catch (t: Throwable) {
-                      result.success("ERROR: ${t.message}")
+                      // 2. Периодическое автоподключение ко всем сопряжённым Bluetooth-телефонам с Маяком
+                      Thread {
+                          while (btMeshRunning.get()) {
+                              try {
+                                  val bonded = adapter.bondedDevices
+                                  if (bonded != null) {
+                                      for (dev in bonded) {
+                                          if (!btMeshRunning.get()) break
+                                          val epId = "bt_${dev.address}"
+                                          if (btSockets.containsKey(epId)) continue
+                                          // Подключаемся только к телефонам/компьютерам (пропускаем наушники/часы)
+                                          val majorClass = dev.bluetoothClass?.majorDeviceClass ?: 0
+                                          if (majorClass != 0 &&
+                                              majorClass != android.bluetooth.BluetoothClass.Device.Major.PHONE &&
+                                              majorClass != android.bluetooth.BluetoothClass.Device.Major.COMPUTER &&
+                                              majorClass != android.bluetooth.BluetoothClass.Device.Major.UNCATEGORIZED) {
+                                              continue
+                                          }
+                                          try {
+                                              val s = dev.createInsecureRfcommSocketToServiceRecord(btRfcommUuid)
+                                              s.connect()
+                                              handleBtSocketConnected(s)
+                                          } catch (_: Throwable) {}
+                                      }
+                                  }
+                              } catch (_: Throwable) {}
+                              var waited = 0
+                              while (waited < 12000 && btMeshRunning.get()) {
+                                  try { Thread.sleep(500) } catch (_: Throwable) { break }
+                                  waited += 500
+                              }
+                          }
+                      }.start()
+                  } catch (_: Throwable) {}
+              }
+
+              @Suppress("MissingPermission")
+              private fun handleBtSocketConnected(sock: android.bluetooth.BluetoothSocket) {
+                  val addr = try { sock.remoteDevice?.address ?: "unknown" } catch (_: Throwable) { "unknown" }
+                  val epId = "bt_$addr"
+                  if (btSockets.containsKey(epId)) {
+                      try { sock.close() } catch (_: Throwable) {}
+                      return
                   }
+                  btSockets[epId] = sock
+                  mainHandler.post {
+                      methodChannel?.invokeMethod("onNativeLog", "BT RFCOMM: Подключён узел $addr")
+                      methodChannel?.invokeMethod("onNearbyConnected", epId)
+                  }
+                  Thread {
+                      try {
+                          val reader = java.io.BufferedReader(java.io.InputStreamReader(sock.inputStream, Charsets.UTF_8))
+                          while (btMeshRunning.get()) {
+                              val line = reader.readLine() ?: break
+                              if (line.isNotEmpty()) {
+                                  mainHandler.post {
+                                      methodChannel?.invokeMethod(
+                                          "onNearbyPayload",
+                                          mapOf("endpointId" to epId, "data" to line)
+                                      )
+                                  }
+                              }
+                          }
+                      } catch (_: Throwable) {
+                      } finally {
+                          btSockets.remove(epId)
+                          try { sock.close() } catch (_: Throwable) {}
+                          mainHandler.post {
+                              methodChannel?.invokeMethod("onNearbyDisconnected", epId)
+                          }
+                      }
+                  }.start()
+              }
+
+              private fun stopNativeBtRfcommMesh() {
+                  btMeshRunning.set(false)
+                  try { btServerSocket?.close() } catch (_: Throwable) {}
+                  btServerSocket = null
+                  for ((_, s) in btSockets) {
+                      try { s.close() } catch (_: Throwable) {}
+                  }
+                  btSockets.clear()
               }
 
               private fun sendPayloadSafe(endpointId: String, data: String) {
+                  if (endpointId.startsWith("bt_")) {
+                      val sock = btSockets[endpointId] ?: return
+                      btWriteExec.execute {
+                          try {
+                              val os = sock.outputStream
+                              os.write((data + "\n").toByteArray(Charsets.UTF_8))
+                              os.flush()
+                          } catch (_: Throwable) {
+                              btSockets.remove(endpointId)
+                              try { sock.close() } catch (_: Throwable) {}
+                              mainHandler.post {
+                                  methodChannel?.invokeMethod("onNearbyDisconnected", endpointId)
+                              }
+                          }
+                      }
+                      return
+                  }
                   try {
                       val bytes = data.toByteArray(Charsets.UTF_8)
                       Nearby.getConnectionsClient(applicationContext)
@@ -1746,8 +1867,10 @@ jobs:
               }
 
               private fun stopNearbySafe() {
+                  stopNativeBtRfcommMesh()
                   try {
                       connectedBleEndpoints.clear()
+                      pendingBleEndpoints.clear()
                       val client = Nearby.getConnectionsClient(applicationContext)
                       client.stopAdvertising()
                       client.stopDiscovery()
@@ -2334,11 +2457,21 @@ jobs:
           """)
           '
 
+      - name: Install Monochrome App Icon (Android)
+        run: |
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p android/app/src/main/res/mipmap-$d
+            if [ -f "assets/icons/ic_launcher_$d.png" ]; then
+              cp "assets/icons/ic_launcher_$d.png" "android/app/src/main/res/mipmap-$d/ic_launcher.png"
+              cp "assets/icons/ic_launcher_$d.png" "android/app/src/main/res/mipmap-$d/ic_launcher_round.png"
+            fi
+          done
+
       - name: Install dependencies
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.0.0 --build-number=$((2000 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.1.0 --build-number=$((2100 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -2363,6 +2496,12 @@ jobs:
         run: |
           flutter config --enable-windows-desktop
           flutter create --platforms=windows --project-name=p2p_mesh .
+
+      - name: Install Monochrome App Icon (Windows)
+        run: |
+          if (Test-Path "assets\app_icon.ico") {
+            Copy-Item "assets\app_icon.ico" "windows\runner\resources\app_icon.ico" -Force
+          }
 
       - name: Install dependencies
         run: flutter pub get
