@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.8.1
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.9.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "1.8.1"
+                  versionName = "1.9.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "1.8.1"
+                  versionName "1.9.0"
               }}
 
               packagingOptions {{
@@ -544,6 +544,7 @@ jobs:
               // v1.8.0: Полнодуплексный аудио/видео движок звонков + рингтон и гудки
               private val callAudioRunning = java.util.concurrent.atomic.AtomicBoolean(false)
               private val callAudioMuted = java.util.concurrent.atomic.AtomicBoolean(false)
+              private val callSpeakerEnabled = java.util.concurrent.atomic.AtomicBoolean(true)
               private var callAudioRecord: android.media.AudioRecord? = null
               private var callAudioTrack: android.media.AudioTrack? = null
               private var callAec: android.media.audiofx.AcousticEchoCanceler? = null
@@ -854,6 +855,11 @@ jobs:
                               "setCallAudioMuted" -> {
                                   val muted = call.argument<Boolean>("muted") ?: false
                                   callAudioMuted.set(muted)
+                                  result.success(true)
+                              }
+                              "setCallSpeaker" -> {
+                                  val enabled = call.argument<Boolean>("enabled") ?: true
+                                  setCallSpeakerInternal(enabled)
                                   result.success(true)
                               }
                               "playCallAudioPcm" -> {
@@ -1504,6 +1510,11 @@ jobs:
                           }
                       } catch (_: Throwable) {}
                   }
+                  if (requestCode == 4202 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                      startCallAudioInternal()
+                  } else if (requestCode == 4203 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                      startCallCameraInternal(callCameraFront)
+                  }
               }
 
               private val payloadCallback = object : PayloadCallback() {
@@ -1601,6 +1612,14 @@ jobs:
                   localNodeId = nodeIdArg
                   serviceId = srvIdArg
                   try {
+                      try {
+                          val btMgr = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+                          if (btMgr?.adapter?.isEnabled == false) {
+                              mainHandler.post {
+                                  methodChannel?.invokeMethod("onNativeLog", "ВНИМАНИЕ: Bluetooth выключен! Включи Bluetooth для поиска устройств рядом.")
+                              }
+                          }
+                      } catch (_: Throwable) {}
                       val client = Nearby.getConnectionsClient(applicationContext)
                       client.stopAdvertising()
                       client.stopDiscovery()
@@ -1612,26 +1631,29 @@ jobs:
                           .setStrategy(Strategy.P2P_CLUSTER)
                           .build()
 
-                      client.startAdvertising(
-                          localNodeId,
-                          serviceId,
-                          connectionLifecycleCallback,
-                          advOptions
-                      ).addOnFailureListener { e ->
-                          mainHandler.post {
-                              methodChannel?.invokeMethod("onNativeLog", "BLE Advertising: ${e.message}")
-                          }
-                      }
-
-                      client.startDiscovery(
-                          serviceId,
-                          endpointDiscoveryCallback,
-                          discOptions
-                      ).addOnFailureListener { e ->
-                          mainHandler.post {
-                              methodChannel?.invokeMethod("onNativeLog", "BLE Discovery: ${e.message}")
-                          }
-                      }
+                      mainHandler.postDelayed({
+                          try {
+                              client.startAdvertising(
+                                  localNodeId,
+                                  serviceId,
+                                  connectionLifecycleCallback,
+                                  advOptions
+                              ).addOnFailureListener { e ->
+                                  mainHandler.post {
+                                      methodChannel?.invokeMethod("onNativeLog", "BLE Advertising: ${e.message}")
+                                  }
+                              }
+                              client.startDiscovery(
+                                  serviceId,
+                                  endpointDiscoveryCallback,
+                                  discOptions
+                              ).addOnFailureListener { e ->
+                                  mainHandler.post {
+                                      methodChannel?.invokeMethod("onNativeLog", "BLE Discovery: ${e.message}")
+                                  }
+                              }
+                          } catch (_: Throwable) {}
+                      }, 450L)
 
                       result.success("OK")
                   } catch (t: Throwable) {
@@ -1675,12 +1697,7 @@ jobs:
                           android.media.AudioFormat.ENCODING_PCM_16BIT
                       ).coerceAtLeast(chunkBytes * 4)
 
-                      try {
-                          val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-                          am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-                          @Suppress("DEPRECATION")
-                          am.isSpeakerphoneOn = true
-                      } catch (_: Throwable) {}
+                      setCallSpeakerInternal(callSpeakerEnabled.get())
 
                       val rec = android.media.AudioRecord(
                           android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -1775,7 +1792,22 @@ jobs:
                               try {
                                   val pkt = callPlayQueue.poll(120, java.util.concurrent.TimeUnit.MILLISECONDS)
                                   if (pkt != null && callAudioRunning.get()) {
-                                      track.write(pkt, 0, pkt.size)
+                                      if (callSpeakerEnabled.get()) {
+                                          val boosted = ByteArray(pkt.size)
+                                          var i = 0
+                                          while (i + 1 < pkt.size) {
+                                              val lo = pkt[i].toInt() and 0xFF
+                                              val hi = pkt[i + 1].toInt()
+                                              val sample = (hi shl 8) or lo
+                                              val scaled = (sample * 19 / 10).coerceIn(-32767, 32767)
+                                              boosted[i] = (scaled and 0xFF).toByte()
+                                              boosted[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+                                              i += 2
+                                          }
+                                          track.write(boosted, 0, boosted.size)
+                                      } else {
+                                          track.write(pkt, 0, pkt.size)
+                                      }
                                   }
                               } catch (_: Throwable) {
                                   break
@@ -1807,9 +1839,33 @@ jobs:
                   callAudioTrack = null
                   try {
                       val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                      if (Build.VERSION.SDK_INT >= 31) {
+                          am.clearCommunicationDevice()
+                      }
                       @Suppress("DEPRECATION")
                       am.isSpeakerphoneOn = false
                       am.mode = android.media.AudioManager.MODE_NORMAL
+                  } catch (_: Throwable) {}
+              }
+
+              private fun setCallSpeakerInternal(enabled: Boolean) {
+                  callSpeakerEnabled.set(enabled)
+                  try {
+                      val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                      am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+                      if (Build.VERSION.SDK_INT >= 31) {
+                          val wantedType = if (enabled) {
+                              android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                          } else {
+                              android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                          }
+                          val dev = am.availableCommunicationDevices.firstOrNull { it.type == wantedType }
+                          if (dev != null) {
+                              am.setCommunicationDevice(dev)
+                          }
+                      }
+                      @Suppress("DEPRECATION")
+                      am.isSpeakerphoneOn = enabled
                   } catch (_: Throwable) {}
               }
 
@@ -1897,14 +1953,16 @@ jobs:
                       callCamera = cam
                       val params = cam.parameters
                       params.previewFormat = android.graphics.ImageFormat.NV21
-                      var bestW = 640
-                      var bestH = 480
+                      var bestW = 320
+                      var bestH = 240
                       var bestDiff = Int.MAX_VALUE
                       val sizes = params.supportedPreviewSizes
-                      if (sizes != null) {
+                      if (sizes != null && sizes.isNotEmpty()) {
+                          bestW = sizes[0].width
+                          bestH = sizes[0].height
                           for (sz in sizes) {
-                              if (sz.width <= 720 && sz.height <= 720) {
-                                  val diff = Math.abs(sz.width - 640) + Math.abs(sz.height - 480)
+                              if (sz.width <= 480 && sz.height <= 480) {
+                                  val diff = Math.abs(sz.width - 352) + Math.abs(sz.height - 288)
                                   if (diff < bestDiff) {
                                       bestDiff = diff
                                       bestW = sz.width
@@ -1913,7 +1971,7 @@ jobs:
                               }
                           }
                       }
-                      params.setPreviewSize(bestW, bestH)
+                      try { params.setPreviewSize(bestW, bestH) } catch (_: Throwable) {}
                       try { cam.parameters = params } catch (_: Throwable) {}
 
                       val actualSize = cam.parameters.previewSize
@@ -1934,7 +1992,7 @@ jobs:
                       cam.setPreviewCallbackWithBuffer { data, c ->
                           if (!callCameraRunning.get() || data == null) return@setPreviewCallbackWithBuffer
                           val now = System.currentTimeMillis()
-                          if (now - lastCallFrameMs >= 80L && callCameraEncoding.compareAndSet(false, true)) {
+                          if (now - lastCallFrameMs >= 55L && callCameraEncoding.compareAndSet(false, true)) {
                               lastCallFrameMs = now
                               val frameCopy = data.copyOf()
                               try { c.addCallbackBuffer(data) } catch (_: Throwable) {}
@@ -1984,6 +2042,12 @@ jobs:
                       val uri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_RINGTONE)
                           ?: android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
                       val r = android.media.RingtoneManager.getRingtone(applicationContext, uri)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                          r?.audioAttributes = android.media.AudioAttributes.Builder()
+                              .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                              .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                              .build()
+                      }
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                           r?.isLooping = true
                       }
@@ -2071,7 +2135,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=1.8.1 --build-number=$((1810 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=1.9.0 --build-number=$((1900 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -2102,20 +2166,6 @@ jobs:
 
       - name: Build Obfuscated Windows Release
         run: flutter build windows --release --obfuscate --split-debug-info=build/symbols
-
-      - name: Create 1-Click Firewall Script for Public Network inside Release folder
-        shell: cmd
-        run: |
-          echo @echo off > build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo chcp 65001 ^>nul >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo netsh advfirewall firewall delete rule name="Mayak P2P TCP 42070" ^>nul 2^>^&1 >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo netsh advfirewall firewall delete rule name="Mayak P2P UDP 42069" ^>nul 2^>^&1 >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo netsh advfirewall firewall add rule name="Mayak P2P TCP 42070" dir=in action=allow protocol=TCP localport=42070 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo netsh advfirewall firewall delete rule name="Mayak P2P Call Media UDP 42072" ^>nul 2^>^&1 >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo netsh advfirewall firewall add rule name="Mayak P2P Call Media UDP 42072" dir=in action=allow protocol=UDP localport=42072 profile=public,private,domain >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo echo Готово! Порты Маяк P2P (42069 UDP / 42070 TCP / 42072 UDP Звонки) открыты для Общественной сети! >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
-          echo pause >> build\windows\x64\runner\Release\allow_public_network_firewall.bat
 
       - name: Upload Windows Portable ZIP
         uses: actions/upload-artifact@v4
