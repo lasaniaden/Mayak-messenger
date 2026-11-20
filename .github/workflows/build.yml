@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v1.9.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.0.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "1.9.0"
+                  versionName = "2.0.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "1.9.0"
+                  versionName "2.0.0"
               }}
 
               packagingOptions {{
@@ -253,6 +253,8 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
               <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
               <uses-permission android:name="android.permission.CAMERA"/>
               <uses-permission android:name="android.permission.RECORD_AUDIO"/>
@@ -306,6 +308,8 @@ jobs:
                       android:name=".MainActivity"
                       android:exported="true"
                       android:launchMode="singleTop"
+                      android:showWhenLocked="true"
+                      android:turnScreenOn="true"
                       android:theme="@style/LaunchTheme"
                       android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
                       android:hardwareAccelerated="true"
@@ -539,6 +543,8 @@ jobs:
               private var videoCompletedFlag: Boolean = false
 
               private val connectedBleEndpoints = mutableSetOf<String>()
+              private val pendingBleEndpoints = mutableSetOf<String>()
+              private var pendingNearbyAutoStart: Boolean = false
               private val mainHandler = Handler(Looper.getMainLooper())
 
               // v1.8.0: Полнодуплексный аудио/видео движок звонков + рингтон и гудки
@@ -909,6 +915,21 @@ jobs:
                               }
                               "playCallEndTone" -> {
                                   playCallEndToneInternal()
+                                  result.success(true)
+                              }
+                              "playPttSound" -> {
+                                  val isStart = call.argument<Boolean>("isStart") ?: true
+                                  playPttSoundInternal(isStart)
+                                  result.success(true)
+                              }
+                              "showIncomingCallFullScreen" -> {
+                                  val caller = call.argument<String>("caller") ?: "Узел Маяк"
+                                  val mode = call.argument<String>("mode") ?: "voice"
+                                  showIncomingCallFullScreenInternal(caller, mode)
+                                  result.success(true)
+                              }
+                              "cancelIncomingCallNotification" -> {
+                                  cancelIncomingCallNotificationInternal()
                                   result.success(true)
                               }
                               else -> result.notImplemented()
@@ -1494,7 +1515,12 @@ jobs:
                   if (res != null) {
                       try {
                           if (requestCode == 7001) {
-                              res.success(getMissingNearbyPermissions().isEmpty())
+                              val ok = getMissingNearbyPermissions().isEmpty()
+                              res.success(ok)
+                              if (ok && pendingNearbyAutoStart && localNodeId.isNotEmpty()) {
+                                  pendingNearbyAutoStart = false
+                                  startNearbyInternalOnly()
+                              }
                           } else if (requestCode == 7005) {
                               val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
                               if (granted) {
@@ -1548,6 +1574,7 @@ jobs:
                       try {
                           mainHandler.post {
                               if (resolution.status.isSuccess) {
+                                  pendingBleEndpoints.remove(endpointId)
                                   connectedBleEndpoints.add(endpointId)
                                   methodChannel?.invokeMethod("onNearbyConnected", endpointId)
                               } else {
@@ -1571,8 +1598,12 @@ jobs:
               private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
                   override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
                       try {
-                          if (localNodeId.isNotEmpty() && localNodeId != info.endpointName && !connectedBleEndpoints.contains(endpointId)) {
-                              val delayMs = if (localNodeId < info.endpointName) 100L else 2200L
+                          if (localNodeId.isNotEmpty() &&
+                              localNodeId != info.endpointName &&
+                              !connectedBleEndpoints.contains(endpointId) &&
+                              !pendingBleEndpoints.contains(endpointId)) {
+                              pendingBleEndpoints.add(endpointId)
+                              val delayMs = if (localNodeId < info.endpointName) 120L else 1800L
                               mainHandler.postDelayed({
                                   try {
                                       if (!connectedBleEndpoints.contains(endpointId)) {
@@ -1580,9 +1611,27 @@ jobs:
                                               localNodeId,
                                               endpointId,
                                               connectionLifecycleCallback
-                                          )
+                                          ).addOnFailureListener {
+                                              pendingBleEndpoints.remove(endpointId)
+                                              // Retry once after 2.5s for MediaTek/Tecno/Xiaomi stacks
+                                              mainHandler.postDelayed({
+                                                  try {
+                                                      if (!connectedBleEndpoints.contains(endpointId)) {
+                                                          Nearby.getConnectionsClient(applicationContext).requestConnection(
+                                                              localNodeId,
+                                                              endpointId,
+                                                              connectionLifecycleCallback
+                                                          )
+                                                      }
+                                                  } catch (_: Throwable) {}
+                                              }, 2500L)
+                                          }
+                                      } else {
+                                          pendingBleEndpoints.remove(endpointId)
                                       }
-                                  } catch (_: Throwable) {}
+                                  } catch (_: Throwable) {
+                                      pendingBleEndpoints.remove(endpointId)
+                                  }
                               }, delayMs)
                           }
                       } catch (_: Throwable) {}
@@ -1591,6 +1640,7 @@ jobs:
                   override fun onEndpointLost(endpointId: String) {
                       try {
                           connectedBleEndpoints.remove(endpointId)
+                          pendingBleEndpoints.remove(endpointId)
                           mainHandler.post {
                               methodChannel?.invokeMethod("onNearbyDisconnected", endpointId)
                           }
@@ -1598,9 +1648,35 @@ jobs:
                   }
               }
 
+              private fun startNearbyInternalOnly() {
+                  try {
+                      val client = Nearby.getConnectionsClient(applicationContext)
+                      client.stopAdvertising()
+                      client.stopDiscovery()
+                      val advOptions = AdvertisingOptions.Builder()
+                          .setStrategy(Strategy.P2P_CLUSTER)
+                          .build()
+                      val discOptions = DiscoveryOptions.Builder()
+                          .setStrategy(Strategy.P2P_CLUSTER)
+                          .build()
+                      mainHandler.postDelayed({
+                          try {
+                              client.startAdvertising(localNodeId, serviceId, connectionLifecycleCallback, advOptions)
+                              client.startDiscovery(serviceId, endpointDiscoveryCallback, discOptions)
+                          } catch (_: Throwable) {}
+                      }, 450L)
+                  } catch (_: Throwable) {}
+              }
+
               private fun startNearbyMesh(nodeIdArg: String, srvIdArg: String, result: MethodChannel.Result) {
+                  localNodeId = nodeIdArg
+                  serviceId = srvIdArg
                   val missing = getMissingNearbyPermissions()
                   if (missing.isNotEmpty()) {
+                      pendingNearbyAutoStart = true
+                      try {
+                          ActivityCompat.requestPermissions(this, missing.toTypedArray(), 7001)
+                      } catch (_: Throwable) {}
                       result.success("MISSING_PERMISSIONS")
                       return
                   }
@@ -2114,6 +2190,133 @@ jobs:
                   }.start()
               }
 
+              private fun playPttSoundInternal(isStart: Boolean) {
+                  Thread {
+                      try {
+                          val sr = 16000
+                          val durMs = if (isStart) 110 else 150
+                          val samples = sr * durMs / 1000
+                          val pcm = ByteArray(samples * 2)
+                          val f1 = if (isStart) 1150.0 else 1750.0
+                          val f2 = if (isStart) 1600.0 else 1250.0
+                          for (i in 0 until samples) {
+                              val t = i.toDouble() / sr
+                              val freq = if (i < samples / 2) f1 else f2
+                              val env = if (i < 80) i / 80.0 else if (i > samples - 80) (samples - i) / 80.0 else 1.0
+                              val v = (Math.sin(2.0 * Math.PI * freq * t) * 0.35 * env * 32767.0).toInt().coerceIn(-32767, 32767)
+                              pcm[i * 2] = (v and 0xFF).toByte()
+                              pcm[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+                          }
+                          val minBuf = android.media.AudioTrack.getMinBufferSize(
+                              sr,
+                              android.media.AudioFormat.CHANNEL_OUT_MONO,
+                              android.media.AudioFormat.ENCODING_PCM_16BIT
+                          ).coerceAtLeast(pcm.size)
+                          val at = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                              android.media.AudioTrack.Builder()
+                                  .setAudioAttributes(
+                                      android.media.AudioAttributes.Builder()
+                                          .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                                          .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                          .build()
+                                  )
+                                  .setAudioFormat(
+                                      android.media.AudioFormat.Builder()
+                                          .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                                          .setSampleRate(sr)
+                                          .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                                          .build()
+                                  )
+                                  .setBufferSizeInBytes(minBuf)
+                                  .setTransferMode(android.media.AudioTrack.MODE_STATIC)
+                                  .build()
+                          } else {
+                              @Suppress("DEPRECATION")
+                              android.media.AudioTrack(
+                                  android.media.AudioManager.STREAM_MUSIC,
+                                  sr,
+                                  android.media.AudioFormat.CHANNEL_OUT_MONO,
+                                  android.media.AudioFormat.ENCODING_PCM_16BIT,
+                                  minBuf,
+                                  android.media.AudioTrack.MODE_STATIC
+                              )
+                          }
+                          at.write(pcm, 0, pcm.size)
+                          at.play()
+                          Thread.sleep((durMs + 60).toLong())
+                          at.release()
+                      } catch (_: Throwable) {}
+                  }.start()
+              }
+
+              private fun showIncomingCallFullScreenInternal(caller: String, mode: String) {
+                  try {
+                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                      val callChannelId = "mayak_calls_high_v1"
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          val ch = android.app.NotificationChannel(
+                              callChannelId,
+                              "Входящие звонки Маяк",
+                              android.app.NotificationManager.IMPORTANCE_HIGH
+                          ).apply {
+                              lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                              setBypassDnd(true)
+                              enableVibration(true)
+                          }
+                          nm.createNotificationChannel(ch)
+                      }
+                      // Wake screen when locked
+                      try {
+                          val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                          @Suppress("DEPRECATION")
+                          val wl = pm.newWakeLock(
+                              android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                                  android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                                  android.os.PowerManager.ON_AFTER_RELEASE,
+                              "mayak:incoming_call_wake"
+                          )
+                          wl.acquire(10000L)
+                      } catch (_: Throwable) {}
+
+                      val launchIntent = Intent(this, MainActivity::class.java).apply {
+                          flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                              Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                              Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                          putExtra("mayak_incoming_call", true)
+                      }
+                      val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                      } else {
+                          android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                      }
+                      val fullPi = android.app.PendingIntent.getActivity(this, 9901, launchIntent, piFlags)
+                      val title = if (mode == "video") "📹 Входящий видеозвонок" else "📞 Входящий звонок"
+                      val notif = NotificationCompat.Builder(this, callChannelId)
+                          .setSmallIcon(android.R.drawable.sym_call_incoming)
+                          .setContentTitle(title)
+                          .setContentText("Звонит $caller — нажмите, чтобы ответить")
+                          .setPriority(NotificationCompat.PRIORITY_MAX)
+                          .setCategory(NotificationCompat.CATEGORY_CALL)
+                          .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                          .setOngoing(true)
+                          .setAutoCancel(true)
+                          .setFullScreenIntent(fullPi, true)
+                          .setContentIntent(fullPi)
+                          .build()
+                      nm.notify(9901, notif)
+                      if (!isAppInForeground) {
+                          try { startActivity(launchIntent) } catch (_: Throwable) {}
+                      }
+                  } catch (_: Throwable) {}
+              }
+
+              private fun cancelIncomingCallNotificationInternal() {
+                  try {
+                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                      nm.cancel(9901)
+                  } catch (_: Throwable) {}
+              }
+
               override fun onDestroy() {
                   if (currentInstance == this) currentInstance = null
                   stopCallAudioInternal()
@@ -2135,7 +2338,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=1.9.0 --build-number=$((1900 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.0.0 --build-number=$((2000 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

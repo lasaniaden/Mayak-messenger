@@ -16,29 +16,31 @@ void main() {
 }
 
 class MayakTheme {
-  static const Color bgDeep = Color(0xFF0B0F19);
-  static const Color bgSurface = Color(0xFF131B2B);
-  static const Color bgElevated = Color(0xFF1C273D);
-  static const Color accentCyan = Color(0xFF06B6D4);
-  static const Color accentIndigo = Color(0xFF6366F1);
-  static const Color accentEmerald = Color(0xFF10B981);
-  static const Color accentAmber = Color(0xFFF59E0B);
-  static const Color accentRed = Color(0xFFEF4444);
+  // Telegram Night Dark Blue Palette (clean, high contrast, zero eye strain)
+  static const Color bgDeep = Color(0xFF0E1621);
+  static const Color bgSurface = Color(0xFF17212B);
+  static const Color bgElevated = Color(0xFF242F3D);
+  static const Color accentCyan = Color(0xFF5EB5F7);
+  static const Color accentIndigo = Color(0xFF3E78B2);
+  static const Color accentEmerald = Color(0xFF4DCD5E);
+  static const Color accentAmber = Color(0xFFF5A623);
+  static const Color accentRed = Color(0xFFE53935);
 
   static const LinearGradient primaryGradient = LinearGradient(
-    colors: [Color(0xFF4F46E5), Color(0xFF06B6D4)],
+    colors: [Color(0xFF3E78B2), Color(0xFF5EB5F7)],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );
 
   static const LinearGradient myBubbleGradient = LinearGradient(
-    colors: [Color(0xFF3730A3), Color(0xFF0E7490)],
+    colors: [Color(0xFF2B5278), Color(0xFF23476B)],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );
 }
 
 final GlobalKey<NavigatorState> mayakNavigatorKey = GlobalKey<NavigatorState>();
+MeshEngine? mayakGlobalEngine;
 
 class MayakMeshApp extends StatelessWidget {
   const MayakMeshApp({super.key});
@@ -47,7 +49,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v1.9',
+      title: 'Маяк P2P v2.0',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -60,10 +62,27 @@ class MayakMeshApp extends StatelessWidget {
         appBarTheme: const AppBarTheme(
           backgroundColor: MayakTheme.bgSurface,
           elevation: 0,
+          scrolledUnderElevation: 0,
           centerTitle: false,
+        ),
+        cardColor: MayakTheme.bgSurface,
+        dividerColor: const Color(0xFF1F2C38),
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: {
+            TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
+          },
         ),
         useMaterial3: true,
       ),
+      builder: (context, child) {
+        return Stack(
+          children: [
+            if (child != null) child,
+            const _MayakGlobalFloatingOverlay(),
+          ],
+        );
+      },
       home: const ChatsHomeScreen(),
     );
   }
@@ -117,6 +136,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
         }
       },
     );
+    mayakGlobalEngine = engine;
     engine.init();
   }
 
@@ -1288,6 +1308,16 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                     color: MayakTheme.accentAmber),
               ),
             ),
+          IconButton(
+            tooltip: 'Режим Рации (PTT)',
+            onPressed: () => engine.toggleWalkieTalkieMode(),
+            icon: Icon(
+              Icons.radio_rounded,
+              color: engine.isWalkieTalkieMode
+                  ? MayakTheme.accentEmerald
+                  : Colors.white70,
+            ),
+          ),
           IconButton(
             tooltip: 'Сканировать Wi-Fi сеть',
             onPressed: engine.isScanningSubnet
@@ -4714,6 +4744,9 @@ extension MeshEngineListenerExt on MeshEngine {
     _extraListeners.remove(cb);
   }
 
+  static void addStaticListener(VoidCallback cb) => _extraListeners.add(cb);
+  static void removeStaticListener(VoidCallback cb) => _extraListeners.remove(cb);
+
   static void notifyExtra() {
     for (final cb in _extraListeners.toList()) {
       cb();
@@ -5618,6 +5651,7 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
 }
 
 class CallSessionScreen extends StatefulWidget {
+  static bool isFullScreenOpen = false;
   final MeshEngine engine;
   const CallSessionScreen({super.key, required this.engine});
 
@@ -5634,10 +5668,22 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   void _safeClose() {
     if (_hasPopped) return;
     _hasPopped = true;
+    CallSessionScreen.isFullScreenOpen = false;
     engine.removeListenerState(_onUpdate);
     if (mounted && Navigator.of(context).canPop()) {
       Navigator.of(context).pop();
     }
+  }
+
+  void _minimizeToChat() {
+    if (_hasPopped) return;
+    _hasPopped = true;
+    CallSessionScreen.isFullScreenOpen = false;
+    engine.removeListenerState(_onUpdate);
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
+    MeshEngineListenerExt.notifyExtra();
   }
 
   void _onUpdate() {
@@ -5652,6 +5698,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
   @override
   void initState() {
     super.initState();
+    CallSessionScreen.isFullScreenOpen = true;
     engine.addListenerState(_onUpdate);
     _secTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && engine.isCallAccepted) {
@@ -5662,6 +5709,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
 
   @override
   void dispose() {
+    CallSessionScreen.isFullScreenOpen = false;
     engine.removeListenerState(_onUpdate);
     _secTimer?.cancel();
     super.dispose();
@@ -5677,9 +5725,15 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     final hasRemoteVideo = isVideo &&
         !engine.remoteCallVideoMuted &&
         engine.remoteVideoFrameBytes != null;
+    final hasLocalPreview = isVideo &&
+        !engine.isCallVideoMuted &&
+        engine.localVideoFrameBytes != null;
 
     return PopScope(
       canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _minimizeToChat();
+      },
       child: Scaffold(
         backgroundColor: MayakTheme.bgDeep,
         body: Stack(
@@ -5696,12 +5750,19 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Container(
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 300),
                       width: 118,
                       height: 118,
                       decoration: BoxDecoration(
                         gradient: MayakTheme.primaryGradient,
                         shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: MayakTheme.accentCyan.withOpacity(0.32),
+                            blurRadius: 28,
+                          ),
+                        ],
                       ),
                       child: Icon(
                         isVideo
@@ -5735,7 +5796,47 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                   ],
                 ),
               ),
-            // Верхняя плашка статуса
+            // Своя фронтальная камера (PiP self-view в правом верхнем углу)
+            if (hasLocalPreview)
+              Positioned(
+                top: 86,
+                right: 14,
+                child: SafeArea(
+                  child: Container(
+                    width: 108,
+                    height: 148,
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                          color: Colors.white.withOpacity(0.65), width: 1.8),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black54,
+                          blurRadius: 14,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: Transform(
+                        alignment: Alignment.center,
+                        transform: (Platform.isAndroid &&
+                                engine.isCallFrontCamera)
+                            ? Matrix4.rotationY(pi)
+                            : Matrix4.identity(),
+                        child: Image.memory(
+                          engine.localVideoFrameBytes!,
+                          gaplessPlayback: true,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            // Верхняя плашка статуса + кнопка «В чат» (свернуть звонок)
             Positioned(
               top: 0,
               left: 0,
@@ -5743,56 +5844,79 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
               child: SafeArea(
                 child: Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   child: Row(
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.55),
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.lock_rounded,
-                                size: 14, color: MayakTheme.accentEmerald),
-                            const SizedBox(width: 6),
-                            Text(
-                              engine.isCallAccepted
-                                  ? '$peerName • $mm:$ss • ${engine.activeCallTransport}'
-                                  : '$peerName • Гудки...',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                              ),
+                      Material(
+                        color: Colors.black.withOpacity(0.55),
+                        borderRadius: BorderRadius.circular(20),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(20),
+                          onTap: _minimizeToChat,
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 7),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.keyboard_arrow_down_rounded,
+                                    color: Colors.white, size: 20),
+                                SizedBox(width: 4),
+                                Text('В чат',
+                                    style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600)),
+                              ],
                             ),
-                          ],
+                          ),
                         ),
                       ),
-                      const Spacer(),
-                      if (engine.remoteCallMicMuted)
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 7),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.55),
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.lock_rounded,
+                                  size: 14, color: MayakTheme.accentEmerald),
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  engine.isCallAccepted
+                                      ? '$peerName • $mm:$ss • ${engine.activeCallTransport}'
+                                      : '$peerName • Гудки...',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (engine.remoteCallMicMuted) ...[
+                        const SizedBox(width: 6),
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 6),
+                              horizontal: 8, vertical: 6),
                           decoration: BoxDecoration(
                             color: MayakTheme.accentRed.withOpacity(0.85),
                             borderRadius: BorderRadius.circular(16),
                           ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.mic_off_rounded,
-                                  size: 14, color: Colors.white),
-                              SizedBox(width: 4),
-                              Text('Микро выкл',
-                                  style: TextStyle(
-                                      color: Colors.white, fontSize: 11)),
-                            ],
-                          ),
+                          child: const Icon(Icons.mic_off_rounded,
+                              size: 14, color: Colors.white),
                         ),
+                      ],
                     ],
                   ),
                 ),
@@ -5805,12 +5929,12 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
               bottom: 0,
               child: SafeArea(
                 child: Container(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 26),
+                  padding: const EdgeInsets.fromLTRB(12, 14, 12, 24),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       colors: [
                         Colors.transparent,
-                        Colors.black.withOpacity(0.82),
+                        Colors.black.withOpacity(0.85),
                       ],
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
@@ -5837,7 +5961,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            engine.isCallMicMuted ? 'Микро выкл' : 'Микрофон',
+                            engine.isCallMicMuted ? 'Выкл' : 'Микро',
                             style: const TextStyle(
                                 color: Colors.white70, fontSize: 11),
                           ),
@@ -5864,7 +5988,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                             ),
                             const SizedBox(height: 6),
                             Text(
-                              engine.isCallSpeakerOn ? 'Громкая' : 'Динамик',
+                              engine.isCallSpeakerOn ? 'Громкая' : 'Ухо',
                               style: const TextStyle(
                                   color: Colors.white70, fontSize: 11),
                             ),
@@ -5889,9 +6013,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                             ),
                             const SizedBox(height: 6),
                             Text(
-                              engine.isCallVideoMuted
-                                  ? 'Камера выкл'
-                                  : 'Камера',
+                              engine.isCallVideoMuted ? 'Выкл' : 'Камера',
                               style: const TextStyle(
                                   color: Colors.white70, fontSize: 11),
                             ),
@@ -5920,7 +6042,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                               Platform.isWindows
                                   ? (engine.windowsVideoSource == 'camera'
                                       ? 'Экран'
-                                      : 'Веб-камера')
+                                      : 'Вебка')
                                   : 'Смена',
                               style: const TextStyle(
                                   color: Colors.white70, fontSize: 11),
@@ -5941,7 +6063,7 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                                 color: Colors.white, size: 32),
                           ),
                           const SizedBox(height: 6),
-                          const Text('Завершить',
+                          const Text('Сброс',
                               style: TextStyle(
                                   color: Colors.white70, fontSize: 11)),
                         ],
@@ -5954,6 +6076,326 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _MayakGlobalFloatingOverlay extends StatefulWidget {
+  const _MayakGlobalFloatingOverlay();
+
+  @override
+  State<_MayakGlobalFloatingOverlay> createState() =>
+      _MayakGlobalFloatingOverlayState();
+}
+
+class _MayakGlobalFloatingOverlayState
+    extends State<_MayakGlobalFloatingOverlay> {
+  double _pipTop = 92;
+  double _pipRight = 12;
+
+  void _onEngineTick() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    MeshEngineListenerExt.addStaticListener(_onEngineTick);
+  }
+
+  @override
+  void dispose() {
+    MeshEngineListenerExt.removeStaticListener(_onEngineTick);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final engine = mayakGlobalEngine;
+    if (engine == null) return const SizedBox.shrink();
+
+    final showMiniCall =
+        engine.activeCallPeerId != null && !CallSessionScreen.isFullScreenOpen;
+    final showPttBar = (engine.isWalkieTalkieMode ||
+            engine.pttActiveSpeakerName != null) &&
+        engine.activeCallPeerId == null;
+
+    if (!showMiniCall && !showPttBar) return const SizedBox.shrink();
+
+    return Stack(
+      children: [
+        // 1. Плавающее мини-окно активного звонка (можно сидеть в чате и вернуться по нажатию!)
+        if (showMiniCall)
+          Positioned(
+            top: _pipTop,
+            right: _pipRight,
+            child: GestureDetector(
+              onPanUpdate: (d) {
+                setState(() {
+                  _pipTop = (_pipTop + d.delta.dy).clamp(48.0, 520.0);
+                  _pipRight = (_pipRight - d.delta.dx).clamp(8.0, 260.0);
+                });
+              },
+              onTap: () {
+                final nav = mayakNavigatorKey.currentState;
+                if (nav != null && !CallSessionScreen.isFullScreenOpen) {
+                  nav.push(
+                    MaterialPageRoute(
+                      builder: (_) => CallSessionScreen(engine: engine),
+                    ),
+                  );
+                }
+              },
+              child: Material(
+                color: Colors.transparent,
+                elevation: 10,
+                borderRadius: BorderRadius.circular(18),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  width: engine.activeCallMode == 'video' &&
+                          engine.remoteVideoFrameBytes != null
+                      ? 124
+                      : 215,
+                  padding: engine.activeCallMode == 'video' &&
+                          engine.remoteVideoFrameBytes != null
+                      ? const EdgeInsets.all(4)
+                      : const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: MayakTheme.bgSurface.withOpacity(0.95),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                        color: MayakTheme.accentEmerald, width: 1.6),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black54, blurRadius: 14),
+                    ],
+                  ),
+                  child: engine.activeCallMode == 'video' &&
+                          engine.remoteVideoFrameBytes != null
+                      ? Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(13),
+                              child: SizedBox(
+                                width: 116,
+                                height: 146,
+                                child: Image.memory(
+                                  engine.remoteVideoFrameBytes!,
+                                  gaplessPlayback: true,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                InkWell(
+                                  onTap: () => engine.toggleCallMicMute(),
+                                  child: Icon(
+                                    engine.isCallMicMuted
+                                        ? Icons.mic_off_rounded
+                                        : Icons.mic_rounded,
+                                    size: 18,
+                                    color: engine.isCallMicMuted
+                                        ? MayakTheme.accentAmber
+                                        : Colors.white,
+                                  ),
+                                ),
+                                InkWell(
+                                  onTap: () => engine.endActiveCall(),
+                                  child: const Icon(Icons.call_end_rounded,
+                                      size: 18, color: MayakTheme.accentRed),
+                                ),
+                              ],
+                            ),
+                          ],
+                        )
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 34,
+                              height: 34,
+                              decoration: const BoxDecoration(
+                                color: MayakTheme.accentEmerald,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.phone_in_talk_rounded,
+                                  color: Colors.white, size: 18),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    engine.knownContacts[
+                                                engine.activeCallPeerId]
+                                            ?.displayTitle ??
+                                        'Звонок',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 12),
+                                  ),
+                                  const Text('Нажми, чтобы вернуть',
+                                      style: TextStyle(
+                                          color: MayakTheme.accentEmerald,
+                                          fontSize: 10)),
+                                ],
+                              ),
+                            ),
+                            InkWell(
+                              onTap: () => engine.endActiveCall(),
+                              child: const Padding(
+                                padding: EdgeInsets.all(4),
+                                child: Icon(Icons.call_end_rounded,
+                                    color: MayakTheme.accentRed, size: 20),
+                              ),
+                            ),
+                          ],
+                        ),
+                ),
+              ),
+            ),
+          ),
+        // 2. Глобальная панель Рации (PTT) — работает поверх любого экрана!
+        if (showPttBar)
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: 74,
+            child: SafeArea(
+              child: Material(
+                color: Colors.transparent,
+                elevation: 12,
+                borderRadius: BorderRadius.circular(20),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: engine.isPttTransmitting
+                        ? const Color(0xFF3A1216)
+                        : (engine.pttActiveSpeakerName != null
+                            ? const Color(0xFF103324)
+                            : MayakTheme.bgSurface.withOpacity(0.96)),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: engine.isPttTransmitting
+                          ? MayakTheme.accentRed
+                          : (engine.pttActiveSpeakerName != null
+                              ? MayakTheme.accentEmerald
+                              : MayakTheme.accentCyan.withOpacity(0.6)),
+                      width: 1.5,
+                    ),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black54, blurRadius: 16),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        engine.isPttTransmitting
+                            ? Icons.podcasts_rounded
+                            : Icons.radio_rounded,
+                        color: engine.isPttTransmitting
+                            ? MayakTheme.accentRed
+                            : (engine.pttActiveSpeakerName != null
+                                ? MayakTheme.accentEmerald
+                                : MayakTheme.accentCyan),
+                        size: 26,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              engine.isPttTransmitting
+                                  ? 'В ЭФИРЕ (передача)...'
+                                  : (engine.pttActiveSpeakerName != null
+                                      ? 'Говорит: ${engine.pttActiveSpeakerName}'
+                                      : 'Рация (PTT) • Общий эфир'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                            Text(
+                              engine.isPttTransmitting
+                                  ? 'Отпусти кнопку для Roger Beep'
+                                  : 'Удерживай кнопку, чтобы говорить',
+                              style: const TextStyle(
+                                  color: Colors.white60, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Listener(
+                        onPointerDown: (_) => engine.startPttTransmit(),
+                        onPointerUp: (_) => engine.stopPttTransmit(),
+                        onPointerCancel: (_) => engine.stopPttTransmit(),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 120),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: engine.isPttTransmitting
+                                ? MayakTheme.accentRed
+                                : MayakTheme.accentCyan,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                engine.isPttTransmitting
+                                    ? Icons.mic_rounded
+                                    : Icons.mic_none_rounded,
+                                color: engine.isPttTransmitting
+                                    ? Colors.white
+                                    : Colors.black,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                engine.isPttTransmitting ? 'ГОВОРЮ' : 'PTT',
+                                style: TextStyle(
+                                  color: engine.isPttTransmitting
+                                      ? Colors.white
+                                      : Colors.black,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.close_rounded,
+                            color: Colors.white54, size: 20),
+                        onPressed: () => engine.toggleWalkieTalkieMode(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

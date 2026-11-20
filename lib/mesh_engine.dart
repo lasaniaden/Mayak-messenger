@@ -437,6 +437,21 @@ class WindowsPcmAudioBridge {
     });
   }
 
+  static void playPttSound(bool isStart) {
+    if (!Platform.isWindows) return;
+    if (isStart) {
+      playPcm(_synthTone(1150.0, 0.0, 55, amp: 0.26));
+      Future.delayed(const Duration(milliseconds: 55), () {
+        playPcm(_synthTone(1600.0, 0.0, 60, amp: 0.26));
+      });
+    } else {
+      playPcm(_synthTone(1750.0, 0.0, 65, amp: 0.26));
+      Future.delayed(const Duration(milliseconds: 65), () {
+        playPcm(_synthTone(1250.0, 0.0, 80, amp: 0.26));
+      });
+    }
+  }
+
   static void stopTones() {
     _toneTimer?.cancel();
     _toneTimer = null;
@@ -1158,7 +1173,15 @@ class MeshEngine {
   StreamSubscription<String>? _winAudioSub;
   Timer? _udpPunchTimer;
   Uint8List? remoteVideoFrameBytes;
+  Uint8List? localVideoFrameBytes;
+  int _lastLocalPreviewUiMs = 0;
   String callStatusText = '';
+  // v2.0.0: Режим Рации (PTT) — работает из любого экрана по Wi-Fi и Bluetooth
+  bool isWalkieTalkieMode = false;
+  bool isPttTransmitting = false;
+  String pttChannelTarget = 'ALL'; // 'ALL' или nodeId
+  String? pttActiveSpeakerName;
+  Timer? _pttRxTimeoutTimer;
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -1963,6 +1986,17 @@ class MeshEngine {
   }
 
   void _onLocalCapturedPcm(Uint8List pcm) {
+    if (isPttTransmitting && activeCallPeerId == null) {
+      final compressed = _encodePcm16kToUlaw8k(pcm);
+      final line = jsonEncode({
+        'ptt_bin': base64Encode(compressed),
+        'sn': nickname,
+        'sid': nodeId,
+        't': pttChannelTarget,
+      });
+      _broadcastRawLineToPttTargets(line);
+      return;
+    }
     if (activeCallPeerId == null || !isCallAccepted || isCallMicMuted) return;
     _callAudioSeq++;
     if (_shouldUseRelayCallTransport) {
@@ -1980,10 +2014,16 @@ class MeshEngine {
         !isCallAccepted ||
         activeCallMode != 'video' ||
         isCallVideoMuted ||
-        jpeg.isEmpty ||
-        _isSendingVideoFrame) {
+        jpeg.isEmpty) {
       return;
     }
+    localVideoFrameBytes = jpeg;
+    final nowUi = DateTime.now().millisecondsSinceEpoch;
+    if (nowUi - _lastLocalPreviewUiMs >= 90) {
+      _lastLocalPreviewUiMs = nowUi;
+      onStateChanged();
+    }
+    if (_isSendingVideoFrame) return;
     final useRelay = _shouldUseRelayCallTransport;
     if (useRelay) {
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -2037,6 +2077,142 @@ class MeshEngine {
     onStateChanged();
   }
 
+  // ==================== v2.0.0: РЕЖИМ РАЦИИ (PTT) ====================
+  Future<void> _playPttBeep(bool isStart) async {
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel.invokeMethod('playPttSound', {'isStart': isStart});
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.playPttSound(isStart);
+    }
+  }
+
+  void _broadcastRawLineToPttTargets(String line) {
+    final target = pttChannelTarget;
+    for (final entry in _tcpPeers.entries.toList()) {
+      if (target == 'ALL' || entry.value == target) {
+        _sendTcpLine(entry.key, line);
+      }
+    }
+    for (final entry in _blePeers.entries.toList()) {
+      if (target == 'ALL' || entry.value == target) {
+        unawaited(_sendBleLine(entry.key, line));
+      }
+    }
+  }
+
+  void toggleWalkieTalkieMode({String? targetPeerId}) {
+    if (targetPeerId != null) {
+      pttChannelTarget = targetPeerId;
+      isWalkieTalkieMode = true;
+    } else {
+      isWalkieTalkieMode = !isWalkieTalkieMode;
+      if (!isWalkieTalkieMode && isPttTransmitting) {
+        unawaited(stopPttTransmit());
+      }
+    }
+    onStateChanged();
+  }
+
+  void setPttChannelTarget(String target) {
+    pttChannelTarget = target;
+    onStateChanged();
+  }
+
+  Future<void> startPttTransmit() async {
+    if (activeCallPeerId != null || isPttTransmitting) return;
+    isPttTransmitting = true;
+    onStateChanged();
+    await _playPttBeep(true);
+    if (Platform.isAndroid) {
+      try {
+        await _nativeChannel
+            .invokeMethod('setCallSpeaker', {'enabled': true});
+        await _nativeChannel.invokeMethod('startCallAudio');
+        await _nativeChannel
+            .invokeMethod('setCallAudioMuted', {'muted': false});
+      } catch (_) {}
+    } else if (Platform.isWindows) {
+      WindowsPcmAudioBridge.startFullDuplex(_onLocalCapturedPcm);
+      WindowsPcmAudioBridge.setMicMuted(false);
+    }
+  }
+
+  Future<void> stopPttTransmit() async {
+    if (!isPttTransmitting) return;
+    isPttTransmitting = false;
+    final endLine = jsonEncode({
+      'ptt_end': nodeId,
+      'sn': nickname,
+      't': pttChannelTarget,
+    });
+    _broadcastRawLineToPttTargets(endLine);
+    if (activeCallPeerId == null) {
+      if (Platform.isAndroid) {
+        try {
+          await _nativeChannel.invokeMethod('stopCallAudio');
+        } catch (_) {}
+      } else if (Platform.isWindows) {
+        WindowsPcmAudioBridge.stopFullDuplex();
+      }
+    }
+    await _playPttBeep(false);
+    onStateChanged();
+  }
+
+  Future<void> _onIncomingPttChunk(Map<String, dynamic> map) async {
+    if (activeCallPeerId != null || isPttTransmitting) return;
+    final target = (map['t'] ?? 'ALL').toString();
+    if (target != 'ALL' && target != nodeId) return;
+    final b64 = (map['ptt_bin'] ?? '').toString();
+    if (b64.isEmpty) return;
+    final speaker = (map['sn'] ?? 'Узел').toString();
+    final isFirst = pttActiveSpeakerName == null;
+    pttActiveSpeakerName = speaker;
+    if (isFirst) {
+      unawaited(_playPttBeep(true));
+      if (Platform.isAndroid) {
+        try {
+          await _nativeChannel
+              .invokeMethod('setCallSpeaker', {'enabled': true});
+          await _nativeChannel.invokeMethod('startCallAudio');
+          await _nativeChannel
+              .invokeMethod('setCallAudioMuted', {'muted': true});
+        } catch (_) {}
+      }
+      onStateChanged();
+    }
+    try {
+      final ulaw = base64Decode(b64);
+      final pcm = _decodeUlaw8kToPcm16k(ulaw);
+      if (Platform.isAndroid) {
+        unawaited(_nativeChannel.invokeMethod('playCallAudioPcm', pcm));
+      } else if (Platform.isWindows) {
+        WindowsPcmAudioBridge.playPcm(pcm);
+      }
+    } catch (_) {}
+    _pttRxTimeoutTimer?.cancel();
+    _pttRxTimeoutTimer = Timer(const Duration(milliseconds: 900), () {
+      _finishIncomingPtt();
+    });
+  }
+
+  void _finishIncomingPtt() {
+    _pttRxTimeoutTimer?.cancel();
+    if (pttActiveSpeakerName == null) return;
+    pttActiveSpeakerName = null;
+    if (activeCallPeerId == null && !isPttTransmitting) {
+      if (Platform.isAndroid) {
+        unawaited(_nativeChannel.invokeMethod('stopCallAudio'));
+      } else if (Platform.isWindows) {
+        WindowsPcmAudioBridge.stopFullDuplex();
+      }
+      unawaited(_playPttBeep(false));
+    }
+    onStateChanged();
+  }
+
   Future<void> _startCallTonesOutgoing() async {
     if (Platform.isAndroid) {
       try {
@@ -2057,10 +2233,14 @@ class MeshEngine {
     }
   }
 
-  Future<void> _startIncomingRingtone() async {
+  Future<void> _startIncomingRingtone({String caller = 'Узел Маяк', String mode = 'voice'}) async {
     if (Platform.isAndroid) {
       try {
         await _nativeChannel.invokeMethod('startIncomingRingtone');
+        await _nativeChannel.invokeMethod('showIncomingCallFullScreen', {
+          'caller': caller,
+          'mode': mode,
+        });
       } catch (_) {}
     } else if (Platform.isWindows) {
       WindowsPcmAudioBridge.startIncomingRingtone();
@@ -2071,6 +2251,7 @@ class MeshEngine {
     if (Platform.isAndroid) {
       try {
         await _nativeChannel.invokeMethod('stopIncomingRingtone');
+        await _nativeChannel.invokeMethod('cancelIncomingCallNotification');
       } catch (_) {}
     } else if (Platform.isWindows) {
       WindowsPcmAudioBridge.stopTones();
@@ -2521,6 +2702,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     isCallVideoMuted = !isCallVideoMuted;
     if (isCallAccepted) {
       if (isCallVideoMuted) {
+        localVideoFrameBytes = null;
         if (Platform.isAndroid) {
           try {
             await _nativeChannel.invokeMethod('stopCallCamera');
@@ -2575,6 +2757,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     remoteCallMicMuted = false;
     remoteCallVideoMuted = (mode != 'video');
     remoteVideoFrameBytes = null;
+    localVideoFrameBytes = null;
     _activeCallId = _randomHex(12);
     _activeCallPeerIp = _resolvePeerIp(peerId);
     _activeCallPeerUdpPort = callMediaUdpPort;
@@ -2621,6 +2804,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     remoteCallMicMuted = false;
     remoteCallVideoMuted = (activeCallMode != 'video');
     remoteVideoFrameBytes = null;
+    localVideoFrameBytes = null;
     _activeCallId = _incomingCallId.isNotEmpty ? _incomingCallId : _randomHex(12);
     _activeCallPeerIp = _resolvePeerIp(pid);
     _activeCallPeerUdpPort = _incomingCallUdpPort;
@@ -2682,6 +2866,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     remoteCallMicMuted = false;
     remoteCallVideoMuted = false;
     remoteVideoFrameBytes = null;
+    localVideoFrameBytes = null;
     _activeCallMediaKey = null;
     _activeCallId = '';
     callStatusText = '';
@@ -5405,6 +5590,14 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     try {
       final map = jsonDecode(line) as Map<String, dynamic>;
 
+      if (map.containsKey('ptt_bin')) {
+        unawaited(_onIncomingPttChunk(map));
+        return;
+      }
+      if (map.containsKey('ptt_end')) {
+        _finishIncomingPtt();
+        return;
+      }
       if (map.containsKey('call_bin')) {
         final b64 = (map['call_bin'] ?? '').toString();
         if (b64.isNotEmpty) {
@@ -6276,7 +6469,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         _incomingCallId = (envelope['callId'] ?? '').toString();
         _incomingCallUdpPort =
             (envelope['udpPort'] as num?)?.toInt() ?? callMediaUdpPort;
-        unawaited(_startIncomingRingtone());
+        unawaited(_startIncomingRingtone(caller: contact.displayTitle, mode: mode));
         unawaited(_triggerIncomingNotification(
           senderId,
           contact.displayTitle,
@@ -6308,6 +6501,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           remoteCallVideoMuted = envelope['videoMuted'] == true;
           if (remoteCallVideoMuted) {
             remoteVideoFrameBytes = null;
+    localVideoFrameBytes = null;
           }
         }
       } else if (kind == 'CALL_REJECT') {
@@ -6315,6 +6509,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           activeCallPeerId = null;
           isCallAccepted = false;
           remoteVideoFrameBytes = null;
+    localVideoFrameBytes = null;
           _activeCallMediaKey = null;
           callStatusText = 'Вызов отклонён';
           unawaited(_stopCallTonesOutgoing());
@@ -6331,6 +6526,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           remoteCallMicMuted = false;
           remoteCallVideoMuted = false;
           remoteVideoFrameBytes = null;
+    localVideoFrameBytes = null;
           _activeCallMediaKey = null;
           callStatusText = '';
           unawaited(_stopCallTonesOutgoing());
