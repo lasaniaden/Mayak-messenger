@@ -50,7 +50,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.5',
+      title: 'Маяк P2P v2.5.2',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -6905,7 +6905,7 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
             ListTile(
               leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
               title: const Text('О приложении'),
-              subtitle: const Text('Маяк v2.1.0 • Шифрование и справка',
+              subtitle: const Text('Маяк v2.5.2 • Шифрование и справка',
                   style: TextStyle(fontSize: 12, color: Colors.white54)),
               trailing: const Icon(Icons.chevron_right_rounded,
                   color: Colors.white38),
@@ -6922,6 +6922,33 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
               },
             ),
           ]),
+          const SizedBox(height: 16),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            child: SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: MayakTheme.accentRed,
+                  backgroundColor: const Color(0xFF120808),
+                  side: const BorderSide(color: Color(0x55EF4444), width: 1),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                ),
+                icon: const Icon(Icons.power_settings_new_rounded, size: 19),
+                label: const Text(
+                  'Полностью отключить Маяк и выйти',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                onPressed: () async {
+                  await engine.fullShutdownAndExit();
+                  exit(0);
+                },
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -7338,7 +7365,7 @@ class _AboutMayakScreenState extends State<AboutMayakScreen> {
               child: const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 child: Text(
-                  'Версия 2.1.0 • Автономный P2P & Mesh мессенджер',
+                  'Версия 2.5.2 • Автономный P2P & Mesh мессенджер',
                   style: TextStyle(fontSize: 12, color: Colors.white54),
                 ),
               ),
@@ -7822,7 +7849,7 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                 border: Border.all(color: Colors.white54),
               ),
               child: Text(
-                _is3dMode ? '3D ЗДАНИЯ' : '2D',
+                _is3dMode ? 'Карта в перспективе' : '2D карта',
                 style: TextStyle(
                   color: _is3dMode ? Colors.black : Colors.white,
                   fontWeight: FontWeight.bold,
@@ -7944,6 +7971,7 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                                     if (baseTy + dy >= 0 &&
                                         baseTy + dy <= maxTile)
                                       Positioned(
+                                        key: ValueKey('t_${tileZ}_${((baseTx + dx) % (1 << tileZ) + (1 << tileZ)) % (1 << tileZ)}_${baseTy + dy}'),
                                         left: offX + dx * tilePx,
                                         top: offY + dy * tilePx,
                                         width: tilePx + 0.5,
@@ -7951,6 +7979,7 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                                         child: Image.network(
                                           'https://tile.openstreetmap.org/$tileZ/${((baseTx + dx) % (1 << tileZ) + (1 << tileZ)) % (1 << tileZ)}/${baseTy + dy}.png',
                                           fit: BoxFit.cover,
+                                          cacheWidth: 256,
                                           gaplessPlayback: true,
                                           headers: const {
                                             'User-Agent': 'MayakP2PMesh/2.5',

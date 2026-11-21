@@ -2475,10 +2475,41 @@ class MeshEngine {
     return 'Высота н/д';
   }
 
+  Future<void> fullShutdownAndExit() async {
+    try {
+      await _saveContactsAndChats();
+    } catch (_) {}
+    try {
+      if (activeCallPeerId != null) {
+        await endActiveCall();
+      }
+      await _stopCallMediaPipelines();
+      await stopAudioPlayback();
+    } catch (_) {}
+    try {
+      _winAudioProc?.kill();
+    } catch (_) {}
+    try {
+      if (Platform.isAndroid) {
+        await _nativeChannel.invokeMethod('stopNearby');
+        await _nativeChannel.invokeMethod('stopBackgroundService');
+      }
+    } catch (_) {}
+    try {
+      for (final s in _tcpPeers.keys.toList()) {
+        s.destroy();
+      }
+      _tcpPeers.clear();
+      await _tcpServer?.close();
+      _callUdpSocket?.close();
+    } catch (_) {}
+  }
+
   Future<void> toggleLocationSharing() async {
     isLocationSharingEnabled = !isLocationSharingEnabled;
+    onStateChanged();
     if (isLocationSharingEnabled) {
-      await pollAndBroadcastLocation();
+      unawaited(pollAndBroadcastLocation());
       _locationPollTimer?.cancel();
       _locationPollTimer = Timer.periodic(
         const Duration(seconds: 6),
@@ -2487,9 +2518,8 @@ class MeshEngine {
     } else {
       _locationPollTimer?.cancel();
       _locationPollTimer = null;
-      await _broadcastLocationStop();
+      unawaited(_broadcastLocationStop());
     }
-    onStateChanged();
   }
 
   Future<void> setManualMapAnchor(double lat, double lon) async {
