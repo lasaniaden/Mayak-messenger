@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.5.1
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.5.2
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.5.1"
+                  versionName = "2.5.2"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.5.1"
+                  versionName "2.5.2"
               }}
 
               packagingOptions {{
@@ -302,14 +302,12 @@ jobs:
                       android:name=".MayakBackgroundService"
                       android:enabled="true"
                       android:exported="false"
-                      android:foregroundServiceType="dataSync|connectedDevice" />
+                      android:foregroundServiceType="dataSync" />
 
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
                       android:launchMode="singleTop"
-                      android:showWhenLocked="true"
-                      android:turnScreenOn="true"
                       android:theme="@style/LaunchTheme"
                       android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
                       android:hardwareAccelerated="true"
@@ -2531,6 +2529,14 @@ jobs:
 
               private fun showIncomingCallFullScreenInternal(caller: String, mode: String) {
                   try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                          runOnUiThread {
+                              try {
+                                  setShowWhenLocked(true)
+                                  setTurnScreenOn(true)
+                              } catch (_: Throwable) {}
+                          }
+                      }
                       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
                       val callChannelId = "mayak_calls_high_v1"
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -2592,6 +2598,14 @@ jobs:
 
               private fun cancelIncomingCallNotificationInternal() {
                   try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                          runOnUiThread {
+                              try {
+                                  setShowWhenLocked(false)
+                                  setTurnScreenOn(false)
+                              } catch (_: Throwable) {}
+                          }
+                      }
                       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
                       nm.cancel(9901)
                   } catch (_: Throwable) {}
@@ -2661,7 +2675,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.5.1 --build-number=$((2510 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.5.2 --build-number=$((2520 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
