@@ -1202,6 +1202,9 @@ class MeshEngine {
   bool isWalkieTalkieMode = false;
   bool isPttTransmitting = false;
   String pttChannelTarget = 'ALL'; // 'ALL' или nodeId
+  bool pttSoundsEnabled = true;
+  bool pttAutoReceiveEnabled = true;
+  bool pttLatchMode = false; // false = удерживать, true = нажал-говоришь
   String? pttActiveSpeakerName;
   Timer? _pttRxTimeoutTimer;
   // v2.1.0: Security hardening (PTT E2EE, call replay window, DoS cap) + Saved Notes & Disappearing timer
@@ -2211,6 +2214,7 @@ class MeshEngine {
 
   // ==================== v2.0.0: РЕЖИМ РАЦИИ (PTT) ====================
   Future<void> _playPttBeep(bool isStart) async {
+    if (!pttSoundsEnabled) return;
     if (Platform.isAndroid) {
       try {
         await _nativeChannel.invokeMethod('playPttSound', {'isStart': isStart});
@@ -2317,6 +2321,35 @@ class MeshEngine {
   void setPttChannelTarget(String target) {
     pttChannelTarget = target;
     onStateChanged();
+  }
+
+  void setPttSoundsEnabled(bool v) {
+    pttSoundsEnabled = v;
+    onStateChanged();
+  }
+
+  void setPttAutoReceiveEnabled(bool v) {
+    pttAutoReceiveEnabled = v;
+    onStateChanged();
+  }
+
+  void setPttLatchMode(bool v) {
+    pttLatchMode = v;
+    if (!v && isPttTransmitting) {
+      unawaited(stopPttTransmit());
+    }
+    onStateChanged();
+  }
+
+  Future<bool> requestLocationPermissionForMap() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _nativeChannel
+              .invokeMethod<bool>('requestLocationPermission') ??
+          false;
+    } catch (_) {
+      return false;
+    }
   }
 
   List<Map<String, String>> getPttChannels() {
@@ -2613,7 +2646,7 @@ class MeshEngine {
   }
 
   Future<void> startPttTransmit() async {
-    if (activeCallPeerId != null || isPttTransmitting) return;
+    if (activeCallPeerId != null || isPttTransmitting || !pttAutoReceiveEnabled) return;
     isPttTransmitting = true;
     onStateChanged();
     await _playPttBeep(true);

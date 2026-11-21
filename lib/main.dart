@@ -49,7 +49,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.3',
+      title: 'Маяк P2P v2.4',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -1371,13 +1371,15 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
             ),
             _drawerTile(
               icon: Icons.radio_rounded,
-              label: engine.isWalkieTalkieMode
-                  ? 'Рация (PTT): Вкл'
-                  : 'Режим Рации (PTT)',
+              label: 'Рация (PTT)',
               selected: engine.isWalkieTalkieMode,
               onTap: () {
-                engine.toggleWalkieTalkieMode();
                 Navigator.pop(context);
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => WalkieTalkieScreen(engine: engine),
+                  ),
+                );
               },
             ),
             const Spacer(),
@@ -7564,8 +7566,14 @@ class _SavedMessagesScreenState extends State<SavedMessagesScreen> {
 
 
 // =============================================================================
-// v2.3.0: МОНОХРОМНАЯ 2D/3D-КАРТА УЗЛОВ (БЕСПЛАТНО, ОФЛАЙН-РАДАР + БАРОМЕТР + АНТИ-РЭБ)
+// v2.4.0: МОНОХРОМНАЯ 2D/3D-КАРТА С РЕАЛЬНЫМИ 3D-ЗДАНИЯМИ (OSM OVERPASS) + PINCH-ZOOM
 // =============================================================================
+
+class _OsmBuilding3D {
+  final List<Offset> latLonPoly; // dx=lat, dy=lon
+  final double heightMeters;
+  _OsmBuilding3D(this.latLonPoly, this.heightMeters);
+}
 
 class MayakTacticalMapScreen extends StatefulWidget {
   final MeshEngine engine;
@@ -7577,17 +7585,22 @@ class MayakTacticalMapScreen extends StatefulWidget {
 
 class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
   MeshEngine get engine => widget.engine;
-  double _centerLat = 46.3497; // Астрахань / центр по умолчанию до получения GPS
+  double _centerLat = 46.3497;
   double _centerLon = 48.0408;
-  int _zoom = 14;
-  bool _is3dMode = false;
+  double _zoom = 16.0;
+  double _baseZoom = 16.0;
+  Offset? _lastFocal;
+  bool _is3dMode = true;
   bool _pickingManualAnchor = false;
+  bool _loadingBuildings = false;
+  String _lastBldgCellKey = '';
+  List<_OsmBuilding3D> _buildings = [];
+  Timer? _liveLocTimer;
 
-  // Матрица: превращает стандартные бесплатные OSM-тайлы в стильный ч/б негатив (белые дороги на чёрном фоне!)
   static const List<double> _monoInvertMatrix = <double>[
-    -0.30, -0.59, -0.11, 0, 245,
-    -0.30, -0.59, -0.11, 0, 245,
-    -0.30, -0.59, -0.11, 0, 245,
+    -0.30, -0.59, -0.11, 0, 235,
+    -0.30, -0.59, -0.11, 0, 235,
+    -0.30, -0.59, -0.11, 0, 235,
     0, 0, 0, 1, 0,
   ];
 
@@ -7599,33 +7612,109 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
   void initState() {
     super.initState();
     engine.addListenerState(_onUpdate);
-    unawaited(engine.pollAndBroadcastLocation().then((_) {
-      if (mounted && engine.myLocation != null) {
-        setState(() {
-          _centerLat = engine.myLocation!.lat;
-          _centerLon = engine.myLocation!.lon;
-        });
-      }
-    }));
+    unawaited(_initGeoAndBuildings());
+    _liveLocTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (mounted) unawaited(engine.pollAndBroadcastLocation());
+    });
+  }
+
+  Future<void> _initGeoAndBuildings() async {
+    await engine.requestLocationPermissionForMap();
+    await engine.pollAndBroadcastLocation();
+    if (mounted && engine.myLocation != null) {
+      setState(() {
+        _centerLat = engine.myLocation!.lat;
+        _centerLon = engine.myLocation!.lon;
+      });
+    }
+    unawaited(_fetch3dBuildingsIfNeeded());
   }
 
   @override
   void dispose() {
+    _liveLocTimer?.cancel();
     engine.removeListenerState(_onUpdate);
     super.dispose();
   }
 
-  double _lonToTileX(double lon, int z) => (lon + 180.0) / 360.0 * (1 << z);
-
-  double _latToTileY(double lat, int z) {
-    final rad = lat.clamp(-85.0, 85.0) * pi / 180.0;
-    return (1.0 - log(tan(rad) + 1.0 / cos(rad)) / pi) / 2.0 * (1 << z);
+  Future<void> _fetch3dBuildingsIfNeeded() async {
+    if (!_is3dMode || _zoom < 14.8 || _loadingBuildings) return;
+    final cellKey =
+        '${(_centerLat * 180).round()}_${(_centerLon * 180).round()}';
+    if (cellKey == _lastBldgCellKey) return;
+    _loadingBuildings = true;
+    try {
+      const d = 0.0032; // ~350m radius around center
+      final s = (_centerLat - d).toStringAsFixed(5);
+      final w = (_centerLon - d).toStringAsFixed(5);
+      final n = (_centerLat + d).toStringAsFixed(5);
+      final e = (_centerLon + d).toStringAsFixed(5);
+      final q = '[out:json][timeout:8];way["building"]($s,$w,$n,$e);out body geom 160;';
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+      final req = await client.postUrl(
+          Uri.parse('https://overpass-api.de/api/interpreter'));
+      req.headers.set('User-Agent', 'MayakP2PMesh/2.4');
+      req.headers.contentType = ContentType.parse('application/x-www-form-urlencoded');
+      req.write('data=${Uri.encodeQueryComponent(q)}');
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      if (resp.statusCode == 200) {
+        final body = await utf8.decoder.bind(resp).join();
+        final decoded = jsonDecode(body) as Map<String, dynamic>;
+        final els = (decoded['elements'] as List?) ?? [];
+        final parsed = <_OsmBuilding3D>[];
+        for (final el in els) {
+          if (el is! Map) continue;
+          final geom = el['geometry'] as List?;
+          if (geom == null || geom.length < 3) continue;
+          final pts = <Offset>[];
+          for (final g in geom) {
+            if (g is Map && g['lat'] != null && g['lon'] != null) {
+              pts.add(Offset(
+                (g['lat'] as num).toDouble(),
+                (g['lon'] as num).toDouble(),
+              ));
+            }
+          }
+          if (pts.length < 3) continue;
+          final tags = (el['tags'] as Map?) ?? {};
+          double hM = 10.0;
+          final rawH = tags['height']?.toString() ?? '';
+          final rawLv = tags['building:levels']?.toString() ?? '';
+          final parsedH =
+              double.tryParse(rawH.replaceAll(RegExp(r'[^0-9.]'), ''));
+          final parsedLv =
+              double.tryParse(rawLv.replaceAll(RegExp(r'[^0-9.]'), ''));
+          if (parsedH != null && parsedH > 2 && parsedH < 200) {
+            hM = parsedH;
+          } else if (parsedLv != null && parsedLv > 0 && parsedLv < 60) {
+            hM = parsedLv * 3.2;
+          }
+          parsed.add(_OsmBuilding3D(pts, hM));
+        }
+        _lastBldgCellKey = cellKey;
+        if (mounted) {
+          setState(() => _buildings = parsed);
+        }
+      }
+      client.close(force: true);
+    } catch (_) {
+    } finally {
+      _loadingBuildings = false;
+    }
   }
 
-  double _tileXToLon(double x, int z) => x / (1 << z) * 360.0 - 180.0;
+  double _lonToTileX(double lon, double z) =>
+      (lon + 180.0) / 360.0 * pow(2.0, z);
 
-  double _tileYToLat(double y, int z) {
-    final n = pi - 2.0 * pi * y / (1 << z);
+  double _latToTileY(double lat, double z) {
+    final rad = lat.clamp(-85.0, 85.0) * pi / 180.0;
+    return (1.0 - log(tan(rad) + 1.0 / cos(rad)) / pi) / 2.0 * pow(2.0, z);
+  }
+
+  double _tileXToLon(double x, double z) => x / pow(2.0, z) * 360.0 - 180.0;
+
+  double _tileYToLat(double y, double z) {
+    final n = pi - 2.0 * pi * y / pow(2.0, z);
     return 180.0 / pi * atan(0.5 * (exp(n) - exp(-n)));
   }
 
@@ -7636,10 +7725,10 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
     required double heightBoostPx,
     required Offset pos,
   }) {
-    final pillarH = _is3dMode ? heightBoostPx.clamp(12.0, 72.0) : 0.0;
+    final pillarH = _is3dMode ? heightBoostPx.clamp(14.0, 76.0) : 0.0;
     return Positioned(
       left: pos.dx - 70,
-      top: pos.dy - 44 - pillarH,
+      top: pos.dy - 46 - pillarH,
       child: SizedBox(
         width: 140,
         child: Column(
@@ -7704,8 +7793,8 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                 color: isMe ? Colors.white : MayakTheme.accentEmerald,
               ),
             Container(
-              width: 8,
-              height: 8,
+              width: 9,
+              height: 9,
               decoration: BoxDecoration(
                 color: isMe ? Colors.white : MayakTheme.accentEmerald,
                 shape: BoxShape.circle,
@@ -7722,6 +7811,8 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
   Widget build(BuildContext context) {
     final peers = engine.peerLocations.values.toList();
     final me = engine.myLocation;
+    final tileZ = _zoom.floor().clamp(2, 18);
+    final zoomScale = pow(2.0, _zoom - tileZ).toDouble();
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -7733,7 +7824,10 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => setState(() => _is3dMode = !_is3dMode),
+            onPressed: () {
+              setState(() => _is3dMode = !_is3dMode);
+              if (_is3dMode) unawaited(_fetch3dBuildingsIfNeeded());
+            },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
@@ -7742,11 +7836,11 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                 border: Border.all(color: Colors.white54),
               ),
               child: Text(
-                _is3dMode ? '3D' : '2D',
+                _is3dMode ? '3D ЗДАНИЯ' : '2D',
                 style: TextStyle(
                   color: _is3dMode ? Colors.black : Colors.white,
                   fontWeight: FontWeight.bold,
-                  fontSize: 12,
+                  fontSize: 11.5,
                 ),
               ),
             ),
@@ -7755,7 +7849,6 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
       ),
       body: Column(
         children: [
-          // Верхняя панель: тумблер трансляции гео + анти-РЭБ
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             decoration: const BoxDecoration(
@@ -7779,7 +7872,7 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                           Text(
                             me != null
                                 ? '${me.lat.toStringAsFixed(5)}, ${me.lon.toStringAsFixed(5)} • ${me.pressureHpa > 0 ? "${me.pressureHpa.toStringAsFixed(1)} hPa" : "выс. ${me.altMeters.toStringAsFixed(0)} м"}'
-                                : 'Координаты не получены (нажми на карту для якоря)',
+                                : 'Ожидание GPS (или нажми булавку для якоря)',
                             style: const TextStyle(
                                 fontSize: 11, color: Colors.white54),
                           ),
@@ -7806,7 +7899,7 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                     ),
                     child: Text(
                       _pickingManualAnchor
-                          ? 'Нажми в любую точку карты, чтобы закрепить своё реальное местоположение вручную (обход РЭБ)'
+                          ? 'Нажми в любую точку карты, чтобы закрепить своё местоположение вручную (обход РЭБ)'
                           : '⚠️ ${engine.gpsSpoofingNote}',
                       style:
                           const TextStyle(fontSize: 11, color: Colors.white70),
@@ -7815,149 +7908,194 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
               ],
             ),
           ),
-          // Интерактивное полотно 2D / 3D монохромной карты
           Expanded(
             child: LayoutBuilder(
               builder: (ctx, box) {
                 final w = box.maxWidth;
                 final h = box.maxHeight;
-                final cx = _lonToTileX(_centerLon, _zoom);
-                final cy = _latToTileY(_centerLat, _zoom);
-                const tileSize = 256.0;
-                final maxTile = (1 << _zoom) - 1;
+                // В 3D-режиме расширяем полотно, чтобы при наклоне не было чёрных рамок по краям!
+                final canvasW = _is3dMode ? w * 1.45 : w;
+                final canvasH = _is3dMode ? h * 1.45 : h;
+                final tilePx = 256.0 * zoomScale;
+                final cx = _lonToTileX(_centerLon, tileZ.toDouble());
+                final cy = _latToTileY(_centerLat, tileZ.toDouble());
+                final maxTile = (1 << tileZ) - 1;
                 final baseTx = cx.floor();
                 final baseTy = cy.floor();
-                final offX = w / 2 - (cx - baseTx) * tileSize;
-                final offY = h / 2 - (cy - baseTy) * tileSize;
+                final offX = canvasW / 2 - (cx - baseTx) * tilePx;
+                final offY = canvasH / 2 - (cy - baseTy) * tilePx;
 
-                Offset latLonToScreen(double lat, double lon) {
-                  final tx = _lonToTileX(lon, _zoom);
-                  final ty = _latToTileY(lat, _zoom);
+                Offset latLonToCanvas(double lat, double lon) {
+                  final tx = _lonToTileX(lon, tileZ.toDouble());
+                  final ty = _latToTileY(lat, tileZ.toDouble());
                   return Offset(
-                    w / 2 + (tx - cx) * tileSize,
-                    h / 2 + (ty - cy) * tileSize,
+                    canvasW / 2 + (tx - cx) * tilePx,
+                    canvasH / 2 + (ty - cy) * tilePx,
                   );
                 }
 
-                Widget mapCanvas = GestureDetector(
-                  onPanUpdate: (d) {
-                    setState(() {
-                      final newCx = cx - d.delta.dx / tileSize;
-                      final newCy = cy - d.delta.dy / tileSize;
-                      _centerLon = _tileXToLon(newCx, _zoom).clamp(-179.9, 179.9);
-                      _centerLat = _tileYToLat(newCy, _zoom).clamp(-84.0, 84.0);
-                    });
-                  },
-                  onTapUp: (details) async {
-                    if (!_pickingManualAnchor) return;
-                    final lp = details.localPosition;
-                    final tapTx = cx + (lp.dx - w / 2) / tileSize;
-                    final tapTy = cy + (lp.dy - h / 2) / tileSize;
-                    final lat = _tileYToLat(tapTy, _zoom);
-                    final lon = _tileXToLon(tapTx, _zoom);
-                    setState(() => _pickingManualAnchor = false);
-                    await engine.setManualMapAnchor(lat, lon);
-                  },
-                  child: ClipRect(
-                    child: Stack(
-                      children: [
-                        // Офлайн-радарная сетка (всегда видна даже без интернета!)
-                        Positioned.fill(
-                          child: CustomPaint(painter: _TacticalGridPainter()),
-                        ),
-                        // Бесплатные тайлы OSM в стильном ч/б негативе (белые линии на чёрном)
-                        for (int dx = -2; dx <= 2; dx++)
-                          for (int dy = -2; dy <= 2; dy++)
-                            if (baseTy + dy >= 0 && baseTy + dy <= maxTile)
-                              Positioned(
-                                left: offX + dx * tileSize,
-                                top: offY + dy * tileSize,
-                                width: tileSize,
-                                height: tileSize,
-                                child: ColorFiltered(
-                                  colorFilter: const ColorFilter.matrix(
-                                      _monoInvertMatrix),
-                                  child: Image.network(
-                                    'https://tile.openstreetmap.org/$_zoom/${((baseTx + dx) % (1 << _zoom) + (1 << _zoom)) % (1 << _zoom)}/${baseTy + dy}.png',
-                                    fit: BoxFit.cover,
-                                    headers: const {
-                                      'User-Agent': 'MayakP2PMesh/2.3',
-                                    },
-                                    errorBuilder: (_, __, ___) =>
-                                        const SizedBox.shrink(),
-                                  ),
+                Widget mapPlane = SizedBox(
+                  width: canvasW,
+                  height: canvasH,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: CustomPaint(painter: _TacticalGridPainter()),
+                      ),
+                      for (int dx = -3; dx <= 3; dx++)
+                        for (int dy = -3; dy <= 3; dy++)
+                          if (baseTy + dy >= 0 && baseTy + dy <= maxTile)
+                            Positioned(
+                              left: offX + dx * tilePx,
+                              top: offY + dy * tilePx,
+                              width: tilePx + 0.5,
+                              height: tilePx + 0.5,
+                              child: ColorFiltered(
+                                colorFilter: const ColorFilter.matrix(
+                                    _monoInvertMatrix),
+                                child: Image.network(
+                                  'https://tile.openstreetmap.org/$tileZ/${((baseTx + dx) % (1 << tileZ) + (1 << tileZ)) % (1 << tileZ)}/${baseTy + dy}.png',
+                                  fit: BoxFit.cover,
+                                  headers: const {
+                                    'User-Agent': 'MayakP2PMesh/2.4',
+                                  },
+                                  errorBuilder: (_, __, ___) =>
+                                      const SizedBox.shrink(),
                                 ),
                               ),
-                        // Маркер себя
-                        if (me != null)
-                          _buildPeerPin(
-                            name: '${engine.nickname} (Вы)',
-                            subline: me.isManualAnchor
-                                ? 'Якорь • ${me.pressureHpa > 0 ? "${me.pressureHpa.toStringAsFixed(1)} hPa" : "ручн."}'
-                                : (me.pressureHpa > 0
-                                    ? '${me.pressureHpa.toStringAsFixed(1)} hPa'
-                                    : '${me.altMeters.toStringAsFixed(0)} м'),
-                            isMe: true,
-                            heightBoostPx: 26,
-                            pos: latLonToScreen(me.lat, me.lon),
+                            ),
+                      // Настоящие 3D-экструдированные здания из OSM Overpass (графитовые стены + белые рёбра крыш!)
+                      if (_is3dMode && _buildings.isNotEmpty && _zoom >= 14.5)
+                        Positioned.fill(
+                          child: CustomPaint(
+                            painter: _Buildings3DPainter(
+                              buildings: _buildings,
+                              project: latLonToCanvas,
+                              zoom: _zoom,
+                            ),
                           ),
-                        // Маркеры узлов, разрешивших отслеживание
-                        for (final p in peers)
-                          _buildPeerPin(
-                            name: p.nickname,
-                            subline: engine.formatRelativeHeightToPeer(p),
-                            isMe: false,
-                            heightBoostPx: 26 +
-                                ((me != null &&
-                                        me.pressureHpa > 300 &&
-                                        p.pressureHpa > 300)
-                                    ? (44330.0 *
-                                            (1.0 -
-                                                pow(p.pressureHpa / me.pressureHpa,
-                                                    0.1903))) *
-                                        3.0
-                                    : 0.0),
-                            pos: latLonToScreen(p.lat, p.lon),
-                          ),
-                      ],
-                    ),
+                        ),
+                      if (me != null)
+                        _buildPeerPin(
+                          name: '${engine.nickname} (Вы)',
+                          subline: me.isManualAnchor
+                              ? 'Якорь • ${me.pressureHpa > 0 ? "${me.pressureHpa.toStringAsFixed(1)} hPa" : "ручн."}'
+                              : (me.pressureHpa > 0
+                                  ? '${me.pressureHpa.toStringAsFixed(1)} hPa'
+                                  : '${me.altMeters.toStringAsFixed(0)} м'),
+                          isMe: true,
+                          heightBoostPx: 26,
+                          pos: latLonToCanvas(me.lat, me.lon),
+                        ),
+                      for (final p in peers)
+                        _buildPeerPin(
+                          name: p.nickname,
+                          subline: engine.formatRelativeHeightToPeer(p),
+                          isMe: false,
+                          heightBoostPx: 26 +
+                              ((me != null &&
+                                      me.pressureHpa > 300 &&
+                                      p.pressureHpa > 300)
+                                  ? (44330.0 *
+                                          (1.0 -
+                                              pow(p.pressureHpa / me.pressureHpa,
+                                                  0.1903))) *
+                                      3.0
+                                  : 0.0),
+                          pos: latLonToCanvas(p.lat, p.lon),
+                        ),
+                    ],
                   ),
                 );
 
                 if (_is3dMode) {
-                  mapCanvas = Transform(
+                  mapPlane = Transform(
                     alignment: Alignment.center,
                     transform: Matrix4.identity()
-                      ..setEntry(3, 2, 0.0012)
-                      ..rotateX(-0.68),
-                    child: mapCanvas,
+                      ..setEntry(3, 2, 0.0009)
+                      ..rotateX(-0.46)
+                      ..scale(1.12),
+                    child: mapPlane,
                   );
                 }
 
                 return Stack(
                   children: [
-                    Positioned.fill(child: mapCanvas),
-                    // Кнопки управления картой справа
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onDoubleTap: () {
+                          setState(() => _zoom = (_zoom + 1.0).clamp(3.0, 18.5));
+                          unawaited(_fetch3dBuildingsIfNeeded());
+                        },
+                        onScaleStart: (d) {
+                          _baseZoom = _zoom;
+                          _lastFocal = d.localFocalPoint;
+                        },
+                        onScaleUpdate: (d) {
+                          setState(() {
+                            if (d.scale != 1.0) {
+                              _zoom = (_baseZoom + log(d.scale) / ln2)
+                                  .clamp(3.0, 18.5);
+                            }
+                            if (_lastFocal != null) {
+                              final delta = d.localFocalPoint - _lastFocal!;
+                              final curTilePx =
+                                  256.0 * pow(2.0, _zoom - _zoom.floor());
+                              final curCx =
+                                  _lonToTileX(_centerLon, _zoom.floor().toDouble());
+                              final curCy =
+                                  _latToTileY(_centerLat, _zoom.floor().toDouble());
+                              _centerLon = _tileXToLon(
+                                      curCx - delta.dx / curTilePx,
+                                      _zoom.floor().toDouble())
+                                  .clamp(-179.9, 179.9);
+                              _centerLat = _tileYToLat(
+                                      curCy - delta.dy / curTilePx,
+                                      _zoom.floor().toDouble())
+                                  .clamp(-84.0, 84.0);
+                            }
+                            _lastFocal = d.localFocalPoint;
+                          });
+                        },
+                        onScaleEnd: (_) {
+                          _lastFocal = null;
+                          unawaited(_fetch3dBuildingsIfNeeded());
+                        },
+                        onTapUp: (details) async {
+                          if (!_pickingManualAnchor) return;
+                          final lp = details.localPosition;
+                          final tapTx = cx + (lp.dx - w / 2) / tilePx;
+                          final tapTy = cy + (lp.dy - h / 2) / tilePx;
+                          final lat = _tileYToLat(tapTy, tileZ.toDouble());
+                          final lon = _tileXToLon(tapTx, tileZ.toDouble());
+                          setState(() => _pickingManualAnchor = false);
+                          await engine.setManualMapAnchor(lat, lon);
+                        },
+                        child: ClipRect(
+                          child: OverflowBox(
+                            maxWidth: canvasW,
+                            maxHeight: canvasH,
+                            child: mapPlane,
+                          ),
+                        ),
+                      ),
+                    ),
                     Positioned(
                       right: 12,
                       bottom: 16,
                       child: Column(
                         children: [
-                          _mapCtrlBtn(Icons.add_rounded, () {
-                            if (_zoom < 18) setState(() => _zoom++);
-                          }),
-                          const SizedBox(height: 6),
-                          _mapCtrlBtn(Icons.remove_rounded, () {
-                            if (_zoom > 2) setState(() => _zoom--);
-                          }),
-                          const SizedBox(height: 6),
                           _mapCtrlBtn(Icons.gps_fixed_rounded, () async {
+                            await engine.requestLocationPermissionForMap();
                             await engine.pollAndBroadcastLocation();
                             if (mounted && engine.myLocation != null) {
                               setState(() {
                                 _centerLat = engine.myLocation!.lat;
                                 _centerLon = engine.myLocation!.lon;
+                                if (_zoom < 16.0) _zoom = 16.2;
                               });
+                              unawaited(_fetch3dBuildingsIfNeeded());
                             }
                           }),
                           const SizedBox(height: 6),
@@ -7970,7 +8108,6 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                         ],
                       ),
                     ),
-                    // Нижний счётчик узлов на карте
                     Positioned(
                       left: 12,
                       bottom: 16,
@@ -7983,7 +8120,7 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                           border: Border.all(color: Colors.white24),
                         ),
                         child: Text(
-                          'Узлов на карте: ${peers.length} • Z$_zoom • ${_is3dMode ? "3D" : "2D"}',
+                          'Узлов: ${peers.length} • Зданий 3D: ${_buildings.length} • Z${_zoom.toStringAsFixed(1)}',
                           style: const TextStyle(
                               fontSize: 11, color: Colors.white70),
                         ),
@@ -8018,6 +8155,77 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
   }
 }
 
+class _Buildings3DPainter extends CustomPainter {
+  final List<_OsmBuilding3D> buildings;
+  final Offset Function(double lat, double lon) project;
+  final double zoom;
+
+  _Buildings3DPainter({
+    required this.buildings,
+    required this.project,
+    required this.zoom,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final wallPaint = Paint()
+      ..color = const Color(0xDD1A1A1A)
+      ..style = PaintingStyle.fill;
+    final roofFill = Paint()
+      ..color = const Color(0xEE2B2B2B)
+      ..style = PaintingStyle.fill;
+    final edgePaint = Paint()
+      ..color = const Color(0xBBFFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+
+    final hScale = pow(2.0, (zoom - 16.0)).clamp(0.4, 2.6) * 1.6;
+
+    // Сортируем здания с севера на юг (painter's algorithm для корректного 3D перекрытия!)
+    final sorted = List<_OsmBuilding3D>.from(buildings)
+      ..sort((a, b) => b.latLonPoly.first.dx.compareTo(a.latLonPoly.first.dx));
+
+    for (final b in sorted) {
+      final basePts = <Offset>[];
+      bool anyVisible = false;
+      for (final ll in b.latLonPoly) {
+        final p = project(ll.dx, ll.dy);
+        basePts.add(p);
+        if (p.dx >= -40 &&
+            p.dx <= size.width + 40 &&
+            p.dy >= -40 &&
+            p.dy <= size.height + 40) {
+          anyVisible = true;
+        }
+      }
+      if (!anyVisible || basePts.length < 3) continue;
+
+      final extrudeY = (b.heightMeters * hScale).clamp(6.0, 88.0);
+      final roofPts = basePts.map((p) => Offset(p.dx, p.dy - extrudeY)).toList();
+
+      // Рисуем боковые стены 3D-здания
+      for (int i = 0; i < basePts.length - 1; i++) {
+        final wall = Path()
+          ..moveTo(basePts[i].dx, basePts[i].dy)
+          ..lineTo(basePts[i + 1].dx, basePts[i + 1].dy)
+          ..lineTo(roofPts[i + 1].dx, roofPts[i + 1].dy)
+          ..lineTo(roofPts[i].dx, roofPts[i].dy)
+          ..close();
+        canvas.drawPath(wall, wallPaint);
+        canvas.drawPath(wall, edgePaint..color = const Color(0x38FFFFFF));
+      }
+
+      // Рисуем крышу с чёткой белой обводкой
+      final roof = Path()..addPolygon(roofPts, true);
+      canvas.drawPath(roof, roofFill);
+      canvas.drawPath(roof, edgePaint..color = const Color(0xCCFFFFFF));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _Buildings3DPainter oldDelegate) => true;
+}
+
 class _TacticalGridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -8043,4 +8251,260 @@ class _TacticalGridPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// =============================================================================
+// v2.4.0: ПОЛНОЦЕННЫЙ ЭКРАН РАЦИИ (PTT) В БОКОВОМ МЕНЮ
+// =============================================================================
+
+class WalkieTalkieScreen extends StatefulWidget {
+  final MeshEngine engine;
+  const WalkieTalkieScreen({super.key, required this.engine});
+
+  @override
+  State<WalkieTalkieScreen> createState() => _WalkieTalkieScreenState();
+}
+
+class _WalkieTalkieScreenState extends State<WalkieTalkieScreen> {
+  MeshEngine get engine => widget.engine;
+
+  void _onUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onUpdate);
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onUpdate);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final channels = engine.getPttChannels();
+    final isTx = engine.isPttTransmitting;
+    final isRx = engine.pttActiveSpeakerName != null;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: const Text('Рация (PTT)',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // Дисплей частоты и статуса эфира
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0A0A0A),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: isTx
+                    ? MayakTheme.accentRed
+                    : (isRx ? MayakTheme.accentEmerald : Colors.white30),
+                width: 1.2,
+              ),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  engine.currentPttChannelFreq,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 28,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 2,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  isTx
+                      ? 'ПЕРЕДАЧА В ЭФИР (TX) • E2EE'
+                      : (isRx
+                          ? 'ПРИЁМ (RX): ${engine.pttActiveSpeakerName}'
+                          : engine.currentPttChannelLabel),
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: isTx
+                        ? MayakTheme.accentRed
+                        : (isRx ? MayakTheme.accentEmerald : Colors.white60),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                // Большая тактильная кнопка PTT
+                Center(
+                  child: engine.pttLatchMode
+                      ? InkWell(
+                          borderRadius: BorderRadius.circular(8),
+                          onTap: () {
+                            if (isTx) {
+                              engine.stopPttTransmit();
+                            } else {
+                              engine.startPttTransmit();
+                            }
+                          },
+                          child: _pttBigPad(isTx, 'НАЖМИ / СТОП'),
+                        )
+                      : Listener(
+                          onPointerDown: (_) => engine.startPttTransmit(),
+                          onPointerUp: (_) => engine.stopPttTransmit(),
+                          onPointerCancel: (_) => engine.stopPttTransmit(),
+                          child: _pttBigPad(isTx, 'УДЕРЖИВАЙ И ГОВОРИ'),
+                        ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'НАСТРОЙКИ РАЦИИ',
+            style: TextStyle(
+                fontSize: 11,
+                letterSpacing: 1.1,
+                color: Colors.white54,
+                fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          Container(
+            decoration: BoxDecoration(
+              color: MayakTheme.bgSurface,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: const Color(0x22FFFFFF)),
+            ),
+            child: Column(
+              children: [
+                SwitchListTile(
+                  title: const Text('Мини-окно рации поверх чатов',
+                      style: TextStyle(fontSize: 13.5)),
+                  subtitle: const Text(
+                      'Быстрая кнопка PTT и выбор канала поверх любого экрана',
+                      style: TextStyle(fontSize: 11.5, color: Colors.white54)),
+                  value: engine.isWalkieTalkieMode,
+                  activeColor: Colors.white,
+                  onChanged: (_) => engine.toggleWalkieTalkieMode(),
+                ),
+                const Divider(height: 1, color: Color(0x1AFFFFFF)),
+                SwitchListTile(
+                  title: const Text('Звуки эфира и Roger Beep',
+                      style: TextStyle(fontSize: 13.5)),
+                  value: engine.pttSoundsEnabled,
+                  activeColor: Colors.white,
+                  onChanged: (v) => engine.setPttSoundsEnabled(v),
+                ),
+                const Divider(height: 1, color: Color(0x1AFFFFFF)),
+                SwitchListTile(
+                  title: const Text('Приём эфира автоматически',
+                      style: TextStyle(fontSize: 13.5)),
+                  value: engine.pttAutoReceiveEnabled,
+                  activeColor: Colors.white,
+                  onChanged: (v) => engine.setPttAutoReceiveEnabled(v),
+                ),
+                const Divider(height: 1, color: Color(0x1AFFFFFF)),
+                SwitchListTile(
+                  title: const Text('Режим фиксации (без удержания)',
+                      style: TextStyle(fontSize: 13.5)),
+                  subtitle: const Text('Нажал — говоришь, нажал ещё раз — отбой',
+                      style: TextStyle(fontSize: 11.5, color: Colors.white54)),
+                  value: engine.pttLatchMode,
+                  activeColor: Colors.white,
+                  onChanged: (v) => engine.setPttLatchMode(v),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'КАНАЛЫ СВЯЗИ (КОМУ ПЕРЕДАВАТЬ)',
+            style: TextStyle(
+                fontSize: 11,
+                letterSpacing: 1.1,
+                color: Colors.white54,
+                fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          Container(
+            decoration: BoxDecoration(
+              color: MayakTheme.bgSurface,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: const Color(0x22FFFFFF)),
+            ),
+            child: Column(
+              children: [
+                for (int i = 0; i < channels.length; i++) ...[
+                  if (i > 0)
+                    const Divider(height: 1, color: Color(0x1AFFFFFF)),
+                  ListTile(
+                    dense: true,
+                    leading: Icon(
+                      channels[i]['id'] == engine.pttChannelTarget
+                          ? Icons.radio_button_checked_rounded
+                          : Icons.radio_button_off_rounded,
+                      size: 18,
+                      color: channels[i]['id'] == engine.pttChannelTarget
+                          ? Colors.white
+                          : Colors.white38,
+                    ),
+                    title: Text(channels[i]['label']!,
+                        style: const TextStyle(fontSize: 13)),
+                    trailing: Text(channels[i]['freq']!,
+                        style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            color: Colors.white54)),
+                    onTap: () =>
+                        engine.setPttChannelTarget(channels[i]['id']!),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pttBigPad(bool isTx, String hint) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 140),
+      width: 170,
+      height: 110,
+      decoration: BoxDecoration(
+        color: isTx ? MayakTheme.accentRed : Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+            color: isTx ? Colors.white : Colors.white70, width: 1.5),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            isTx ? Icons.podcasts_rounded : Icons.mic_rounded,
+            size: 36,
+            color: isTx ? Colors.white : Colors.black,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            isTx ? 'В ЭФИРЕ' : hint,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.8,
+              color: isTx ? Colors.white : Colors.black,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

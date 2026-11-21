@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.3.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.4.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.3.0"
+                  versionName = "2.4.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.3.0"
+                  versionName "2.4.0"
               }}
 
               packagingOptions {{
@@ -553,6 +553,8 @@ jobs:
               private val btWriteExec = java.util.concurrent.Executors.newSingleThreadExecutor()
               @Volatile private var lastPressureHpa: Double = 0.0
               private var baroListenerRegistered: Boolean = false
+              @Volatile private var lastLiveLocation: android.location.Location? = null
+              private var locListenerRegistered: Boolean = false
               private val mainHandler = Handler(Looper.getMainLooper())
 
               // v1.8.0: Полнодуплексный аудио/видео движок звонков + рингтон и гудки
@@ -795,6 +797,20 @@ jobs:
                               "getGeoAndBarometer" -> {
                                   result.success(getGeoAndBarometerInternal())
                               }
+                              "requestLocationPermission" -> {
+                                  val fineOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                  if (fineOk) {
+                                      ensureLiveLocationUpdates()
+                                      result.success(true)
+                                  } else {
+                                      pendingPermResult = result
+                                      ActivityCompat.requestPermissions(
+                                          this,
+                                          arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                                          7006
+                                      )
+                                  }
+                              }
                               "requestIgnoreBatteryOptimizations" -> {
                                   requestBatteryExemption()
                                   result.success(true)
@@ -1013,6 +1029,40 @@ jobs:
               }
 
               @Suppress("MissingPermission")
+              private fun ensureLiveLocationUpdates() {
+                  if (locListenerRegistered) return
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                      return
+                  }
+                  try {
+                      val lm = getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager ?: return
+                      locListenerRegistered = true
+                      val listener = object : android.location.LocationListener {
+                          override fun onLocationChanged(location: android.location.Location) {
+                              lastLiveLocation = location
+                          }
+                          @Deprecated("Deprecated in Java")
+                          override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                          override fun onProviderEnabled(provider: String) {}
+                          override fun onProviderDisabled(provider: String) {}
+                      }
+                      mainHandler.post {
+                          try {
+                              if (lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) {
+                                  lm.requestLocationUpdates(android.location.LocationManager.GPS_PROVIDER, 3000L, 1f, listener, Looper.getMainLooper())
+                              }
+                          } catch (_: Throwable) {}
+                          try {
+                              if (lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)) {
+                                  lm.requestLocationUpdates(android.location.LocationManager.NETWORK_PROVIDER, 3000L, 2f, listener, Looper.getMainLooper())
+                              }
+                          } catch (_: Throwable) {}
+                      }
+                  } catch (_: Throwable) {}
+              }
+
+              @Suppress("MissingPermission")
               private fun getGeoAndBarometerInternal(): Map<String, Any> {
                   val out = mutableMapOf<String, Any>()
                   try {
@@ -1040,15 +1090,21 @@ jobs:
                       out["err"] = "no_permission"
                       return out
                   }
+                  ensureLiveLocationUpdates()
                   try {
                       val lm = getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
-                      val gpsLoc = try { lm?.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER) } catch (_: Throwable) { null }
-                      val netLoc = try { lm?.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER) } catch (_: Throwable) { null }
-                      val best = when {
-                          gpsLoc != null && netLoc != null -> if (gpsLoc.time >= netLoc.time - 30000L) gpsLoc else netLoc
-                          gpsLoc != null -> gpsLoc
-                          else -> netLoc
+                      val candidates = mutableListOf<android.location.Location>()
+                      lastLiveLocation?.let { candidates.add(it) }
+                      for (prov in listOf(
+                          android.location.LocationManager.GPS_PROVIDER,
+                          android.location.LocationManager.NETWORK_PROVIDER,
+                          android.location.LocationManager.PASSIVE_PROVIDER
+                      )) {
+                          try {
+                              lm?.getLastKnownLocation(prov)?.let { candidates.add(it) }
+                          } catch (_: Throwable) {}
                       }
+                      val best = candidates.maxByOrNull { it.time }
                       if (best != null) {
                           out["ok"] = true
                           out["lat"] = best.latitude
@@ -1631,6 +1687,10 @@ jobs:
                               } else {
                                   res.success(false)
                               }
+                          } else if (requestCode == 7006) {
+                              val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                              if (granted) ensureLiveLocationUpdates()
+                              res.success(granted)
                           } else if (requestCode == 7002 || requestCode == 7003) {
                               val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
                               res.success(granted)
@@ -2601,7 +2661,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.3.0 --build-number=$((2300 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.4.0 --build-number=$((2400 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
