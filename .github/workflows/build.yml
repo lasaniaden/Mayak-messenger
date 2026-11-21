@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.2.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.3.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.2.0"
+                  versionName = "2.3.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.2.0"
+                  versionName "2.3.0"
               }}
 
               packagingOptions {{
@@ -551,6 +551,8 @@ jobs:
               private var btServerSocket: android.bluetooth.BluetoothServerSocket? = null
               private val btSockets = java.util.concurrent.ConcurrentHashMap<String, android.bluetooth.BluetoothSocket>()
               private val btWriteExec = java.util.concurrent.Executors.newSingleThreadExecutor()
+              @Volatile private var lastPressureHpa: Double = 0.0
+              private var baroListenerRegistered: Boolean = false
               private val mainHandler = Handler(Looper.getMainLooper())
 
               // v1.8.0: Полнодуплексный аудио/видео движок звонков + рингтон и гудки
@@ -781,9 +783,17 @@ jobs:
                               }
                               "saveFileToDownloads" -> {
                                   val srcPath = call.argument<String>("path") ?: ""
-                                  val fileName = call.argument<String>("name") ?: "mayak_file"
-                                  val savedWhere = saveToPublicDownloads(srcPath, fileName)
-                                  result.success(savedWhere)
+                                  val rawBytes = call.argument<ByteArray>("bytes")
+                                  val fileName = call.argument<String>("fileName") ?: call.argument<String>("name") ?: "mayak_file"
+                                  if (rawBytes != null && rawBytes.isNotEmpty()) {
+                                      result.success(saveBytesToDownloadsInternal(rawBytes, fileName))
+                                  } else {
+                                      val savedWhere = saveToPublicDownloads(srcPath, fileName)
+                                      result.success(savedWhere)
+                                  }
+                              }
+                              "getGeoAndBarometer" -> {
+                                  result.success(getGeoAndBarometerInternal())
                               }
                               "requestIgnoreBatteryOptimizations" -> {
                                   requestBatteryExemption()
@@ -972,6 +982,89 @@ jobs:
                   } catch (_: Throwable) {
                       false
                   }
+              }
+
+              private fun saveBytesToDownloadsInternal(bytes: ByteArray, fileName: String): String {
+                  return try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          val values = android.content.ContentValues().apply {
+                              put(android.provider.MediaStore.Downloads.DISPLAY_NAME, fileName)
+                              put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                              put(android.provider.MediaStore.Downloads.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/Mayak")
+                          }
+                          val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                          if (uri != null) {
+                              contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                              return "Загрузки/Mayak/$fileName"
+                          }
+                      }
+                      val dlDir = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "Mayak")
+                      if (!dlDir.exists()) dlDir.mkdirs()
+                      val outFile = File(dlDir, fileName)
+                      outFile.writeBytes(bytes)
+                      outFile.absolutePath
+                  } catch (_: Throwable) {
+                      val fallbackDir = File(getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: filesDir, "Mayak")
+                      if (!fallbackDir.exists()) fallbackDir.mkdirs()
+                      val outFile = File(fallbackDir, fileName)
+                      outFile.writeBytes(bytes)
+                      outFile.absolutePath
+                  }
+              }
+
+              @Suppress("MissingPermission")
+              private fun getGeoAndBarometerInternal(): Map<String, Any> {
+                  val out = mutableMapOf<String, Any>()
+                  try {
+                      if (!baroListenerRegistered) {
+                          val sm = getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager
+                          val baro = sm?.getDefaultSensor(android.hardware.Sensor.TYPE_PRESSURE)
+                          if (sm != null && baro != null) {
+                              baroListenerRegistered = true
+                              sm.registerListener(object : android.hardware.SensorEventListener {
+                                  override fun onSensorChanged(event: android.hardware.SensorEvent?) {
+                                      if (event != null && event.values.isNotEmpty()) {
+                                          lastPressureHpa = event.values[0].toDouble()
+                                      }
+                                  }
+                                  override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) {}
+                              }, baro, android.hardware.SensorManager.SENSOR_DELAY_NORMAL)
+                          }
+                      }
+                  } catch (_: Throwable) {}
+                  out["hpa"] = lastPressureHpa
+
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                      out["ok"] = false
+                      out["err"] = "no_permission"
+                      return out
+                  }
+                  try {
+                      val lm = getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+                      val gpsLoc = try { lm?.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER) } catch (_: Throwable) { null }
+                      val netLoc = try { lm?.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER) } catch (_: Throwable) { null }
+                      val best = when {
+                          gpsLoc != null && netLoc != null -> if (gpsLoc.time >= netLoc.time - 30000L) gpsLoc else netLoc
+                          gpsLoc != null -> gpsLoc
+                          else -> netLoc
+                      }
+                      if (best != null) {
+                          out["ok"] = true
+                          out["lat"] = best.latitude
+                          out["lon"] = best.longitude
+                          out["alt"] = if (best.hasAltitude()) best.altitude else 0.0
+                          out["acc"] = best.accuracy.toDouble()
+                          out["provider"] = best.provider ?: "unknown"
+                          out["ts"] = best.time
+                      } else {
+                          out["ok"] = false
+                          out["err"] = "no_fix"
+                      }
+                  } catch (_: Throwable) {
+                      out["ok"] = false
+                  }
+                  return out
               }
 
               @Synchronized
@@ -2508,7 +2601,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.2.0 --build-number=$((2200 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.3.0 --build-number=$((2300 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

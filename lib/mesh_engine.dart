@@ -1025,6 +1025,28 @@ class GroupChat {
       );
 }
 
+class PeerLocationRecord {
+  final String nodeId;
+  final String nickname;
+  final double lat;
+  final double lon;
+  final double altMeters;
+  final double pressureHpa;
+  final bool isManualAnchor;
+  final int updatedAt;
+
+  PeerLocationRecord({
+    required this.nodeId,
+    required this.nickname,
+    required this.lat,
+    required this.lon,
+    this.altMeters = 0.0,
+    this.pressureHpa = 0.0,
+    this.isManualAnchor = false,
+    required this.updatedAt,
+  });
+}
+
 class MeshEngine {
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -1190,6 +1212,15 @@ class MeshEngine {
   static const String savedChatKey = 'saved:self';
   int defaultDisappearingSeconds = 0;
   Timer? _disappearingSweeper;
+  // v2.3.0: Карта узлов (гео + барометр + анти-спуфинг РЭБ) и межрегиональный P2P
+  bool isLocationSharingEnabled = false;
+  bool gpsSpoofingDetected = false;
+  String gpsSpoofingNote = '';
+  PeerLocationRecord? myLocation;
+  final Map<String, PeerLocationRecord> peerLocations = {};
+  Timer? _locationPollTimer;
+  String customExternalEndpoint = '';
+  bool isInterRegionalBridgeEnabled = false;
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -2220,7 +2251,15 @@ class MeshEngine {
     final sentPeers = <String>{};
     Future<void> sendToPeer(String pid, void Function(String line) emitter) async {
       if (sentPeers.contains(pid)) return;
-      if (target != 'ALL' && pid != target) return;
+      if (target != 'ALL') {
+        if (target.startsWith('group:')) {
+          final gid = target.substring(6);
+          final grp = groupChats[gid];
+          if (grp == null || !grp.memberIds.contains(pid)) return;
+        } else if (pid != target) {
+          return;
+        }
+      }
       final key = await _getOrDerivePeerPttKey(pid);
       if (key == null) return;
       sentPeers.add(pid);
@@ -2280,6 +2319,299 @@ class MeshEngine {
     onStateChanged();
   }
 
+  List<Map<String, String>> getPttChannels() {
+    final list = <Map<String, String>>[
+      {'id': 'ALL', 'label': 'CH-00 • ОБЩИЙ ЭФИР', 'freq': '433.075 MHz'},
+    ];
+    int idx = 1;
+    for (final c in knownContacts.values) {
+      final f = (433.075 + idx * 0.025).toStringAsFixed(3);
+      list.add({
+        'id': c.nodeId,
+        'label': 'CH-${idx.toString().padLeft(2, '0')} • ${c.displayTitle}',
+        'freq': '$f MHz',
+      });
+      idx++;
+    }
+    for (final g in groupChats.values) {
+      final f = (433.075 + idx * 0.025).toStringAsFixed(3);
+      list.add({
+        'id': 'group:${g.groupId}',
+        'label': 'GRP • ${g.title}',
+        'freq': '$f MHz',
+      });
+      idx++;
+    }
+    return list;
+  }
+
+  String get currentPttChannelLabel {
+    final all = getPttChannels();
+    for (final ch in all) {
+      if (ch['id'] == pttChannelTarget) return ch['label']!;
+    }
+    return 'CH-00 • ОБЩИЙ ЭФИР';
+  }
+
+  String get currentPttChannelFreq {
+    final all = getPttChannels();
+    for (final ch in all) {
+      if (ch['id'] == pttChannelTarget) return ch['freq']!;
+    }
+    return '433.075 MHz';
+  }
+
+  void cyclePttChannel(int delta) {
+    final all = getPttChannels();
+    if (all.isEmpty) return;
+    int cur = all.indexWhere((c) => c['id'] == pttChannelTarget);
+    if (cur < 0) cur = 0;
+    final next = (cur + delta) % all.length;
+    pttChannelTarget = all[next < 0 ? next + all.length : next]['id']!;
+    unawaited(_playPttBeep(true));
+    onStateChanged();
+  }
+
+  // ==================== v2.3.0: КАРТА УЗЛОВ, БАРОМЕТР И АНТИ-СПУФИНГ (РЭБ) ====================
+  static double _haversineMeters(
+      double lat1, double lon1, double lat2, double lon2) {
+    const r = 6371000.0;
+    final dLat = (lat2 - lat1) * pi / 180.0;
+    final dLon = (lon2 - lon1) * pi / 180.0;
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(lat1 * pi / 180.0) *
+            cos(lat2 * pi / 180.0) *
+            sin(dLon / 2) *
+            sin(dLon / 2);
+    return 2 * r * atan2(sqrt(a), sqrt(1 - a));
+  }
+
+  String formatRelativeHeightToPeer(PeerLocationRecord peer) {
+    final me = myLocation;
+    if (me != null && me.pressureHpa > 300 && peer.pressureHpa > 300) {
+      final deltaM =
+          44330.0 * (1.0 - pow(peer.pressureHpa / me.pressureHpa, 0.1903));
+      final floors = (deltaM / 3.0).round();
+      if (deltaM.abs() < 1.5) return 'На одном уровне (${peer.pressureHpa.toStringAsFixed(1)} hPa)';
+      final sign = deltaM > 0 ? '+' : '';
+      final flTxt = floors == 0
+          ? ''
+          : (floors > 0 ? ' • ~$floors эт. выше' : ' • ~${floors.abs()} эт. ниже');
+      return '$sign${deltaM.toStringAsFixed(1)} м$flTxt';
+    }
+    if (peer.altMeters != 0) {
+      return 'Высота: ${peer.altMeters.toStringAsFixed(0)} м';
+    }
+    return 'Высота н/д';
+  }
+
+  Future<void> toggleLocationSharing() async {
+    isLocationSharingEnabled = !isLocationSharingEnabled;
+    if (isLocationSharingEnabled) {
+      await pollAndBroadcastLocation();
+      _locationPollTimer?.cancel();
+      _locationPollTimer = Timer.periodic(
+        const Duration(seconds: 6),
+        (_) => unawaited(pollAndBroadcastLocation()),
+      );
+    } else {
+      _locationPollTimer?.cancel();
+      _locationPollTimer = null;
+      await _broadcastLocationStop();
+    }
+    onStateChanged();
+  }
+
+  Future<void> setManualMapAnchor(double lat, double lon) async {
+    final hpa = myLocation?.pressureHpa ?? 0.0;
+    final alt = myLocation?.altMeters ?? 0.0;
+    gpsSpoofingDetected = false;
+    gpsSpoofingNote = 'Точка закреплена вручную (обход РЭБ)';
+    myLocation = PeerLocationRecord(
+      nodeId: nodeId,
+      nickname: nickname,
+      lat: lat,
+      lon: lon,
+      altMeters: alt,
+      pressureHpa: hpa,
+      isManualAnchor: true,
+      updatedAt: DateTime.now().millisecondsSinceEpoch,
+    );
+    if (isLocationSharingEnabled) {
+      await _broadcastMyLocationPacket();
+    }
+    onStateChanged();
+  }
+
+  Future<void> pollAndBroadcastLocation() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (Platform.isAndroid) {
+      try {
+        final raw = await _nativeChannel
+            .invokeMapMethod<String, dynamic>('getGeoAndBarometer');
+        if (raw != null) {
+          final hpa = (raw['hpa'] as num?)?.toDouble() ?? 0.0;
+          if (raw['ok'] == true) {
+            final lat = (raw['lat'] as num).toDouble();
+            final lon = (raw['lon'] as num).toDouble();
+            final alt = (raw['alt'] as num?)?.toDouble() ?? 0.0;
+
+            // Анти-спуфинг фильтр (РЭБ / телепорт в другую страну)
+            final prev = myLocation;
+            if (prev != null && !prev.isManualAnchor) {
+              final dtSec = max(1.0, (now - prev.updatedAt) / 1000.0);
+              final distM = _haversineMeters(prev.lat, prev.lon, lat, lon);
+              final speedMs = distM / dtSec;
+              if (distM > 15000 && speedMs > 150.0) {
+                gpsSpoofingDetected = true;
+                gpsSpoofingNote =
+                    'Заблокирован спуфинг GPS (скачок ${(distM / 1000).toStringAsFixed(0)} км). Используется последняя достоверная точка.';
+                myLocation = PeerLocationRecord(
+                  nodeId: nodeId,
+                  nickname: nickname,
+                  lat: prev.lat,
+                  lon: prev.lon,
+                  altMeters: prev.altMeters,
+                  pressureHpa: hpa > 0 ? hpa : prev.pressureHpa,
+                  isManualAnchor: prev.isManualAnchor,
+                  updatedAt: now,
+                );
+                if (isLocationSharingEnabled) {
+                  await _broadcastMyLocationPacket();
+                }
+                onStateChanged();
+                return;
+              }
+            }
+            if (prev == null || !prev.isManualAnchor) {
+              gpsSpoofingDetected = false;
+              myLocation = PeerLocationRecord(
+                nodeId: nodeId,
+                nickname: nickname,
+                lat: lat,
+                lon: lon,
+                altMeters: alt,
+                pressureHpa: hpa,
+                isManualAnchor: false,
+                updatedAt: now,
+              );
+            } else {
+              // Обновляем барометр даже при ручном якоре
+              myLocation = PeerLocationRecord(
+                nodeId: nodeId,
+                nickname: nickname,
+                lat: prev.lat,
+                lon: prev.lon,
+                altMeters: prev.altMeters,
+                pressureHpa: hpa > 0 ? hpa : prev.pressureHpa,
+                isManualAnchor: true,
+                updatedAt: now,
+              );
+            }
+          } else if (myLocation != null && hpa > 0) {
+            final prev = myLocation!;
+            myLocation = PeerLocationRecord(
+              nodeId: nodeId,
+              nickname: nickname,
+              lat: prev.lat,
+              lon: prev.lon,
+              altMeters: prev.altMeters,
+              pressureHpa: hpa,
+              isManualAnchor: prev.isManualAnchor,
+              updatedAt: now,
+            );
+          }
+        }
+      } catch (_) {}
+    }
+    if (isLocationSharingEnabled && myLocation != null) {
+      await _broadcastMyLocationPacket();
+    }
+    onStateChanged();
+  }
+
+  Future<void> _broadcastMyLocationPacket() async {
+    final loc = myLocation;
+    if (loc == null) return;
+    final payload = utf8.encode(jsonEncode({
+      'v': 2,
+      'kind': 'LOC_UPDATE',
+      'lat': loc.lat,
+      'lon': loc.lon,
+      'alt': loc.altMeters,
+      'hpa': loc.pressureHpa,
+      'man': loc.isManualAnchor,
+      'nick': nickname,
+      'ts': loc.updatedAt,
+    }));
+    for (final c in knownContacts.values.toList()) {
+      if (!c.isOnline) continue;
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: c.nodeId,
+        contact: c,
+        msgId: 'loc_${nodeId}_${_randomHex(4)}',
+        sealedPayloadBytes: payload,
+        persistInOutbox: false,
+        keepInTransitBuffer: false,
+      );
+    }
+  }
+
+  Future<void> _broadcastLocationStop() async {
+    final payload = utf8.encode(jsonEncode({'v': 2, 'kind': 'LOC_STOP'}));
+    for (final c in knownContacts.values.toList()) {
+      if (!c.isOnline) continue;
+      await _encryptAndQueueSealedDataPacket(
+        targetNodeId: c.nodeId,
+        contact: c,
+        msgId: 'locstop_${_randomHex(6)}',
+        sealedPayloadBytes: payload,
+        persistInOutbox: false,
+        keepInTransitBuffer: false,
+      );
+    }
+  }
+
+  // ==================== v2.3.0: МЕЖРЕГИОНАЛЬНЫЙ РЕЖИМ (BETA) ====================
+  Future<void> setCustomExternalEndpoint(String endpoint) async {
+    customExternalEndpoint = endpoint.trim();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('mayak_ext_endpoint', customExternalEndpoint);
+    } catch (_) {}
+    onStateChanged();
+  }
+
+  Future<void> setInterRegionalBridgeMode(bool enabled) async {
+    isInterRegionalBridgeEnabled = enabled;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('mayak_bridge_mode', enabled);
+    } catch (_) {}
+    _addLog(enabled
+        ? 'Межрегиональный Bridge-ретранслятор ВКЛ'
+        : 'Межрегиональный Bridge-ретранслятор ВЫКЛ');
+    onStateChanged();
+  }
+
+  String buildInterRegionalInviteLink() {
+    final ips = <String>[
+      if (customExternalEndpoint.isNotEmpty) customExternalEndpoint,
+      ...cachedIps,
+    ];
+    final map = {
+      'id': nodeId,
+      'dh': dhPubHex,
+      'sg': signPubHex,
+      'nick': nickname,
+      'hw': myHwFingerprint,
+      'os': myPlatformInfo,
+      'p': listenPort,
+      'ips': ips,
+    };
+    return 'mayak://${base64Url.encode(utf8.encode(jsonEncode(map)))}';
+  }
+
   Future<void> startPttTransmit() async {
     if (activeCallPeerId != null || isPttTransmitting) return;
     isPttTransmitting = true;
@@ -2324,7 +2656,15 @@ class MeshEngine {
   Future<void> _onIncomingPttChunk(Map<String, dynamic> map) async {
     if (activeCallPeerId != null || isPttTransmitting) return;
     final target = (map['t'] ?? 'ALL').toString();
-    if (target != 'ALL' && target != nodeId) return;
+    if (target != 'ALL' && target != nodeId) {
+      if (target.startsWith('group:')) {
+        final gid = target.substring(6);
+        final grp = groupChats[gid];
+        if (grp == null || !grp.memberIds.contains(nodeId)) return;
+      } else {
+        return;
+      }
+    }
     final b64 = (map['ptt_bin'] ?? '').toString();
     if (b64.isEmpty) return;
     final speaker = (map['sn'] ?? 'Узел').toString();
@@ -2778,6 +3118,8 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     try {
       final prefs = await SharedPreferences.getInstance();
       defaultDisappearingSeconds = prefs.getInt('mayak_disappear_sec') ?? 0;
+      customExternalEndpoint = prefs.getString('mayak_ext_endpoint') ?? '';
+      isInterRegionalBridgeEnabled = prefs.getBool('mayak_bridge_mode') ?? false;
     } catch (_) {}
     _disappearingSweeper?.cancel();
     _disappearingSweeper =
@@ -4519,16 +4861,20 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
   }
 
   Future<String?> connectWithInviteOrIp(String rawInput) async {
-    final input = rawInput.trim();
+    var input = rawInput.trim();
     if (input.isEmpty) return null;
+    if (input.startsWith('mayak://')) {
+      input = input.substring(8).trim();
+    }
 
-    final ipRegex =
-        RegExp(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::(\d+))?$');
-    final match = ipRegex.firstMatch(input);
-    if (match != null) {
-      final host = match.group(1)!;
-      final port = int.tryParse(match.group(2) ?? '') ?? defaultTcpPort;
-      _addLog('Прямое подключение к $host:$port...');
+    // Поддержка IPv4, DNS-доменов (DDNS для межрегиональной связи) и IPv6 в скобках
+    final hostPortRegex = RegExp(
+        r'^(?:\[([0-9a-fA-F:]+)\]|([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]+))(?::(\d+))?$');
+    final match = hostPortRegex.firstMatch(input);
+    if (match != null && !input.contains('=') && input.length < 120) {
+      final host = match.group(1) ?? match.group(2)!;
+      final port = int.tryParse(match.group(3) ?? '') ?? defaultTcpPort;
+      _addLog('Прямое P2P-подключение к $host:$port...');
       await connectToHost(host, port, forceNewConnection: true);
       return null;
     }
@@ -7035,6 +7381,24 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             ));
           }
         }
+      } else if (kind == 'LOC_UPDATE') {
+        final lat = (envelope['lat'] as num?)?.toDouble();
+        final lon = (envelope['lon'] as num?)?.toDouble();
+        if (lat != null && lon != null) {
+          peerLocations[senderId] = PeerLocationRecord(
+            nodeId: senderId,
+            nickname: (envelope['nick'] ?? contact.displayTitle).toString(),
+            lat: lat,
+            lon: lon,
+            altMeters: (envelope['alt'] as num?)?.toDouble() ?? 0.0,
+            pressureHpa: (envelope['hpa'] as num?)?.toDouble() ?? 0.0,
+            isManualAnchor: envelope['man'] == true,
+            updatedAt: (envelope['ts'] as num?)?.toInt() ??
+                DateTime.now().millisecondsSinceEpoch,
+          );
+        }
+      } else if (kind == 'LOC_STOP') {
+        peerLocations.remove(senderId);
       } else if (kind == 'GROUP_LEAVE') {
         final gid = (envelope['gid'] ?? '').toString();
         final origSenderId = (envelope['osid'] ?? senderId).toString();

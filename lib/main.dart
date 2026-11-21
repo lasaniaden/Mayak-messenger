@@ -49,7 +49,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.2',
+      title: 'Маяк P2P v2.3',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -1328,6 +1328,19 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
               onTap: () {
                 setState(() => _drawerSection = 'groups');
                 Navigator.pop(context);
+              },
+            ),
+            _drawerTile(
+              icon: Icons.public_rounded,
+              label: 'Карта узлов (2D / 3D)',
+              selected: false,
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => MayakTacticalMapScreen(engine: engine),
+                  ),
+                );
               },
             ),
             _drawerTile(
@@ -6567,24 +6580,49 @@ class _MayakGlobalFloatingOverlayState
                           children: [
                             Text(
                               engine.isPttTransmitting
-                                  ? 'В ЭФИРЕ (передача)...'
+                                  ? 'TX • ${engine.currentPttChannelLabel}'
                                   : (engine.pttActiveSpeakerName != null
-                                      ? 'Говорит: ${engine.pttActiveSpeakerName}'
-                                      : 'Рация (PTT) • Общий эфир'),
+                                      ? 'RX • Говорит: ${engine.pttActiveSpeakerName}'
+                                      : engine.currentPttChannelLabel),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                                fontSize: 12.5,
                               ),
                             ),
-                            Text(
-                              engine.isPttTransmitting
-                                  ? 'Отпусти кнопку для Roger Beep'
-                                  : 'Удерживай кнопку, чтобы говорить',
-                              style: const TextStyle(
-                                  color: Colors.white60, fontSize: 11),
+                            const SizedBox(height: 2),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                InkWell(
+                                  onTap: () => engine.cyclePttChannel(-1),
+                                  child: const Padding(
+                                    padding: EdgeInsets.symmetric(
+                                        horizontal: 4, vertical: 2),
+                                    child: Icon(Icons.chevron_left_rounded,
+                                        size: 16, color: Colors.white70),
+                                  ),
+                                ),
+                                Text(
+                                  engine.currentPttChannelFreq,
+                                  style: const TextStyle(
+                                    fontFamily: 'monospace',
+                                    color: Colors.white70,
+                                    fontSize: 10.5,
+                                  ),
+                                ),
+                                InkWell(
+                                  onTap: () => engine.cyclePttChannel(1),
+                                  child: const Padding(
+                                    padding: EdgeInsets.symmetric(
+                                        horizontal: 4, vertical: 2),
+                                    child: Icon(Icons.chevron_right_rounded,
+                                        size: 16, color: Colors.white70),
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -7079,6 +7117,87 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
             ),
           ),
           _connectionCard(
+            icon: Icons.language_rounded,
+            title: 'Межрегиональный P2P (Beta)',
+            statusText: engine.customExternalEndpoint.isNotEmpty
+                ? 'Внешний адрес: ${engine.customExternalEndpoint} • Bridge: ${engine.isInterRegionalBridgeEnabled ? "ВКЛ" : "ВЫКЛ"}'
+                : 'Прямая связь между городами без центральных серверов',
+            statusColor: engine.customExternalEndpoint.isNotEmpty
+                ? MayakTheme.accentEmerald
+                : Colors.white54,
+            tutorial:
+                'Первые шаги межрегиональной связи (0 серверов, сквозное E2EE):\n'
+                '1. Пробросьте порт TCP 42070 (и UDP 42072 для звонков) на домашнем роутере или используйте бесплатный DDNS (например, duckdns.org) / белый IPv4 / IPv6.\n'
+                '2. Укажите ваш внешний адрес (например, mynode.duckdns.org) ниже и скопируйте ссылку mayak:// для друга из другого города.\n'
+                '3. Друг вставляет ссылку или адрес в «QR-код / Ввести IP» — и вы соединяетесь напрямую между регионами.\n'
+                '4. Включите режим Bridge на домашнем ПК, чтобы он ретранслировал E2EE-пакеты между участниками.',
+            actionButton: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () {
+                    final ctrl = TextEditingController(
+                        text: engine.customExternalEndpoint);
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        backgroundColor: MayakTheme.bgSurface,
+                        title: const Text('Внешний адрес (DDNS / IP)'),
+                        content: TextField(
+                          controller: ctrl,
+                          decoration: const InputDecoration(
+                            hintText: 'Например: mynode.duckdns.org',
+                          ),
+                        ),
+                        actions: [
+                          TextButton(
+                              onPressed: () => Navigator.pop(ctx),
+                              child: const Text('Отмена')),
+                          FilledButton(
+                            onPressed: () async {
+                              Navigator.pop(ctx);
+                              await engine.setCustomExternalEndpoint(ctrl.text);
+                            },
+                            child: const Text('Сохранить'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.dns_outlined, size: 18),
+                  label: const Text('Задать внешний адрес (DDNS / IP)'),
+                ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    final link = engine.buildInterRegionalInviteLink();
+                    Clipboard.setData(ClipboardData(text: link));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text('Ссылка mayak:// скопирована!')),
+                    );
+                  },
+                  icon: const Icon(Icons.link_rounded, size: 18),
+                  label: const Text('Скопировать межрегиональную ссылку mayak://'),
+                ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () => engine.setInterRegionalBridgeMode(
+                      !engine.isInterRegionalBridgeEnabled),
+                  icon: Icon(
+                    engine.isInterRegionalBridgeEnabled
+                        ? Icons.router_rounded
+                        : Icons.router_outlined,
+                    size: 18,
+                  ),
+                  label: Text(engine.isInterRegionalBridgeEnabled
+                      ? 'Bridge-ретранслятор: ВКЛ'
+                      : 'Включить Bridge-ретранслятор'),
+                ),
+              ],
+            ),
+          ),
+          _connectionCard(
             icon: Icons.inventory_2_outlined,
             title: 'Mesh-буфер (Офлайн-доставка)',
             statusText: 'В буфере сейчас: ${engine.totalBufferedCount} пакет(ов)',
@@ -7441,4 +7560,487 @@ class _SavedMessagesScreenState extends State<SavedMessagesScreen> {
       ),
     );
   }
+}
+
+
+// =============================================================================
+// v2.3.0: МОНОХРОМНАЯ 2D/3D-КАРТА УЗЛОВ (БЕСПЛАТНО, ОФЛАЙН-РАДАР + БАРОМЕТР + АНТИ-РЭБ)
+// =============================================================================
+
+class MayakTacticalMapScreen extends StatefulWidget {
+  final MeshEngine engine;
+  const MayakTacticalMapScreen({super.key, required this.engine});
+
+  @override
+  State<MayakTacticalMapScreen> createState() => _MayakTacticalMapScreenState();
+}
+
+class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
+  MeshEngine get engine => widget.engine;
+  double _centerLat = 46.3497; // Астрахань / центр по умолчанию до получения GPS
+  double _centerLon = 48.0408;
+  int _zoom = 14;
+  bool _is3dMode = false;
+  bool _pickingManualAnchor = false;
+
+  // Матрица: превращает стандартные бесплатные OSM-тайлы в стильный ч/б негатив (белые дороги на чёрном фоне!)
+  static const List<double> _monoInvertMatrix = <double>[
+    -0.30, -0.59, -0.11, 0, 245,
+    -0.30, -0.59, -0.11, 0, 245,
+    -0.30, -0.59, -0.11, 0, 245,
+    0, 0, 0, 1, 0,
+  ];
+
+  void _onUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    engine.addListenerState(_onUpdate);
+    unawaited(engine.pollAndBroadcastLocation().then((_) {
+      if (mounted && engine.myLocation != null) {
+        setState(() {
+          _centerLat = engine.myLocation!.lat;
+          _centerLon = engine.myLocation!.lon;
+        });
+      }
+    }));
+  }
+
+  @override
+  void dispose() {
+    engine.removeListenerState(_onUpdate);
+    super.dispose();
+  }
+
+  double _lonToTileX(double lon, int z) => (lon + 180.0) / 360.0 * (1 << z);
+
+  double _latToTileY(double lat, int z) {
+    final rad = lat.clamp(-85.0, 85.0) * pi / 180.0;
+    return (1.0 - log(tan(rad) + 1.0 / cos(rad)) / pi) / 2.0 * (1 << z);
+  }
+
+  double _tileXToLon(double x, int z) => x / (1 << z) * 360.0 - 180.0;
+
+  double _tileYToLat(double y, int z) {
+    final n = pi - 2.0 * pi * y / (1 << z);
+    return 180.0 / pi * atan(0.5 * (exp(n) - exp(-n)));
+  }
+
+  Widget _buildPeerPin({
+    required String name,
+    required String subline,
+    required bool isMe,
+    required double heightBoostPx,
+    required Offset pos,
+  }) {
+    final pillarH = _is3dMode ? heightBoostPx.clamp(12.0, 72.0) : 0.0;
+    return Positioned(
+      left: pos.dx - 70,
+      top: pos.dy - 44 - pillarH,
+      child: SizedBox(
+        width: 140,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: isMe ? Colors.white : const Color(0xEE0D0D0D),
+                borderRadius: BorderRadius.circular(5),
+                border: Border.all(
+                  color: isMe ? Colors.white : Colors.white70,
+                  width: 1.2,
+                ),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black87, blurRadius: 8),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.check_circle_rounded,
+                    size: 14,
+                    color: isMe ? Colors.black : MayakTheme.accentEmerald,
+                  ),
+                  const SizedBox(width: 5),
+                  Flexible(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: isMe ? Colors.black : Colors.white,
+                          ),
+                        ),
+                        Text(
+                          subline,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            color: isMe ? Colors.black87 : Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_is3dMode)
+              Container(
+                width: 2,
+                height: pillarH,
+                color: isMe ? Colors.white : MayakTheme.accentEmerald,
+              ),
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: isMe ? Colors.white : MayakTheme.accentEmerald,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.black, width: 1.5),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final peers = engine.peerLocations.values.toList();
+    final me = engine.myLocation;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: const Text('Карта узлов',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => setState(() => _is3dMode = !_is3dMode),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: _is3dMode ? Colors.white : const Color(0xFF161616),
+                borderRadius: BorderRadius.circular(5),
+                border: Border.all(color: Colors.white54),
+              ),
+              child: Text(
+                _is3dMode ? '3D' : '2D',
+                style: TextStyle(
+                  color: _is3dMode ? Colors.black : Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Верхняя панель: тумблер трансляции гео + анти-РЭБ
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: const BoxDecoration(
+              color: MayakTheme.bgSurface,
+              border: Border(bottom: BorderSide(color: Color(0x22FFFFFF))),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.my_location_rounded,
+                        size: 18, color: Colors.white),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Показывать меня на карте',
+                              style: TextStyle(
+                                  fontSize: 13, fontWeight: FontWeight.w600)),
+                          Text(
+                            me != null
+                                ? '${me.lat.toStringAsFixed(5)}, ${me.lon.toStringAsFixed(5)} • ${me.pressureHpa > 0 ? "${me.pressureHpa.toStringAsFixed(1)} hPa" : "выс. ${me.altMeters.toStringAsFixed(0)} м"}'
+                                : 'Координаты не получены (нажми на карту для якоря)',
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.white54),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Switch(
+                      value: engine.isLocationSharingEnabled,
+                      activeColor: Colors.white,
+                      activeTrackColor: Colors.white30,
+                      onChanged: (_) => engine.toggleLocationSharing(),
+                    ),
+                  ],
+                ),
+                if (engine.gpsSpoofingDetected || _pickingManualAnchor)
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(top: 6),
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1A1A1A),
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(color: Colors.white38),
+                    ),
+                    child: Text(
+                      _pickingManualAnchor
+                          ? 'Нажми в любую точку карты, чтобы закрепить своё реальное местоположение вручную (обход РЭБ)'
+                          : '⚠️ ${engine.gpsSpoofingNote}',
+                      style:
+                          const TextStyle(fontSize: 11, color: Colors.white70),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          // Интерактивное полотно 2D / 3D монохромной карты
+          Expanded(
+            child: LayoutBuilder(
+              builder: (ctx, box) {
+                final w = box.maxWidth;
+                final h = box.maxHeight;
+                final cx = _lonToTileX(_centerLon, _zoom);
+                final cy = _latToTileY(_centerLat, _zoom);
+                const tileSize = 256.0;
+                final maxTile = (1 << _zoom) - 1;
+                final baseTx = cx.floor();
+                final baseTy = cy.floor();
+                final offX = w / 2 - (cx - baseTx) * tileSize;
+                final offY = h / 2 - (cy - baseTy) * tileSize;
+
+                Offset latLonToScreen(double lat, double lon) {
+                  final tx = _lonToTileX(lon, _zoom);
+                  final ty = _latToTileY(lat, _zoom);
+                  return Offset(
+                    w / 2 + (tx - cx) * tileSize,
+                    h / 2 + (ty - cy) * tileSize,
+                  );
+                }
+
+                Widget mapCanvas = GestureDetector(
+                  onPanUpdate: (d) {
+                    setState(() {
+                      final newCx = cx - d.delta.dx / tileSize;
+                      final newCy = cy - d.delta.dy / tileSize;
+                      _centerLon = _tileXToLon(newCx, _zoom).clamp(-179.9, 179.9);
+                      _centerLat = _tileYToLat(newCy, _zoom).clamp(-84.0, 84.0);
+                    });
+                  },
+                  onTapUp: (details) async {
+                    if (!_pickingManualAnchor) return;
+                    final lp = details.localPosition;
+                    final tapTx = cx + (lp.dx - w / 2) / tileSize;
+                    final tapTy = cy + (lp.dy - h / 2) / tileSize;
+                    final lat = _tileYToLat(tapTy, _zoom);
+                    final lon = _tileXToLon(tapTx, _zoom);
+                    setState(() => _pickingManualAnchor = false);
+                    await engine.setManualMapAnchor(lat, lon);
+                  },
+                  child: ClipRect(
+                    child: Stack(
+                      children: [
+                        // Офлайн-радарная сетка (всегда видна даже без интернета!)
+                        Positioned.fill(
+                          child: CustomPaint(painter: _TacticalGridPainter()),
+                        ),
+                        // Бесплатные тайлы OSM в стильном ч/б негативе (белые линии на чёрном)
+                        for (int dx = -2; dx <= 2; dx++)
+                          for (int dy = -2; dy <= 2; dy++)
+                            if (baseTy + dy >= 0 && baseTy + dy <= maxTile)
+                              Positioned(
+                                left: offX + dx * tileSize,
+                                top: offY + dy * tileSize,
+                                width: tileSize,
+                                height: tileSize,
+                                child: ColorFiltered(
+                                  colorFilter: const ColorFilter.matrix(
+                                      _monoInvertMatrix),
+                                  child: Image.network(
+                                    'https://tile.openstreetmap.org/$_zoom/${((baseTx + dx) % (1 << _zoom) + (1 << _zoom)) % (1 << _zoom)}/${baseTy + dy}.png',
+                                    fit: BoxFit.cover,
+                                    headers: const {
+                                      'User-Agent': 'MayakP2PMesh/2.3',
+                                    },
+                                    errorBuilder: (_, __, ___) =>
+                                        const SizedBox.shrink(),
+                                  ),
+                                ),
+                              ),
+                        // Маркер себя
+                        if (me != null)
+                          _buildPeerPin(
+                            name: '${engine.nickname} (Вы)',
+                            subline: me.isManualAnchor
+                                ? 'Якорь • ${me.pressureHpa > 0 ? "${me.pressureHpa.toStringAsFixed(1)} hPa" : "ручн."}'
+                                : (me.pressureHpa > 0
+                                    ? '${me.pressureHpa.toStringAsFixed(1)} hPa'
+                                    : '${me.altMeters.toStringAsFixed(0)} м'),
+                            isMe: true,
+                            heightBoostPx: 26,
+                            pos: latLonToScreen(me.lat, me.lon),
+                          ),
+                        // Маркеры узлов, разрешивших отслеживание
+                        for (final p in peers)
+                          _buildPeerPin(
+                            name: p.nickname,
+                            subline: engine.formatRelativeHeightToPeer(p),
+                            isMe: false,
+                            heightBoostPx: 26 +
+                                ((me != null &&
+                                        me.pressureHpa > 300 &&
+                                        p.pressureHpa > 300)
+                                    ? (44330.0 *
+                                            (1.0 -
+                                                pow(p.pressureHpa / me.pressureHpa,
+                                                    0.1903))) *
+                                        3.0
+                                    : 0.0),
+                            pos: latLonToScreen(p.lat, p.lon),
+                          ),
+                      ],
+                    ),
+                  ),
+                );
+
+                if (_is3dMode) {
+                  mapCanvas = Transform(
+                    alignment: Alignment.center,
+                    transform: Matrix4.identity()
+                      ..setEntry(3, 2, 0.0012)
+                      ..rotateX(-0.68),
+                    child: mapCanvas,
+                  );
+                }
+
+                return Stack(
+                  children: [
+                    Positioned.fill(child: mapCanvas),
+                    // Кнопки управления картой справа
+                    Positioned(
+                      right: 12,
+                      bottom: 16,
+                      child: Column(
+                        children: [
+                          _mapCtrlBtn(Icons.add_rounded, () {
+                            if (_zoom < 18) setState(() => _zoom++);
+                          }),
+                          const SizedBox(height: 6),
+                          _mapCtrlBtn(Icons.remove_rounded, () {
+                            if (_zoom > 2) setState(() => _zoom--);
+                          }),
+                          const SizedBox(height: 6),
+                          _mapCtrlBtn(Icons.gps_fixed_rounded, () async {
+                            await engine.pollAndBroadcastLocation();
+                            if (mounted && engine.myLocation != null) {
+                              setState(() {
+                                _centerLat = engine.myLocation!.lat;
+                                _centerLon = engine.myLocation!.lon;
+                              });
+                            }
+                          }),
+                          const SizedBox(height: 6),
+                          _mapCtrlBtn(
+                            Icons.push_pin_outlined,
+                            () => setState(() =>
+                                _pickingManualAnchor = !_pickingManualAnchor),
+                            active: _pickingManualAnchor,
+                          ),
+                        ],
+                      ),
+                    ),
+                    // Нижний счётчик узлов на карте
+                    Positioned(
+                      left: 12,
+                      bottom: 16,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(5),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: Text(
+                          'Узлов на карте: ${peers.length} • Z$_zoom • ${_is3dMode ? "3D" : "2D"}',
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.white70),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _mapCtrlBtn(IconData icon, VoidCallback onTap, {bool active = false}) {
+    return SizedBox(
+      width: 42,
+      height: 42,
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          padding: EdgeInsets.zero,
+          backgroundColor: active ? Colors.white : const Color(0xEE101010),
+          foregroundColor: active ? Colors.black : Colors.white,
+          side: const BorderSide(color: Color(0x44FFFFFF)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+        ),
+        onPressed: onTap,
+        child: Icon(icon, size: 20),
+      ),
+    );
+  }
+}
+
+class _TacticalGridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()
+      ..color = const Color(0x18FFFFFF)
+      ..strokeWidth = 1;
+    const step = 48.0;
+    for (double x = 0; x < size.width; x += step) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), p);
+    }
+    for (double y = 0; y < size.height; y += step) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), p);
+    }
+    final c = Offset(size.width / 2, size.height / 2);
+    final ring = Paint()
+      ..color = const Color(0x22FFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    for (final r in [60.0, 130.0, 210.0]) {
+      canvas.drawCircle(c, r, ring);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
