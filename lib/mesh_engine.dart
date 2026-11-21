@@ -3915,6 +3915,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     try {
       await _loadOrCreateIdentity();
       await _loadPersistedContactsAndChats();
+      _deduplicatePersistedContacts();
     } catch (e) {
       _addLog('Ошибка инициализации хранилища: $e');
     }
@@ -3922,6 +3923,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     if (Platform.isAndroid) {
       try {
         await _nativeChannel.invokeMethod('acquireMulticastLock');
+        await _nativeChannel.invokeMethod('bindProcessToWifiForLan');
         await _nativeChannel.invokeMethod('startBackgroundService');
         bgServiceActive = true;
       } catch (_) {}
@@ -4508,6 +4510,9 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     } catch (_) {}
 
     vpnDetected = detectedVpnInterface;
+    if (Platform.isAndroid && (detectedVpnInterface || cachedIps.isNotEmpty)) {
+      unawaited(_nativeChannel.invokeMethod('bindProcessToWifiForLan').catchError((_) {}));
+    }
     final result = [...preferredLan, ...fallbackLan];
     if (result.isEmpty) result.add('127.0.0.1');
     return result;
@@ -5567,6 +5572,51 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     }
   }
 
+  void _deduplicatePersistedContacts() {
+    final seenBySign = <String, String>{};
+    final seenByHw = <String, String>{};
+    final toRemove = <String>[];
+    final entries = knownContacts.entries.toList()
+      ..sort((a, b) {
+        final ca = chatHistory[a.key]?.length ?? 0;
+        final cb = chatHistory[b.key]?.length ?? 0;
+        if (ca != cb) return cb.compareTo(ca); // Сохраняем контакт с историей!
+        return b.value.lastSeenTimestamp.compareTo(a.value.lastSeenTimestamp);
+      });
+    for (final e in entries) {
+      final id = e.key;
+      final c = e.value;
+      String? canonical;
+      if (c.signPubHex.isNotEmpty && seenBySign.containsKey(c.signPubHex)) {
+        canonical = seenBySign[c.signPubHex];
+      } else if (c.hwFingerprint.isNotEmpty &&
+          seenByHw.containsKey(c.hwFingerprint)) {
+        canonical = seenByHw[c.hwFingerprint];
+      }
+      if (canonical != null && canonical != id) {
+        final oldHist = chatHistory.remove(id);
+        if (oldHist != null && oldHist.isNotEmpty) {
+          final dst = getMessagesFor(canonical);
+          final ids = dst.map((m) => m.msgId).toSet();
+          for (final m in oldHist) {
+            if (!ids.contains(m.msgId)) dst.add(m);
+          }
+          dst.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        }
+        toRemove.add(id);
+      } else {
+        if (c.signPubHex.isNotEmpty) seenBySign[c.signPubHex] = id;
+        if (c.hwFingerprint.isNotEmpty) seenByHw[c.hwFingerprint] = id;
+      }
+    }
+    for (final id in toRemove) {
+      knownContacts.remove(id);
+    }
+    if (toRemove.isNotEmpty) {
+      unawaited(_saveContactsAndChats());
+    }
+  }
+
   void _upsertContact({
     required String nodeId,
     required String dhPubHex,
@@ -5601,23 +5651,27 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final duplicateIds = <String>[];
     knownContacts.forEach((oldId, oldContact) {
       if (oldId == nodeId) return;
+      final samePubKey =
+          (signPubHex.isNotEmpty && oldContact.signPubHex == signPubHex) ||
+              (dhPubHex.isNotEmpty && oldContact.dhPubHex == dhPubHex);
       final sameHw = cleanHw.isNotEmpty &&
           oldContact.hwFingerprint.isNotEmpty &&
           oldContact.hwFingerprint == cleanHw;
       final oldIp = oldContact.lastAddress.contains(':')
           ? oldContact.lastAddress.split(':').first
           : oldContact.lastAddress;
-      final sameOfflineDeviceByNameOrIp = !oldContact.isOnline &&
-          ((cleanNick.isNotEmpty &&
-                  !cleanNick.startsWith('Android-') &&
-                  !cleanNick.startsWith('PC-') &&
-                  !cleanNick.startsWith('Узел ') &&
-                  oldContact.nickname == cleanNick) ||
-              (cleanIp.isNotEmpty &&
-                  cleanIp != 'Через Mesh' &&
-                  oldIp == cleanIp));
+      final sameLanIp = cleanIp.isNotEmpty &&
+          cleanIp != 'Через Mesh' &&
+          !cleanIp.startsWith('BLE') &&
+          oldIp == cleanIp;
+      final sameOfflineByNick = !oldContact.isOnline &&
+          cleanNick.isNotEmpty &&
+          !cleanNick.startsWith('Android-') &&
+          !cleanNick.startsWith('PC-') &&
+          !cleanNick.startsWith('Узел ') &&
+          oldContact.nickname == cleanNick;
 
-      if (sameHw || sameOfflineDeviceByNameOrIp) {
+      if (samePubKey || sameHw || sameLanIp || sameOfflineByNick) {
         duplicateIds.add(oldId);
       }
     });
@@ -5626,7 +5680,21 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       final oldHistory = chatHistory.remove(oldId);
       if (oldHistory != null && oldHistory.isNotEmpty) {
         final currentHistory = getMessagesFor(nodeId);
-        currentHistory.insertAll(0, oldHistory);
+        final existingMsgIds = currentHistory.map((m) => m.msgId).toSet();
+        for (final m in oldHistory) {
+          if (!existingMsgIds.contains(m.msgId)) {
+            currentHistory.add(m);
+            existingMsgIds.add(m.msgId);
+          }
+        }
+        currentHistory.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      }
+      // Перенаправляем живые сокеты со старого ID на актуальный
+      for (final entry in _tcpPeers.entries.toList()) {
+        if (entry.value == oldId) _tcpPeers[entry.key] = nodeId;
+      }
+      for (final entry in _blePeers.entries.toList()) {
+        if (entry.value == oldId) _blePeers[entry.key] = nodeId;
       }
       if (activeOpenChatId == oldId) {
         activeOpenChatId = nodeId;
@@ -5673,6 +5741,25 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     }
   }
 
+  String? _selectLocalSourceIpFor(String targetHost) {
+    if (cachedIps.isEmpty) return null;
+    final tParts = targetHost.split('.');
+    if (tParts.length == 4) {
+      final tPrefix = '${tParts[0]}.${tParts[1]}.${tParts[2]}.';
+      for (final ip in cachedIps) {
+        if (ip.startsWith(tPrefix) && !ip.startsWith('198.18.') && !ip.startsWith('198.19.')) {
+          return ip;
+        }
+      }
+    }
+    for (final ip in cachedIps) {
+      if (ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.')) {
+        return ip;
+      }
+    }
+    return null;
+  }
+
   Future<void> connectToHost(
     String host,
     int port, {
@@ -5693,11 +5780,22 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     if (_connectingHosts.contains(key)) return;
     _connectingHosts.add(key);
     try {
-      final socket = await Socket.connect(
-        host,
-        port,
-        timeout: timeout,
-      );
+      final srcIp = _selectLocalSourceIpFor(host);
+      Socket socket;
+      if (srcIp != null) {
+        try {
+          socket = await Socket.connect(
+            host,
+            port,
+            sourceAddress: InternetAddress(srcIp),
+            timeout: timeout,
+          );
+        } catch (_) {
+          socket = await Socket.connect(host, port, timeout: timeout);
+        }
+      } else {
+        socket = await Socket.connect(host, port, timeout: timeout);
+      }
       _setupTcpSocket(socket);
     } catch (_) {
     } finally {

@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.1.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.2.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.1.0"
+                  versionName = "2.2.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.1.0"
+                  versionName "2.2.0"
               }}
 
               packagingOptions {{
@@ -938,6 +938,9 @@ jobs:
                               "cancelIncomingCallNotification" -> {
                                   cancelIncomingCallNotificationInternal()
                                   result.success(true)
+                              }
+                              "bindProcessToWifiForLan" -> {
+                                  result.success(bindProcessToWifiForLanInternal())
                               }
                               else -> result.notImplemented()
                           }
@@ -2441,6 +2444,39 @@ jobs:
                   } catch (_: Throwable) {}
               }
 
+              private fun bindProcessToWifiForLanInternal(): Boolean {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+                  return try {
+                      val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                      @Suppress("DEPRECATION")
+                      val nets = cm.allNetworks
+                      var wifiNet: android.net.Network? = null
+                      for (n in nets) {
+                          val caps = cm.getNetworkCapabilities(n) ?: continue
+                          val isWifi = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                          val isVpn = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                          if (isWifi && !isVpn) {
+                              wifiNet = n
+                              break
+                          }
+                      }
+                      if (wifiNet != null) {
+                          val ok = cm.bindProcessToNetwork(wifiNet)
+                          if (ok) {
+                              mainHandler.post {
+                                  methodChannel?.invokeMethod("onNativeLog", "LAN Bypass: процесс привязан напрямую к физическому Wi-Fi в обход VPN/Proxy")
+                              }
+                          }
+                          ok
+                      } else {
+                          cm.bindProcessToNetwork(null)
+                          false
+                      }
+                  } catch (_: Throwable) {
+                      false
+                  }
+              }
+
               override fun onDestroy() {
                   if (currentInstance == this) currentInstance = null
                   stopCallAudioInternal()
@@ -2472,7 +2508,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.1.0 --build-number=$((2100 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.2.0 --build-number=$((2200 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
