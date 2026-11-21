@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -49,7 +50,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.4',
+      title: 'Маяк P2P v2.5',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -7120,81 +7121,53 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
           ),
           _connectionCard(
             icon: Icons.language_rounded,
-            title: 'Межрегиональный P2P (Beta)',
-            statusText: engine.customExternalEndpoint.isNotEmpty
-                ? 'Внешний адрес: ${engine.customExternalEndpoint} • Bridge: ${engine.isInterRegionalBridgeEnabled ? "ВКЛ" : "ВЫКЛ"}'
-                : 'Прямая связь между городами без центральных серверов',
-            statusColor: engine.customExternalEndpoint.isNotEmpty
+            title: 'Межрегиональная связь (Авто)',
+            statusText: engine.discoveredExternalEndpoint.isNotEmpty
+                ? 'Авто-адрес: ${engine.discoveredExternalEndpoint}'
+                : engine.interRegionalStatusText,
+            statusColor: engine.discoveredExternalEndpoint.isNotEmpty
                 ? MayakTheme.accentEmerald
                 : Colors.white54,
             tutorial:
-                'Первые шаги межрегиональной связи (0 серверов, сквозное E2EE):\n'
-                '1. Пробросьте порт TCP 42070 (и UDP 42072 для звонков) на домашнем роутере или используйте бесплатный DDNS (например, duckdns.org) / белый IPv4 / IPv6.\n'
-                '2. Укажите ваш внешний адрес (например, mynode.duckdns.org) ниже и скопируйте ссылку mayak:// для друга из другого города.\n'
-                '3. Друг вставляет ссылку или адрес в «QR-код / Ввести IP» — и вы соединяетесь напрямую между регионами.\n'
-                '4. Включите режим Bridge на домашнем ПК, чтобы он ретранслировал E2EE-пакеты между участниками.',
+                'Автоматическая связь между городами с телефона на телефон (без настроек роутера и без домашнего ПК):\n'
+                '1. Нажмите «Авто-настройка связи» — Маяк сам определит ваш внешний адрес через STUN.\n'
+                '2. Нажмите «Скопировать мой код» и отправьте другу в другой город.\n'
+                '3. Друг вставляет код в «QR-код / Ввести IP» — устройства соединяются напрямую с E2EE.',
             actionButton: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 OutlinedButton.icon(
-                  onPressed: () {
-                    final ctrl = TextEditingController(
-                        text: engine.customExternalEndpoint);
-                    showDialog(
-                      context: context,
-                      builder: (ctx) => AlertDialog(
-                        backgroundColor: MayakTheme.bgSurface,
-                        title: const Text('Внешний адрес (DDNS / IP)'),
-                        content: TextField(
-                          controller: ctrl,
-                          decoration: const InputDecoration(
-                            hintText: 'Например: mynode.duckdns.org',
-                          ),
-                        ),
-                        actions: [
-                          TextButton(
-                              onPressed: () => Navigator.pop(ctx),
-                              child: const Text('Отмена')),
-                          FilledButton(
-                            onPressed: () async {
-                              Navigator.pop(ctx);
-                              await engine.setCustomExternalEndpoint(ctrl.text);
-                            },
-                            child: const Text('Сохранить'),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.dns_outlined, size: 18),
-                  label: const Text('Задать внешний адрес (DDNS / IP)'),
-                ),
-                const SizedBox(height: 6),
-                OutlinedButton.icon(
-                  onPressed: () {
-                    final link = engine.buildInterRegionalInviteLink();
-                    Clipboard.setData(ClipboardData(text: link));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                          content: Text('Ссылка mayak:// скопирована!')),
-                    );
-                  },
-                  icon: const Icon(Icons.link_rounded, size: 18),
-                  label: const Text('Скопировать межрегиональную ссылку mayak://'),
-                ),
-                const SizedBox(height: 6),
-                OutlinedButton.icon(
-                  onPressed: () => engine.setInterRegionalBridgeMode(
-                      !engine.isInterRegionalBridgeEnabled),
+                  onPressed: engine.isDiscoveringExternalAddr
+                      ? null
+                      : () => engine.toggleAutoInterRegionalMode(),
                   icon: Icon(
-                    engine.isInterRegionalBridgeEnabled
-                        ? Icons.router_rounded
-                        : Icons.router_outlined,
+                    engine.isAutoInterRegionalEnabled
+                        ? Icons.sync_rounded
+                        : Icons.public_rounded,
                     size: 18,
                   ),
-                  label: Text(engine.isInterRegionalBridgeEnabled
-                      ? 'Bridge-ретранслятор: ВКЛ'
-                      : 'Включить Bridge-ретранслятор'),
+                  label: Text(engine.isDiscoveringExternalAddr
+                      ? 'Определение адреса...'
+                      : (engine.isAutoInterRegionalEnabled
+                          ? 'Обновить авто-адрес (STUN)'
+                          : 'Включить авто-настройку (STUN)')),
+                ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    if (engine.discoveredExternalEndpoint.isEmpty) {
+                      await engine.discoverExternalEndpointAuto();
+                    }
+                    final link = engine.buildInterRegionalInviteLink();
+                    Clipboard.setData(ClipboardData(text: link));
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text('Код связи mayak:// скопирован!')),
+                    );
+                  },
+                  icon: const Icon(Icons.copy_rounded, size: 18),
+                  label: const Text('Скопировать мой код для друга'),
                 ),
               ],
             ),
@@ -7650,16 +7623,30 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
       final n = (_centerLat + d).toStringAsFixed(5);
       final e = (_centerLon + d).toStringAsFixed(5);
       final q = '[out:json][timeout:8];way["building"]($s,$w,$n,$e);out body geom 160;';
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
-      final req = await client.postUrl(
-          Uri.parse('https://overpass-api.de/api/interpreter'));
-      req.headers.set('User-Agent', 'MayakP2PMesh/2.4');
-      req.headers.contentType = ContentType.parse('application/x-www-form-urlencoded');
-      req.write('data=${Uri.encodeQueryComponent(q)}');
-      final resp = await req.close().timeout(const Duration(seconds: 8));
-      if (resp.statusCode == 200) {
-        final body = await utf8.decoder.bind(resp).join();
-        final decoded = jsonDecode(body) as Map<String, dynamic>;
+      final mirrors = [
+        'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter',
+        'https://overpass-api.de/api/interpreter',
+      ];
+      String? okBody;
+      for (final url in mirrors) {
+        try {
+          final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+          final req = await client.postUrl(Uri.parse(url));
+          req.headers.set('User-Agent', 'MayakP2PMesh/2.5');
+          req.headers.contentType = ContentType.parse('application/x-www-form-urlencoded');
+          req.write('data=${Uri.encodeQueryComponent(q)}');
+          final resp = await req.close().timeout(const Duration(seconds: 5));
+          if (resp.statusCode == 200) {
+            okBody = await utf8.decoder.bind(resp).join();
+            client.close(force: true);
+            break;
+          }
+          client.close(force: true);
+        } catch (_) {}
+      }
+      if (okBody != null && okBody.isNotEmpty) {
+        final decoded = jsonDecode(okBody) as Map<String, dynamic>;
         final els = (decoded['elements'] as List?) ?? [];
         final parsed = <_OsmBuilding3D>[];
         for (final el in els) {
@@ -7696,7 +7683,6 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
           setState(() => _buildings = parsed);
         }
       }
-      client.close(force: true);
     } catch (_) {
     } finally {
       _loadingBuildings = false;
@@ -7942,28 +7928,42 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                       Positioned.fill(
                         child: CustomPaint(painter: _TacticalGridPainter()),
                       ),
-                      for (int dx = -3; dx <= 3; dx++)
-                        for (int dy = -3; dy <= 3; dy++)
-                          if (baseTy + dy >= 0 && baseTy + dy <= maxTile)
-                            Positioned(
-                              left: offX + dx * tilePx,
-                              top: offY + dy * tilePx,
-                              width: tilePx + 0.5,
-                              height: tilePx + 0.5,
-                              child: ColorFiltered(
-                                colorFilter: const ColorFilter.matrix(
-                                    _monoInvertMatrix),
-                                child: Image.network(
-                                  'https://tile.openstreetmap.org/$tileZ/${((baseTx + dx) % (1 << tileZ) + (1 << tileZ)) % (1 << tileZ)}/${baseTy + dy}.png',
-                                  fit: BoxFit.cover,
-                                  headers: const {
-                                    'User-Agent': 'MayakP2PMesh/2.4',
-                                  },
-                                  errorBuilder: (_, __, ___) =>
-                                      const SizedBox.shrink(),
-                                ),
-                              ),
+                      Positioned.fill(
+                        child: RepaintBoundary(
+                          child: ColorFiltered(
+                            colorFilter:
+                                const ColorFilter.matrix(_monoInvertMatrix),
+                            child: Stack(
+                              children: [
+                                for (int dx = (_is3dMode ? -2 : -1);
+                                    dx <= (_is3dMode ? 2 : 1);
+                                    dx++)
+                                  for (int dy = (_is3dMode ? -2 : -1);
+                                      dy <= (_is3dMode ? 2 : 1);
+                                      dy++)
+                                    if (baseTy + dy >= 0 &&
+                                        baseTy + dy <= maxTile)
+                                      Positioned(
+                                        left: offX + dx * tilePx,
+                                        top: offY + dy * tilePx,
+                                        width: tilePx + 0.5,
+                                        height: tilePx + 0.5,
+                                        child: Image.network(
+                                          'https://tile.openstreetmap.org/$tileZ/${((baseTx + dx) % (1 << tileZ) + (1 << tileZ)) % (1 << tileZ)}/${baseTy + dy}.png',
+                                          fit: BoxFit.cover,
+                                          gaplessPlayback: true,
+                                          headers: const {
+                                            'User-Agent': 'MayakP2PMesh/2.5',
+                                          },
+                                          errorBuilder: (_, __, ___) =>
+                                              const SizedBox.shrink(),
+                                        ),
+                                      ),
+                              ],
                             ),
+                          ),
+                        ),
+                      ),
                       // Настоящие 3D-экструдированные здания из OSM Overpass (графитовые стены + белые рёбра крыш!)
                       if (_is3dMode && _buildings.isNotEmpty && _zoom >= 14.5)
                         Positioned.fill(
@@ -8022,7 +8022,15 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                 return Stack(
                   children: [
                     Positioned.fill(
-                      child: GestureDetector(
+                      child: Listener(
+                        onPointerSignal: (event) {
+                          if (event is PointerScrollEvent) {
+                            final dz = event.scrollDelta.dy < 0 ? 0.5 : -0.5;
+                            setState(() => _zoom = (_zoom + dz).clamp(3.0, 18.5));
+                            unawaited(_fetch3dBuildingsIfNeeded());
+                          }
+                        },
+                        child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onDoubleTap: () {
                           setState(() => _zoom = (_zoom + 1.0).clamp(3.0, 18.5));
@@ -8079,6 +8087,60 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                             child: mapPlane,
                           ),
                         ),
+                      ),
+                      ),
+                    ),
+                    // Чёрный туман (фейд в чёрное по краям, чтобы плавно скрывать границы тайлов в 2D и 3D!)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: _is3dMode
+                            ? Stack(
+                                children: [
+                                  Container(
+                                    decoration: const BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        stops: [0.0, 0.24, 0.78, 1.0],
+                                        colors: [
+                                          Color(0xFF000000),
+                                          Color(0x00000000),
+                                          Color(0x00000000),
+                                          Color(0xE6000000),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  Container(
+                                    decoration: const BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.centerLeft,
+                                        end: Alignment.centerRight,
+                                        stops: [0.0, 0.14, 0.86, 1.0],
+                                        colors: [
+                                          Color(0xDD000000),
+                                          Color(0x00000000),
+                                          Color(0x00000000),
+                                          Color(0xDD000000),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              )
+                            : Container(
+                                decoration: const BoxDecoration(
+                                  gradient: RadialGradient(
+                                    radius: 0.92,
+                                    stops: [0.55, 0.85, 1.0],
+                                    colors: [
+                                      Color(0x00000000),
+                                      Color(0x88000000),
+                                      Color(0xF0000000),
+                                    ],
+                                  ),
+                                ),
+                              ),
                       ),
                     ),
                     Positioned(

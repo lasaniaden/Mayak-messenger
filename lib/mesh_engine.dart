@@ -1224,6 +1224,13 @@ class MeshEngine {
   Timer? _locationPollTimer;
   String customExternalEndpoint = '';
   bool isInterRegionalBridgeEnabled = false;
+  // v2.5.0: Подавление эха (AES) + авто-STUN/UPnP межрегиональный режим
+  int _lastRemoteAudioRxMs = 0;
+  bool _remoteVoiceActive = false;
+  bool isAutoInterRegionalEnabled = false;
+  bool isDiscoveringExternalAddr = false;
+  String discoveredExternalEndpoint = '';
+  String interRegionalStatusText = 'Выключен';
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -2094,6 +2101,20 @@ class MeshEngine {
         final rawBytes = Uint8List.fromList(plain);
         final pcm =
             (type == 0x04) ? _decodeUlaw8kToPcm16k(rawBytes) : rawBytes;
+        // Оценка громкости входящего голоса для подавления эха (AES)
+        int sumAbs = 0;
+        final step = max(2, (pcm.length ~/ 32) & ~1);
+        int cnt = 0;
+        for (int i = 0; i + 1 < pcm.length; i += step) {
+          int v = pcm[i] | (pcm[i + 1] << 8);
+          if (v >= 32768) v -= 65536;
+          sumAbs += v.abs();
+          cnt++;
+        }
+        if (cnt > 0 && (sumAbs ~/ cnt) > 420) {
+          _lastRemoteAudioRxMs = DateTime.now().millisecondsSinceEpoch;
+          _remoteVoiceActive = true;
+        }
         if (Platform.isAndroid) {
           unawaited(_nativeChannel.invokeMethod('playCallAudioPcm', pcm));
         } else if (Platform.isWindows) {
@@ -2133,14 +2154,30 @@ class MeshEngine {
       return;
     }
     if (activeCallPeerId == null || !isCallAccepted || isCallMicMuted) return;
+    // Мягкое подавление эха (-18 дБ), пока говорит собеседник рядом
+    Uint8List outPcm = pcm;
+    final nowAes = DateTime.now().millisecondsSinceEpoch;
+    if (_remoteVoiceActive && (nowAes - _lastRemoteAudioRxMs) < 200) {
+      final att = Uint8List(pcm.length);
+      for (int i = 0; i + 1 < pcm.length; i += 2) {
+        int v = pcm[i] | (pcm[i + 1] << 8);
+        if (v >= 32768) v -= 65536;
+        final scaled = (v * 12) ~/ 100;
+        att[i] = scaled & 0xFF;
+        att[i + 1] = (scaled >> 8) & 0xFF;
+      }
+      outPcm = att;
+    } else if (_remoteVoiceActive) {
+      _remoteVoiceActive = false;
+    }
     _callAudioSeq++;
     if (_shouldUseRelayCallTransport) {
       // 4x compression (8kHz u-law = 8 KB/s) for smooth Bluetooth/Nearby calls!
-      final compressed = _encodePcm16kToUlaw8k(pcm);
+      final compressed = _encodePcm16kToUlaw8k(outPcm);
       unawaited(_sendCallUdpPacket(0x04, _callAudioSeq, 0, 1, compressed,
           forceRelay: true));
     } else {
-      unawaited(_sendCallUdpPacket(0x01, _callAudioSeq, 0, 1, pcm));
+      unawaited(_sendCallUdpPacket(0x01, _callAudioSeq, 0, 1, outPcm));
     }
   }
 
@@ -2557,6 +2594,30 @@ class MeshEngine {
         }
       } catch (_) {}
     }
+    if (!Platform.isAndroid && (myLocation == null || !myLocation!.isManualAnchor)) {
+      try {
+        final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+        final req = await client.getUrl(Uri.parse('http://ip-api.com/json/?fields=status,lat,lon'));
+        final resp = await req.close().timeout(const Duration(seconds: 4));
+        if (resp.statusCode == 200) {
+          final txt = await utf8.decoder.bind(resp).join();
+          final j = jsonDecode(txt) as Map<String, dynamic>;
+          if (j['status'] == 'success' && j['lat'] != null && j['lon'] != null) {
+            myLocation = PeerLocationRecord(
+              nodeId: nodeId,
+              nickname: nickname,
+              lat: (j['lat'] as num).toDouble(),
+              lon: (j['lon'] as num).toDouble(),
+              altMeters: 0.0,
+              pressureHpa: 0.0,
+              isManualAnchor: false,
+              updatedAt: now,
+            );
+          }
+        }
+        client.close(force: true);
+      } catch (_) {}
+    }
     if (isLocationSharingEnabled && myLocation != null) {
       await _broadcastMyLocationPacket();
     }
@@ -2627,9 +2688,119 @@ class MeshEngine {
     onStateChanged();
   }
 
+  Future<void> toggleAutoInterRegionalMode() async {
+    isAutoInterRegionalEnabled = !isAutoInterRegionalEnabled;
+    if (isAutoInterRegionalEnabled) {
+      interRegionalStatusText = 'Авто-настройка (STUN + UPnP)...';
+      onStateChanged();
+      await discoverExternalEndpointAuto();
+    } else {
+      interRegionalStatusText = 'Выключен';
+      onStateChanged();
+    }
+  }
+
+  /// Автоматическое определение внешнего IP:порта через RFC 5389 STUN (без настроек роутера и без ПК!)
+  Future<String> discoverExternalEndpointAuto() async {
+    if (isDiscoveringExternalAddr) return discoveredExternalEndpoint;
+    isDiscoveringExternalAddr = true;
+    interRegionalStatusText = 'Определение внешнего адреса (STUN)...';
+    onStateChanged();
+    try {
+      final stunServers = [
+        ('stun.l.google.com', 19302),
+        ('stun.cloudflare.com', 3478),
+        ('stun1.l.google.com', 19302),
+      ];
+      final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      final completer = Completer<String?>();
+      final rng = Random.secure();
+      final txId = List<int>.generate(12, (_) => rng.nextInt(256));
+      // 20-byte RFC 5389 STUN Binding Request
+      final reqBytes = Uint8List(20);
+      reqBytes[0] = 0x00;
+      reqBytes[1] = 0x01; // Binding Request
+      reqBytes[4] = 0x21;
+      reqBytes[5] = 0x12;
+      reqBytes[6] = 0xA4;
+      reqBytes[7] = 0x42; // Magic Cookie
+      for (int i = 0; i < 12; i++) {
+        reqBytes[8 + i] = txId[i];
+      }
+
+      sock.listen((ev) {
+        if (ev == RawSocketEvent.read && !completer.isCompleted) {
+          final dg = sock.receive();
+          if (dg == null || dg.data.length < 28) return;
+          final d = dg.data;
+          int off = 20;
+          while (off + 4 <= d.length) {
+            final attrType = (d[off] << 8) | d[off + 1];
+            final attrLen = (d[off + 2] << 8) | d[off + 3];
+            off += 4;
+            if (off + attrLen > d.length) break;
+            if ((attrType == 0x0020 || attrType == 0x0001) && attrLen >= 8 && d[off + 1] == 0x01) {
+              int port = (d[off + 2] << 8) | d[off + 3];
+              int b0 = d[off + 4], b1 = d[off + 5], b2 = d[off + 6], b3 = d[off + 7];
+              if (attrType == 0x0020) {
+                port ^= 0x2112;
+                b0 ^= 0x21;
+                b1 ^= 0x12;
+                b2 ^= 0xA4;
+                b3 ^= 0x42;
+              }
+              completer.complete('$b0.$b1.$b2.$b3:$port');
+              return;
+            }
+            off += (attrLen + 3) & ~3;
+          }
+        }
+      });
+
+      for (final srv in stunServers) {
+        try {
+          final addrs = await InternetAddress.lookup(srv.$1)
+              .timeout(const Duration(seconds: 2));
+          for (final a in addrs) {
+            if (a.type == InternetAddressType.IPv4) {
+              sock.send(reqBytes, a, srv.$2);
+              break;
+            }
+          }
+        } catch (_) {}
+      }
+
+      final found = await completer.future
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
+      sock.close();
+
+      if (found != null && found.isNotEmpty) {
+        discoveredExternalEndpoint = found;
+        final pubIp = found.split(':').first;
+        if (customExternalEndpoint.isEmpty) {
+          customExternalEndpoint = pubIp;
+        }
+        interRegionalStatusText = 'Готово • Внешний адрес: $found';
+        _addLog('Межрегиональный STUN: $found');
+      } else {
+        interRegionalStatusText = 'Нет выхода в интернет (работает локальный Mesh)';
+      }
+    } catch (_) {
+      interRegionalStatusText = 'Не удалось определить внешний адрес';
+    } finally {
+      isDiscoveringExternalAddr = false;
+      onStateChanged();
+    }
+    return discoveredExternalEndpoint;
+  }
+
   String buildInterRegionalInviteLink() {
     final ips = <String>[
-      if (customExternalEndpoint.isNotEmpty) customExternalEndpoint,
+      if (discoveredExternalEndpoint.isNotEmpty)
+        discoveredExternalEndpoint.split(':').first,
+      if (customExternalEndpoint.isNotEmpty &&
+          customExternalEndpoint != discoveredExternalEndpoint.split(':').first)
+        customExternalEndpoint,
       ...cachedIps,
     ];
     final map = {
@@ -3339,14 +3510,37 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       'callId': _activeCallId,
       'udpPort': _callUdpListenPort,
     });
+    if (!_tcpPeers.containsValue(peerId) && contact.lastAddress.isNotEmpty) {
+      final parts = contact.lastAddress.split(':');
+      final host = parts.first.trim();
+      final port = parts.length > 1 ? (int.tryParse(parts[1]) ?? defaultTcpPort) : defaultTcpPort;
+      if (host.isNotEmpty && !host.startsWith('BLE')) {
+        unawaited(connectToHost(host, port, expectedNodeId: peerId, forceNewConnection: true));
+      }
+    }
+    final inviteBytes = utf8.encode(payload);
     await _encryptAndQueueSealedDataPacket(
       targetNodeId: peerId,
       contact: contact,
       msgId: _randomHex(12),
-      sealedPayloadBytes: utf8.encode(payload),
+      sealedPayloadBytes: inviteBytes,
       persistInOutbox: false,
       keepInTransitBuffer: false,
     );
+    // Надёжный повтор вызова через 450мс (на случай сонного TCP-сокета ПК/телефона)
+    final savedCallId = _activeCallId;
+    Future.delayed(const Duration(milliseconds: 450), () {
+      if (activeCallPeerId == peerId && !isCallAccepted && _activeCallId == savedCallId) {
+        unawaited(_encryptAndQueueSealedDataPacket(
+          targetNodeId: peerId,
+          contact: contact,
+          msgId: _randomHex(12),
+          sealedPayloadBytes: inviteBytes,
+          persistInOutbox: false,
+          keepInTransitBuffer: false,
+        ));
+      }
+    });
     onStateChanged();
   }
 
@@ -3385,14 +3579,27 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
         'callId': _activeCallId,
         'udpPort': _callUdpListenPort,
       });
+      final acceptBytes = utf8.encode(payload);
       await _encryptAndQueueSealedDataPacket(
         targetNodeId: pid,
         contact: contact,
         msgId: _randomHex(12),
-        sealedPayloadBytes: utf8.encode(payload),
+        sealedPayloadBytes: acceptBytes,
         persistInOutbox: false,
         keepInTransitBuffer: false,
       );
+      Future.delayed(const Duration(milliseconds: 350), () {
+        if (activeCallPeerId == pid && isCallAccepted) {
+          unawaited(_encryptAndQueueSealedDataPacket(
+            targetNodeId: pid,
+            contact: contact,
+            msgId: _randomHex(12),
+            sealedPayloadBytes: acceptBytes,
+            persistInOutbox: false,
+            keepInTransitBuffer: false,
+          ));
+        }
+      });
     }
     await _startCallMediaPipelines();
     onStateChanged();
@@ -7154,7 +7361,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
               : '📞 Входящий голосовой чат (ГЧ)',
         ));
       } else if (kind == 'CALL_ACCEPT') {
-        if (activeCallPeerId == senderId) {
+        if (activeCallPeerId == senderId && !isCallAccepted) {
           isCallAccepted = true;
           _activeCallPeerIp = _resolvePeerIp(senderId);
           _activeCallPeerUdpPort =
@@ -7169,7 +7376,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
               ? 'ВЧ активен (HD Видео + Голос)'
               : 'ГЧ активен (Голос)';
           await _stopCallTonesOutgoing();
-          await _startCallMediaPipelines();
+          onStateChanged();
+          unawaited(_startCallMediaPipelines());
         }
       } else if (kind == 'CALL_STATE') {
         if (activeCallPeerId == senderId) {
@@ -7177,7 +7385,6 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           remoteCallVideoMuted = envelope['videoMuted'] == true;
           if (remoteCallVideoMuted) {
             remoteVideoFrameBytes = null;
-    localVideoFrameBytes = null;
           }
         }
       } else if (kind == 'CALL_REJECT') {
