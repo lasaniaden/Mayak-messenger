@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.4.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.5.1
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.4.0"
+                  versionName = "2.5.1"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.4.0"
+                  versionName "2.5.1"
               }}
 
               packagingOptions {{
@@ -2155,7 +2155,7 @@ jobs:
                                               val lo = pkt[i].toInt() and 0xFF
                                               val hi = pkt[i + 1].toInt()
                                               val sample = (hi shl 8) or lo
-                                              val scaled = (sample * 19 / 10).coerceIn(-32767, 32767)
+                                              val scaled = (sample * 145 / 100).coerceIn(-32767, 32767)
                                               boosted[i] = (scaled and 0xFF).toByte()
                                               boosted[i + 1] = ((scaled shr 8) and 0xFF).toByte()
                                               i += 2
@@ -2661,7 +2661,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.4.0 --build-number=$((2400 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.5.1 --build-number=$((2510 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -2692,6 +2692,9 @@ jobs:
           if (Test-Path "assets\app_icon.ico") {
             Copy-Item "assets\app_icon.ico" "windows\runner\resources\app_icon.ico" -Force
           }
+
+      - name: Inject Windows System Tray (Minimize to Tray on Close + Context Menu)
+        run: python scripts/patch_win_tray.py
 
       - name: Install dependencies
         run: flutter pub get
