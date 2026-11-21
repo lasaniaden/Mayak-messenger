@@ -9,7 +9,10 @@ def main():
 
     hdr = hdr_p.read_text(encoding="utf-8")
     if "shellapi.h" not in hdr:
-        hdr = "#include <shellapi.h>\n" + hdr
+        if '#include "win32_window.h"' in hdr:
+            hdr = hdr.replace('#include "win32_window.h"', '#include "win32_window.h"\n#include <windows.h>\n#include <shellapi.h>', 1)
+        else:
+            hdr = "#include <windows.h>\n#include <shellapi.h>\n" + hdr
     if "allow_real_close_" not in hdr:
         hdr = hdr.replace(
             "std::unique_ptr<flutter::FlutterViewController> flutter_controller_;",
