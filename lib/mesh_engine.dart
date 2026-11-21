@@ -120,6 +120,10 @@ typedef _WaveHdrOpNative = Uint32 Function(IntPtr, Pointer<_WaveHdr>, Uint32);
 typedef _WaveHdrOpDart = int Function(int, Pointer<_WaveHdr>, int);
 typedef _WaveSimpleNative = Uint32 Function(IntPtr);
 typedef _WaveSimpleDart = int Function(int);
+typedef _WaveGetNumDevsNative = Uint32 Function();
+typedef _WaveGetNumDevsDart = int Function();
+typedef _WaveGetDevCapsNative = Uint32 Function(IntPtr, Pointer<Uint8>, Uint32);
+typedef _WaveGetDevCapsDart = int Function(int, Pointer<Uint8>, int);
 
 class WindowsPcmAudioBridge {
   static const int _waveMapper = 0xFFFFFFFF;
@@ -159,6 +163,13 @@ class WindowsPcmAudioBridge {
   static Timer? _toneTimer;
   static bool _micMuted = false;
   static void Function(Uint8List pcm)? _onCaptured;
+  static int selectedOutDeviceId = -1;
+  static int selectedInDeviceId = -1;
+  static int _lastOutPlayMs = 0;
+  static _WaveGetNumDevsDart? _waveOutGetNumDevs;
+  static _WaveGetDevCapsDart? _waveOutGetDevCaps;
+  static _WaveGetNumDevsDart? _waveInGetNumDevs;
+  static _WaveGetDevCapsDart? _waveInGetDevCaps;
 
   static void _ensureLoaded() {
     if (_loaded || !Platform.isWindows) return;
@@ -200,6 +211,14 @@ class WindowsPcmAudioBridge {
           .lookupFunction<_WaveSimpleNative, _WaveSimpleDart>('waveInReset');
       _waveInClose = winmm
           .lookupFunction<_WaveSimpleNative, _WaveSimpleDart>('waveInClose');
+      _waveOutGetNumDevs = winmm
+          .lookupFunction<_WaveGetNumDevsNative, _WaveGetNumDevsDart>('waveOutGetNumDevs');
+      _waveOutGetDevCaps = winmm
+          .lookupFunction<_WaveGetDevCapsNative, _WaveGetDevCapsDart>('waveOutGetDevCapsW');
+      _waveInGetNumDevs = winmm
+          .lookupFunction<_WaveGetNumDevsNative, _WaveGetNumDevsDart>('waveInGetNumDevs');
+      _waveInGetDevCaps = winmm
+          .lookupFunction<_WaveGetDevCapsNative, _WaveGetDevCapsDart>('waveInGetDevCapsW');
     } catch (_) {}
   }
 
@@ -224,7 +243,8 @@ class WindowsPcmAudioBridge {
     final fmt = _allocFormat();
     try {
       hPtr.value = 0;
-      final res = _waveOutOpen!(hPtr, _waveMapper, fmt, 0, 0, 0);
+      final devId = selectedOutDeviceId >= 0 ? selectedOutDeviceId : _waveMapper;
+      final res = _waveOutOpen!(hPtr, devId, fmt, 0, 0, 0);
       if (res != 0) return false;
       _hWaveOut = hPtr.value;
       _outHdrs.clear();
@@ -274,6 +294,7 @@ class WindowsPcmAudioBridge {
     freeHdr.ref.dwBufferLength = len;
     freeHdr.ref.dwFlags = 0;
     freeHdr.ref.dwLoops = 0;
+    _lastOutPlayMs = DateTime.now().millisecondsSinceEpoch;
     if (_waveOutPrepare!(_hWaveOut, freeHdr, sizeOf<_WaveHdr>()) == 0) {
       _waveOutWrite!(_hWaveOut, freeHdr, sizeOf<_WaveHdr>());
     }
@@ -295,7 +316,8 @@ class WindowsPcmAudioBridge {
     final fmt = _allocFormat();
     try {
       hPtr.value = 0;
-      final res = _waveInOpen!(hPtr, _waveMapper, fmt, 0, 0, 0);
+      final devId = selectedInDeviceId >= 0 ? selectedInDeviceId : _waveMapper;
+      final res = _waveInOpen!(hPtr, devId, fmt, 0, 0, 0);
       if (res != 0) return _hWaveOut != 0;
       _hWaveIn = hPtr.value;
       _inHdrs.clear();
@@ -458,6 +480,80 @@ class WindowsPcmAudioBridge {
     if (_hWaveIn == 0 && _hWaveOut != 0) {
       _closeOutput();
     }
+  }
+
+  static String _readUtf16Name(Pointer<Uint8> caps, int byteOffset) {
+    final u16 = caps.elementAt(byteOffset).cast<Uint16>();
+    final units = <int>[];
+    for (int i = 0; i < 32; i++) {
+      final c = u16[i];
+      if (c == 0) break;
+      units.add(c);
+    }
+    return String.fromCharCodes(units).trim();
+  }
+
+  static List<Map<String, dynamic>> listOutputDevices() {
+    final list = <Map<String, dynamic>>[
+      {'id': -1, 'name': 'По умолчанию (Windows)'},
+    ];
+    if (!Platform.isWindows) return list;
+    _ensureLoaded();
+    if (_waveOutGetNumDevs == null || _waveOutGetDevCaps == null || _alloc == null || _free == null) {
+      return list;
+    }
+    final count = _waveOutGetNumDevs!();
+    final caps = _alloc!(128).cast<Uint8>();
+    try {
+      for (int i = 0; i < count; i++) {
+        if (_waveOutGetDevCaps!(i, caps, 84) == 0) {
+          final name = _readUtf16Name(caps, 8);
+          list.add({'id': i, 'name': name.isNotEmpty ? name : 'Динамик #$i'});
+        }
+      }
+    } finally {
+      _free!(caps.cast());
+    }
+    return list;
+  }
+
+  static List<Map<String, dynamic>> listInputDevices() {
+    final list = <Map<String, dynamic>>[
+      {'id': -1, 'name': 'По умолчанию (Windows)'},
+    ];
+    if (!Platform.isWindows) return list;
+    _ensureLoaded();
+    if (_waveInGetNumDevs == null || _waveInGetDevCaps == null || _alloc == null || _free == null) {
+      return list;
+    }
+    final count = _waveInGetNumDevs!();
+    final caps = _alloc!(128).cast<Uint8>();
+    try {
+      for (int i = 0; i < count; i++) {
+        if (_waveInGetDevCaps!(i, caps, 80) == 0) {
+          final name = _readUtf16Name(caps, 8);
+          list.add({'id': i, 'name': name.isNotEmpty ? name : 'Микрофон #$i'});
+        }
+      }
+    } finally {
+      _free!(caps.cast());
+    }
+    return list;
+  }
+
+  static void setSelectedDevices({int? outId, int? inId}) {
+    if (outId != null && outId != selectedOutDeviceId) {
+      selectedOutDeviceId = outId;
+      _closeOutput();
+    }
+    if (inId != null && inId != selectedInDeviceId) {
+      selectedInDeviceId = inId;
+    }
+  }
+
+  static void playTestBeep() {
+    if (!Platform.isWindows) return;
+    playPcm(_synthTone(523.25, 659.25, 320, amp: 0.30));
   }
 }
 
@@ -1174,6 +1270,8 @@ class MeshEngine {
   int _lastBleVideoTxMs = 0;
   String activeCallTransport = 'Wi-Fi UDP';
   String windowsVideoSource = 'camera'; // 'camera' | 'screen'
+  int selectedWinCameraIndex = 0;
+  List<String> availableWinCameras = [];
   String? incomingCallFromPeerId;
   String incomingCallMode = 'voice';
   String _incomingCallId = '';
@@ -1183,7 +1281,7 @@ class MeshEngine {
   RawDatagramSocket? _callUdpSocket;
   int _callUdpListenPort = callMediaUdpPort;
   String? _activeCallPeerIp;
-  int _activeCallPeerUdpPort = callMediaUdpPort;
+  int _activeCallPeerUdpPort = _remoteUdpPeers[peerId]?.port ?? callMediaUdpPort;
   int _callAudioSeq = 0;
   int _callVideoSeq = 0;
   final Map<int, _UdpVideoAssembly> _udpVideoAssemblies = {};
@@ -1231,6 +1329,11 @@ class MeshEngine {
   bool isDiscoveringExternalAddr = false;
   String discoveredExternalEndpoint = '';
   String interRegionalStatusText = 'Выключен';
+  final Map<String, ({String ip, int port, int lastSeenMs})> _remoteUdpPeers = {};
+  Timer? _stunKeepaliveTimer;
+  Timer? _udpPeerPunchTimer;
+  final List<String> _stunObservedEndpoints = [];
+  Completer<String?>? _stunPendingCompleter;
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -1267,7 +1370,9 @@ class MeshEngine {
   }
 
   bool isPeerDirectlyConnected(String peerId) {
-    return _tcpPeers.containsValue(peerId) || _blePeers.containsValue(peerId);
+    final u = _remoteUdpPeers[peerId];
+    final udpAlive = u != null && (DateTime.now().millisecondsSinceEpoch - u.lastSeenMs) < 35000;
+    return _tcpPeers.containsValue(peerId) || _blePeers.containsValue(peerId) || udpAlive;
   }
 
   static String _normalizeAdminPhrase(String raw) {
@@ -1865,6 +1970,10 @@ class MeshEngine {
         return entry.key.remoteAddress.address;
       }
     }
+    final udpPeer = _remoteUdpPeers[peerId];
+    if (udpPeer != null && udpPeer.ip.isNotEmpty) {
+      return udpPeer.ip;
+    }
     final c = knownContacts[peerId];
     if (c != null && c.lastAddress.isNotEmpty) {
       final host = c.lastAddress.split(':').first.trim();
@@ -2050,9 +2159,139 @@ class MeshEngine {
     }
   }
 
+  void _tryParseStunResponse(Uint8List d) {
+    if (d.length < 28 || d[0] != 0x01 || d[1] != 0x01) return;
+    if (d[4] != 0x21 || d[5] != 0x12 || d[6] != 0xA4 || d[7] != 0x42) return;
+    int off = 20;
+    while (off + 4 <= d.length) {
+      final attrType = (d[off] << 8) | d[off + 1];
+      final attrLen = (d[off + 2] << 8) | d[off + 3];
+      off += 4;
+      if (off + attrLen > d.length) break;
+      if ((attrType == 0x0020 || attrType == 0x0001) && attrLen >= 8 && d[off + 1] == 0x01) {
+        int port = (d[off + 2] << 8) | d[off + 3];
+        int b0 = d[off + 4], b1 = d[off + 5], b2 = d[off + 6], b3 = d[off + 7];
+        if (attrType == 0x0020) {
+          port ^= 0x2112;
+          b0 ^= 0x21;
+          b1 ^= 0x12;
+          b2 ^= 0xA4;
+          b3 ^= 0x42;
+        }
+        final ep = '$b0.$b1.$b2.$b3:$port';
+        if (!_stunObservedEndpoints.contains(ep)) {
+          _stunObservedEndpoints.add(ep);
+        }
+        if (_stunPendingCompleter != null && !_stunPendingCompleter!.isCompleted) {
+          _stunPendingCompleter!.complete(ep);
+        }
+        return;
+      }
+      off += (attrLen + 3) & ~3;
+    }
+  }
+
   Future<void> _onCallUdpDatagram(Datagram dg) async {
-    await _processEncryptedCallMediaBytes(
-        dg.data, dg.address.address, dg.port);
+    final d = dg.data;
+    if (d.isEmpty) return;
+    // 1. Ответ STUN (RFC 5389 Binding Success Response 0x0101)
+    if (d.length >= 28 && d[0] == 0x01 && d[1] == 0x01) {
+      _tryParseStunResponse(d);
+      return;
+    }
+    if (d.length >= 2 && d[0] == 0x4D) {
+      // 2. Межрегиональный UDP Hole Punch / Keepalive (0x4D 0x05 + nodeId)
+      if (d[1] == 0x05) {
+        try {
+          final remoteId = utf8.decode(d.sublist(2)).trim();
+          if (remoteId.isNotEmpty && remoteId != nodeId) {
+            final now = DateTime.now().millisecondsSinceEpoch;
+            final wasKnown = _remoteUdpPeers.containsKey(remoteId);
+            _remoteUdpPeers[remoteId] = (
+              ip: dg.address.address,
+              port: dg.port,
+              lastSeenMs: now,
+            );
+            final c = knownContacts[remoteId];
+            if (c != null) {
+              c.isOnline = true;
+              c.lastSeenTimestamp = now;
+              c.lastAddress = '${dg.address.address}:${dg.port}';
+            }
+            if (!wasKnown) {
+              _addLog('Межрегиональный UDP-туннель открыт с $remoteId (${dg.address.address}:${dg.port})!');
+              _sendUdpHolePunch(dg.address.address, dg.port);
+              unawaited(_flushBufferedPacketsToOnlinePeers());
+            }
+            onStateChanged();
+          }
+        } catch (_) {}
+        return;
+      }
+      // 3. Межрегиональный зашифрованный Mesh-пакет поверх пробитого UDP (0x4D 0x06 + JSON)
+      if (d[1] == 0x06) {
+        try {
+          final jsonLine = utf8.decode(d.sublist(2));
+          final senderIp = dg.address.address;
+          final senderPort = dg.port;
+          await _processIncomingJsonLine(
+            jsonLine,
+            remoteAddr: '$senderIp:$senderPort',
+            onHello: (peerId, peerNick) async {
+              _remoteUdpPeers[peerId] = (
+                ip: senderIp,
+                port: senderPort,
+                lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+              );
+              _refreshOnlineStatuses();
+              onStateChanged();
+            },
+            replyDirect: (replyJson) {
+              _sendUdpMeshJson(senderIp, senderPort, replyJson);
+            },
+          );
+        } catch (_) {}
+        return;
+      }
+    }
+    await _processEncryptedCallMediaBytes(d, dg.address.address, dg.port);
+  }
+
+  void _sendUdpHolePunch(String ip, int port) {
+    final sock = _callUdpSocket;
+    if (sock == null || ip.isEmpty || port <= 0) return;
+    try {
+      final idBytes = utf8.encode(nodeId);
+      final out = Uint8List(2 + idBytes.length);
+      out[0] = 0x4D;
+      out[1] = 0x05;
+      out.setRange(2, out.length, idBytes);
+      sock.send(out, InternetAddress(ip), port);
+    } catch (_) {}
+  }
+
+  void _sendUdpMeshJson(String ip, int port, String jsonLine) {
+    final sock = _callUdpSocket;
+    if (sock == null || ip.isEmpty || port <= 0) return;
+    try {
+      final body = utf8.encode(jsonLine);
+      if (body.length > 60000) return;
+      final out = Uint8List(2 + body.length);
+      out[0] = 0x4D;
+      out[1] = 0x06;
+      out.setRange(2, out.length, body);
+      sock.send(out, InternetAddress(ip), port);
+    } catch (_) {}
+  }
+
+  void _ensureUdpPeerPunchLoop() {
+    if (_udpPeerPunchTimer != null) return;
+    _udpPeerPunchTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (_remoteUdpPeers.isEmpty) return;
+      for (final entry in _remoteUdpPeers.entries.toList()) {
+        _sendUdpHolePunch(entry.value.ip, entry.value.port);
+      }
+    });
   }
 
   Future<void> _processEncryptedCallMediaBytes(
@@ -2157,12 +2396,13 @@ class MeshEngine {
     // Мягкое подавление эха (-18 дБ), пока говорит собеседник рядом
     Uint8List outPcm = pcm;
     final nowAes = DateTime.now().millisecondsSinceEpoch;
-    if (_remoteVoiceActive && (nowAes - _lastRemoteAudioRxMs) < 200) {
+    if (_remoteVoiceActive && (nowAes - _lastRemoteAudioRxMs) < 260) {
+      if (Platform.isWindows) return; // Жёсткий эхо-гейт на ПК: не возвращаем голос собеседника обратно!
       final att = Uint8List(pcm.length);
       for (int i = 0; i + 1 < pcm.length; i += 2) {
         int v = pcm[i] | (pcm[i + 1] << 8);
         if (v >= 32768) v -= 65536;
-        final scaled = (v * 12) ~/ 100;
+        final scaled = (v * 5) ~/ 100;
         att[i] = scaled & 0xFF;
         att[i + 1] = (scaled >> 8) & 0xFF;
       }
@@ -2323,6 +2563,11 @@ class MeshEngine {
     for (final entry in _tcpPeers.entries.toList()) {
       await sendToPeer(entry.value, (line) => _sendTcpLine(entry.key, line));
     }
+    for (final entry in _remoteUdpPeers.entries.toList()) {
+      if (pkt.dstNodeId == broadcastChannelId || pkt.dstNodeId == entry.key) {
+        _sendUdpMeshJson(entry.value.ip, entry.value.port, serialized);
+      }
+    }
     for (final entry in _blePeers.entries.toList()) {
       await sendToPeer(entry.value, (line) => unawaited(_sendBleLine(entry.key, line)));
     }
@@ -2376,6 +2621,40 @@ class MeshEngine {
       unawaited(stopPttTransmit());
     }
     onStateChanged();
+  }
+
+  Future<void> refreshWindowsCameras() async {
+    if (!Platform.isWindows) return;
+    try {
+      const ps = r'''
+$cams = Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -eq 'Camera' -or $_.PNPClass -eq 'Image' } | Select-Object -ExpandProperty Name
+if ($cams) { $cams -join "`n" }
+''';
+      final res = await Process.run('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps]);
+      if (res.exitCode == 0) {
+        final lines = res.stdout
+            .toString()
+            .split(RegExp(r'\r?\n'))
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList();
+        availableWinCameras = lines;
+        onStateChanged();
+      }
+    } catch (_) {}
+  }
+
+  void setWindowsDeviceSelection({int? outId, int? inId, int? camIdx}) {
+    WindowsPcmAudioBridge.setSelectedDevices(outId: outId, inId: inId);
+    if (camIdx != null) selectedWinCameraIndex = camIdx;
+    onStateChanged();
+  }
+
+  Future<void> requestAndroidOverlayCallPermission() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _nativeChannel.invokeMethod('requestOverlayCallPermission');
+    } catch (_) {}
   }
 
   Future<bool> requestLocationPermissionForMap() async {
@@ -2730,90 +3009,78 @@ class MeshEngine {
     }
   }
 
-  /// Автоматическое определение внешнего IP:порта через RFC 5389 STUN (без настроек роутера и без ПК!)
+  /// Автоматическое определение внешнего IP:порта прямо на постоянном _callUdpSocket + проверка типа NAT
   Future<String> discoverExternalEndpointAuto() async {
     if (isDiscoveringExternalAddr) return discoveredExternalEndpoint;
     isDiscoveringExternalAddr = true;
     interRegionalStatusText = 'Определение внешнего адреса (STUN)...';
     onStateChanged();
     try {
+      await _initCallUdpSocket();
+      final sock = _callUdpSocket;
+      if (sock == null) {
+        interRegionalStatusText = 'Ошибка локального UDP-сокета';
+        return '';
+      }
+      _stunObservedEndpoints.clear();
+      _stunPendingCompleter = Completer<String?>();
       final stunServers = [
         ('stun.l.google.com', 19302),
         ('stun.cloudflare.com', 3478),
         ('stun1.l.google.com', 19302),
       ];
-      final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      final completer = Completer<String?>();
-      final rng = Random.secure();
-      final txId = List<int>.generate(12, (_) => rng.nextInt(256));
-      // 20-byte RFC 5389 STUN Binding Request
-      final reqBytes = Uint8List(20);
-      reqBytes[0] = 0x00;
-      reqBytes[1] = 0x01; // Binding Request
-      reqBytes[4] = 0x21;
-      reqBytes[5] = 0x12;
-      reqBytes[6] = 0xA4;
-      reqBytes[7] = 0x42; // Magic Cookie
-      for (int i = 0; i < 12; i++) {
-        reqBytes[8 + i] = txId[i];
-      }
 
-      sock.listen((ev) {
-        if (ev == RawSocketEvent.read && !completer.isCompleted) {
-          final dg = sock.receive();
-          if (dg == null || dg.data.length < 28) return;
-          final d = dg.data;
-          int off = 20;
-          while (off + 4 <= d.length) {
-            final attrType = (d[off] << 8) | d[off + 1];
-            final attrLen = (d[off + 2] << 8) | d[off + 3];
-            off += 4;
-            if (off + attrLen > d.length) break;
-            if ((attrType == 0x0020 || attrType == 0x0001) && attrLen >= 8 && d[off + 1] == 0x01) {
-              int port = (d[off + 2] << 8) | d[off + 3];
-              int b0 = d[off + 4], b1 = d[off + 5], b2 = d[off + 6], b3 = d[off + 7];
-              if (attrType == 0x0020) {
-                port ^= 0x2112;
-                b0 ^= 0x21;
-                b1 ^= 0x12;
-                b2 ^= 0xA4;
-                b3 ^= 0x42;
+      Future<void> sendStunToAll() async {
+        final rng = Random.secure();
+        for (final srv in stunServers) {
+          try {
+            final reqBytes = Uint8List(20);
+            reqBytes[0] = 0x00;
+            reqBytes[1] = 0x01;
+            reqBytes[4] = 0x21;
+            reqBytes[5] = 0x12;
+            reqBytes[6] = 0xA4;
+            reqBytes[7] = 0x42;
+            for (int i = 0; i < 12; i++) {
+              reqBytes[8 + i] = rng.nextInt(256);
+            }
+            final addrs = await InternetAddress.lookup(srv.$1)
+                .timeout(const Duration(seconds: 2));
+            for (final a in addrs) {
+              if (a.type == InternetAddressType.IPv4) {
+                sock.send(reqBytes, a, srv.$2);
+                break;
               }
-              completer.complete('$b0.$b1.$b2.$b3:$port');
-              return;
             }
-            off += (attrLen + 3) & ~3;
-          }
+          } catch (_) {}
         }
-      });
-
-      for (final srv in stunServers) {
-        try {
-          final addrs = await InternetAddress.lookup(srv.$1)
-              .timeout(const Duration(seconds: 2));
-          for (final a in addrs) {
-            if (a.type == InternetAddressType.IPv4) {
-              sock.send(reqBytes, a, srv.$2);
-              break;
-            }
-          }
-        } catch (_) {}
       }
 
-      final found = await completer.future
+      await sendStunToAll();
+      final found = await _stunPendingCompleter!.future
           .timeout(const Duration(seconds: 3), onTimeout: () => null);
-      sock.close();
+      // Ждём ещё 450мс, чтобы собрать второй ответ STUN и проверить тип NAT (Cone vs Symmetric)
+      if (found != null) {
+        await Future.delayed(const Duration(milliseconds: 450));
+      }
 
       if (found != null && found.isNotEmpty) {
         discoveredExternalEndpoint = found;
-        final pubIp = found.split(':').first;
-        if (customExternalEndpoint.isEmpty) {
-          customExternalEndpoint = pubIp;
-        }
-        interRegionalStatusText = 'Готово • Внешний адрес: $found';
-        _addLog('Межрегиональный STUN: $found');
+        final isSymmetric = _stunObservedEndpoints.length > 1;
+        interRegionalStatusText = isSymmetric
+            ? '⚠️ Симметричный NAT ($found) — для прямой связи лучше Wi-Fi'
+            : '✅ Готово (Cone NAT) • $found';
+        _addLog('Межрегиональный STUN (постоянный сокет): $found (symmetric=$isSymmetric)');
+
+        // Держим NAT-дырку открытой каждые 18 секунд!
+        _stunKeepaliveTimer?.cancel();
+        _stunKeepaliveTimer = Timer.periodic(const Duration(seconds: 18), (_) {
+          if (isAutoInterRegionalEnabled || _remoteUdpPeers.isNotEmpty) {
+            unawaited(sendStunToAll());
+          }
+        });
       } else {
-        interRegionalStatusText = 'Нет выхода в интернет (работает локальный Mesh)';
+        interRegionalStatusText = 'Нет ответа STUN (проверь интернет или выключи VPN)';
       }
     } catch (_) {
       interRegionalStatusText = 'Не удалось определить внешний адрес';
@@ -2842,6 +3109,7 @@ class MeshEngine {
       'os': myPlatformInfo,
       'p': listenPort,
       'ips': ips,
+      if (discoveredExternalEndpoint.isNotEmpty) 'extUdp': discoveredExternalEndpoint,
     };
     return 'mayak://${base64Url.encode(utf8.encode(jsonEncode(map)))}';
   }
@@ -3135,7 +3403,7 @@ public class MayakDirectShowCam : IDisposable {
     private IntPtr _bufPtr = IntPtr.Zero;
     private int _bufCap = 0;
 
-    public bool Start() {
+    public bool Start(int camIndex) {
         try {
             var clsidDevEnum = new Guid("62BE5D10-60EB-11d0-BD3B-00A0C911CE86");
             var clsidVideoIn = new Guid("860BB310-5D01-11d0-BD3B-00A0C911CE86");
@@ -3147,7 +3415,15 @@ public class MayakDirectShowCam : IDisposable {
 
             IMoniker[] mon = new IMoniker[1];
             IntPtr fetched = IntPtr.Zero;
-            if (enumMon.Next(1, mon, fetched) != 0 || mon[0] == null) return false;
+            IMoniker chosen = null;
+            int idx = 0;
+            while (enumMon.Next(1, mon, fetched) == 0 && mon[0] != null) {
+                if (idx == 0) chosen = mon[0];
+                if (idx == camIndex) { chosen = mon[0]; break; }
+                idx++;
+            }
+            if (chosen == null) return false;
+            mon[0] = chosen;
 
             object camObj;
             mon[0].BindToObject(null, null, ref iidBaseFilter, out camObj);
@@ -3239,7 +3515,7 @@ public class MayakWinVideo {
         return null;
     }
 
-    public static void Run(int port, bool tryCam) {
+    public static void Run(int port, bool tryCam, int camIndex) {
         var codec = GetJpegCodec();
         var epCam = new EncoderParameters(1);
         epCam.Param[0] = new EncoderParameter(Encoder.Quality, 64L);
@@ -3251,7 +3527,7 @@ public class MayakWinVideo {
         int emptyCamTicks = 0;
         if (tryCam) {
             cam = new MayakDirectShowCam();
-            camOk = cam.Start();
+            camOk = cam.Start(camIndex);
             if (!camOk) { cam.Dispose(); cam = null; }
         }
 
@@ -3316,7 +3592,7 @@ public class MayakWinVideo {
 }
 "@
 Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Windows.Forms, System.Net.Sockets
-[MayakWinVideo]::Run($localPort, ($useCam -eq 1))
+[MayakWinVideo]::Run($localPort, ($useCam -eq 1), $selectedWinCameraIndex)
 ''';
       final tmpScript = File(
           '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_vid_$localPort.ps1');
@@ -5185,6 +5461,28 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       allowEvenIfDeleted: true,
     );
 
+    final extUdp = (decoded['extUdp'] ?? '').toString().trim();
+    if (extUdp.contains(':')) {
+      final pParts = extUdp.split(':');
+      final uIp = pParts.first.trim();
+      final uPort = int.tryParse(pParts.last.trim()) ?? 0;
+      if (uIp.isNotEmpty && uPort > 0) {
+        await _initCallUdpSocket();
+        _remoteUdpPeers[targetId] = (
+          ip: uIp,
+          port: uPort,
+          lastSeenMs: 0,
+        );
+        _ensureUdpPeerPunchLoop();
+        // Серия быстрых UDP Hole Punch пакетов для пробития NAT (Россия <-> ОАЭ и др.)
+        for (int k = 0; k < 5; k++) {
+          Future.delayed(Duration(milliseconds: k * 300), () {
+            _sendUdpHolePunch(uIp, uPort);
+          });
+        }
+        _addLog('Запущен межрегиональный UDP Hole Punch к $uIp:$uPort...');
+      }
+    }
     for (final ip in candidateIps) {
       unawaited(connectToHost(ip, port,
           expectedNodeId: targetId, forceNewConnection: true));

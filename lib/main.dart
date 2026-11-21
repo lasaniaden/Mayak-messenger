@@ -12,8 +12,13 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'mesh_engine.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MayakMeshApp());
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+    };
+    runApp(const MayakMeshApp());
+  }, (_, __) {});
 }
 
 class MayakTheme {
@@ -50,7 +55,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.5.2',
+      title: 'Маяк P2P v2.6.0',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -6879,6 +6884,36 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
               },
             ),
             const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            if (Platform.isWindows) ...[
+              ListTile(
+                leading: const Icon(Icons.headset_mic_outlined, color: Colors.white),
+                title: const Text('Аудио и видео устройства (ПК)'),
+                subtitle: const Text('Выбор динамиков, микрофона и веб-камеры + тест',
+                    style: TextStyle(fontSize: 12, color: Colors.white54)),
+                trailing: const Icon(Icons.chevron_right_rounded,
+                    color: Colors.white38),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => WindowsDevicesSettingsScreen(engine: engine),
+                    ),
+                  );
+                },
+              ),
+              const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            ],
+            if (Platform.isAndroid) ...[
+              ListTile(
+                leading: const Icon(Icons.ring_volume_outlined, color: Colors.white),
+                title: const Text('Звонки поверх других приложений'),
+                subtitle: const Text('Разрешить показ экрана звонка, когда Маяк свёрнут',
+                    style: TextStyle(fontSize: 12, color: Colors.white54)),
+                trailing: const Icon(Icons.chevron_right_rounded,
+                    color: Colors.white38),
+                onTap: () => engine.requestAndroidOverlayCallPermission(),
+              ),
+              const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            ],
             ListTile(
               leading: const Icon(Icons.terminal_outlined, color: Colors.white),
               title: const Text('Диагностика и журнал событий'),
@@ -6905,7 +6940,7 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
             ListTile(
               leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
               title: const Text('О приложении'),
-              subtitle: const Text('Маяк v2.5.2 • Шифрование и справка',
+              subtitle: const Text('Маяк v2.6.0 • Шифрование и справка',
                   style: TextStyle(fontSize: 12, color: Colors.white54)),
               trailing: const Icon(Icons.chevron_right_rounded,
                   color: Colors.white38),
@@ -7365,7 +7400,7 @@ class _AboutMayakScreenState extends State<AboutMayakScreen> {
               child: const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 child: Text(
-                  'Версия 2.5.2 • Автономный P2P & Mesh мессенджер',
+                  'Версия 2.6.0 • Автономный P2P & Mesh мессенджер',
                   style: TextStyle(fontSize: 12, color: Colors.white54),
                 ),
               ),
@@ -7962,11 +7997,11 @@ class _MayakTacticalMapScreenState extends State<MayakTacticalMapScreen> {
                                 const ColorFilter.matrix(_monoInvertMatrix),
                             child: Stack(
                               children: [
-                                for (int dx = (_is3dMode ? -2 : -1);
-                                    dx <= (_is3dMode ? 2 : 1);
+                                for (int dx = -((canvasW / (2 * tilePx)).ceil() + 1).clamp(2, 4);
+                                    dx <= ((canvasW / (2 * tilePx)).ceil() + 1).clamp(2, 4);
                                     dx++)
-                                  for (int dy = (_is3dMode ? -2 : -1);
-                                      dy <= (_is3dMode ? 2 : 1);
+                                  for (int dy = -((canvasH / (2 * tilePx)).ceil() + 1).clamp(2, 4);
+                                      dy <= ((canvasH / (2 * tilePx)).ceil() + 1).clamp(2, 4);
                                       dy++)
                                     if (baseTy + dy >= 0 &&
                                         baseTy + dy <= maxTile)
@@ -8592,6 +8627,153 @@ class _WalkieTalkieScreenState extends State<WalkieTalkieScreen> {
               fontWeight: FontWeight.w800,
               letterSpacing: 0.8,
               color: isTx ? Colors.white : Colors.black,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+// =============================================================================
+// v2.5.3: НАСТРОЙКА АУДИО И ВИДЕО УСТРОЙСТВ НА WINDOWS ПК
+// =============================================================================
+
+class WindowsDevicesSettingsScreen extends StatefulWidget {
+  final MeshEngine engine;
+  const WindowsDevicesSettingsScreen({super.key, required this.engine});
+
+  @override
+  State<WindowsDevicesSettingsScreen> createState() =>
+      _WindowsDevicesSettingsScreenState();
+}
+
+class _WindowsDevicesSettingsScreenState
+    extends State<WindowsDevicesSettingsScreen> {
+  MeshEngine get engine => widget.engine;
+  List<Map<String, dynamic>> _outDevs = [];
+  List<Map<String, dynamic>> _inDevs = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _outDevs = WindowsPcmAudioBridge.listOutputDevices();
+    _inDevs = WindowsPcmAudioBridge.listInputDevices();
+    unawaited(engine.refreshWindowsCameras().then((_) {
+      if (mounted) setState(() {});
+    }));
+  }
+
+  Widget _section(String title, Widget child) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: MayakTheme.bgSurface,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0x26FFFFFF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title.toUpperCase(),
+              style: const TextStyle(
+                  fontSize: 11,
+                  letterSpacing: 1.1,
+                  color: Colors.white54,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          child,
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cams = engine.availableWinCameras.isEmpty
+        ? ['Камера #0 (По умолчанию)', 'Камера #1', 'Камера #2']
+        : engine.availableWinCameras;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Аудио и видео (ПК)',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        shape: const Border(
+          bottom: BorderSide(color: Color(0x22FFFFFF), width: 1),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.only(bottom: 30),
+        children: [
+          _section(
+            'Динамики / Наушники (Вывод звука в звонках)',
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final d in _outDevs)
+                  RadioListTile<int>(
+                    dense: true,
+                    activeColor: Colors.white,
+                    title: Text(d['name'].toString(),
+                        style: const TextStyle(fontSize: 13)),
+                    value: d['id'] as int,
+                    groupValue: WindowsPcmAudioBridge.selectedOutDeviceId,
+                    onChanged: (v) {
+                      if (v == null) return;
+                      engine.setWindowsDeviceSelection(outId: v);
+                      setState(() {});
+                    },
+                  ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () => WindowsPcmAudioBridge.playTestBeep(),
+                  icon: const Icon(Icons.volume_up_rounded, size: 18),
+                  label: const Text('Проверить звук (тестовый сигнал)'),
+                ),
+              ],
+            ),
+          ),
+          _section(
+            'Микрофон (Ввод звука)',
+            Column(
+              children: [
+                for (final d in _inDevs)
+                  RadioListTile<int>(
+                    dense: true,
+                    activeColor: Colors.white,
+                    title: Text(d['name'].toString(),
+                        style: const TextStyle(fontSize: 13)),
+                    value: d['id'] as int,
+                    groupValue: WindowsPcmAudioBridge.selectedInDeviceId,
+                    onChanged: (v) {
+                      if (v == null) return;
+                      engine.setWindowsDeviceSelection(inId: v);
+                      setState(() {});
+                    },
+                  ),
+              ],
+            ),
+          ),
+          _section(
+            'Веб-камера (DirectShow)',
+            Column(
+              children: [
+                for (int i = 0; i < cams.length; i++)
+                  RadioListTile<int>(
+                    dense: true,
+                    activeColor: Colors.white,
+                    title: Text(cams[i], style: const TextStyle(fontSize: 13)),
+                    value: i,
+                    groupValue: engine.selectedWinCameraIndex,
+                    onChanged: (v) {
+                      if (v == null) return;
+                      engine.setWindowsDeviceSelection(camIdx: v);
+                      setState(() {});
+                    },
+                  ),
+              ],
             ),
           ),
         ],
