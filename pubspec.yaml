@@ -1,7 +1,7 @@
 name: p2p_mesh
 description: Autonomous P2P & BLE Mesh Intercom (Zero-Server)
 publish_to: 'none'
-version: 2.8.3+2831
+version: 2.9.0+2901
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -13,6 +13,8 @@ dependencies:
   shared_preferences: ^2.3.2
   qr_flutter: ^4.1.0
   mobile_scanner: ^6.0.2
+  image: ^4.2.0
+  zxing2: ^0.2.3
 
 dev_dependencies:
   flutter_test:

@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.8.3"
+                  versionName = "2.9.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.8.3"
+                  versionName "2.9.0"
               }}
 
               packagingOptions {{
@@ -304,7 +304,7 @@ jobs:
                       android:name=".MayakBackgroundService"
                       android:enabled="true"
                       android:exported="false"
-                      android:foregroundServiceType="remoteMessaging" />
+                      android:foregroundServiceType="remoteMessaging|dataSync" />
 
                   <activity
                       android:name=".MainActivity"
@@ -455,7 +455,11 @@ jobs:
                           .build()
 
                       if (Build.VERSION.SDK_INT >= 34) {
-                          startForeground(9001, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+                          try {
+                              startForeground(9001, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+                          } catch (_: Throwable) {
+                              startForeground(9001, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                          }
                       } else {
                           startForeground(9001, notif)
                       }
@@ -1716,6 +1720,9 @@ jobs:
                               res.success(granted)
                           } else if (requestCode == 7002 || requestCode == 7003) {
                               val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                              if (requestCode == 7003 && granted) {
+                                  startBgServiceSafe()
+                              }
                               res.success(granted)
                           } else {
                               res.success(false)
@@ -2704,7 +2711,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.8.3 --build-number=$((2830 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.9.0 --build-number=$((2900 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

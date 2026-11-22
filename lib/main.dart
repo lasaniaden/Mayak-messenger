@@ -723,6 +723,16 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                         final codeToSave = (engine.isAutoInterRegionalEnabled || engine.discoveredExternalEndpoint.isNotEmpty)
                             ? engine.buildInterRegionalInviteLink()
                             : engine.cachedInviteCode;
+                        // Рендерим QR 760x760 с белой рамкой (quiet zone 60px), чтобы его читал ЛЮБОЙ сканер!
+                        const double fullSize = 760.0;
+                        const double pad = 60.0;
+                        const double qrSize = fullSize - pad * 2;
+                        final recorder = ui.PictureRecorder();
+                        final canvas = Canvas(recorder);
+                        canvas.drawRect(
+                          const Rect.fromLTWH(0, 0, fullSize, fullSize),
+                          Paint()..color = const Color(0xFFFFFFFF),
+                        );
                         final painter = QrPainter(
                           data: codeToSave,
                           version: QrVersions.auto,
@@ -730,7 +740,12 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                           emptyColor: const Color(0xFFFFFFFF),
                           gapless: true,
                         );
-                        final picData = await painter.toImageData(640);
+                        canvas.save();
+                        canvas.translate(pad, pad);
+                        painter.paint(canvas, const Size(qrSize, qrSize));
+                        canvas.restore();
+                        final uiImg = await recorder.endRecording().toImage(fullSize.toInt(), fullSize.toInt());
+                        final picData = await uiImg.toByteData(format: ui.ImageByteFormat.png);
                         if (picData == null) return;
                         final saved = await engine.saveBytesToDownloads(
                           'mayak_qr_${engine.nodeId}.png',
@@ -781,20 +796,20 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                       ),
                     ),
                   if (Platform.isAndroid) const SizedBox(width: 8),
-                  if (Platform.isAndroid)
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.photo_library_outlined, size: 18),
-                        label: const Text('QR из галереи'),
-                        onPressed: () async {
-                          final picked = await engine.pickFileForChat(mode: 'image');
-                          if (picked == null) return;
-                          final path = (picked['path'] ?? '').toString();
-                          if (path.isEmpty) return;
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.photo_library_outlined, size: 18),
+                      label: Text(Platform.isWindows ? 'QR из файла' : 'QR из галереи'),
+                      onPressed: () async {
+                        final picked = await engine.pickFileForChat(mode: 'image');
+                        if (picked == null) return;
+                        final path = (picked['path'] ?? '').toString();
+                        if (path.isEmpty) return;
+                        String? found = await engine.decodeQrFromImageFile(path);
+                        if ((found == null || found.isEmpty) && Platform.isAndroid) {
                           final scanCtrl = MobileScannerController();
                           try {
                             final capture = await scanCtrl.analyzeImage(path);
-                            String? found;
                             if (capture != null) {
                               for (final b in capture.barcodes) {
                                 if (b.rawValue != null && b.rawValue!.isNotEmpty) {
@@ -803,28 +818,30 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                                 }
                               }
                             }
-                            if (found != null && found.isNotEmpty) {
-                              final peerId =
-                                  await engine.connectWithInviteOrIp(found);
-                              if (ctx.mounted) Navigator.pop(ctx);
-                              if (peerId != null && mounted) {
-                                final c = engine.knownContacts[peerId];
-                                if (c != null) {
-                                  _openChatRoom(c.nodeId, c.displayTitle, false);
-                                }
-                              }
-                            } else if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                    content: Text('QR-код на изображении не найден')),
-                              );
-                            }
+                          } catch (_) {
                           } finally {
                             await scanCtrl.dispose();
                           }
-                        },
-                      ),
+                        }
+                        if (found != null && found.isNotEmpty) {
+                          final peerId =
+                              await engine.connectWithInviteOrIp(found);
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          if (peerId != null && mounted) {
+                            final c = engine.knownContacts[peerId];
+                            if (c != null) {
+                              _openChatRoom(c.nodeId, c.displayTitle, false);
+                            }
+                          }
+                        } else if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('QR-код на изображении не найден')),
+                          );
+                        }
+                      },
                     ),
+                  ),
                 ],
               ),
               const SizedBox(height: 14),
@@ -3082,27 +3099,50 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
   final _searchCtrl = TextEditingController();
   String _searchQuery = '';
   final ScrollController _scrollCtrl = ScrollController();
+  bool _showScrollDownBtn = false;
+  int _lastKnownMsgCount = 0;
 
   MeshEngine get engine => widget.engine;
 
   @override
   void initState() {
     super.initState();
+    _lastKnownMsgCount = engine.getMessagesFor(widget.peerId).length;
+    _scrollCtrl.addListener(_onScrollChanged);
     engine.addListenerState(_onEngineUpdate);
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
 
   @override
   void dispose() {
+    _scrollCtrl.removeListener(_onScrollChanged);
     engine.removeListenerState(_onEngineUpdate);
     _msgCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
 
+  void _onScrollChanged() {
+    if (!_scrollCtrl.hasClients) return;
+    final distFromBottom =
+        _scrollCtrl.position.maxScrollExtent - _scrollCtrl.position.pixels;
+    final shouldShow = distFromBottom > 140;
+    if (shouldShow != _showScrollDownBtn && mounted) {
+      setState(() => _showScrollDownBtn = shouldShow);
+    }
+  }
+
   void _onEngineUpdate() {
     if (!mounted) return;
+    final curCount = engine.getMessagesFor(widget.peerId).length;
+    final hasNew = curCount > _lastKnownMsgCount;
+    final wasNearBottom = !_scrollCtrl.hasClients ||
+        (_scrollCtrl.position.maxScrollExtent - _scrollCtrl.position.pixels) < 160;
+    _lastKnownMsgCount = curCount;
     setState(() {});
+    if (hasNew && wasNearBottom) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    }
   }
 
   void _scrollToBottom() {
@@ -4200,21 +4240,24 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
               ),
             ),
           Expanded(
-            child: messages.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Text(
-                        widget.isBroadcast
-                            ? 'Напишите сообщение в Общий эфир — его получат все устройства поблизости.'
-                            : 'Сквозное шифрование (X25519 + ChaCha20-Poly1305) активно.\nМожно отправлять текст, фото, видео, голосовые и файлы до 1 ГБ!\nНажмите на сообщение для реакций, редактирования, пересылки или удаления.',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                            color: Colors.white54, fontSize: 13),
-                      ),
-                    ),
-                  )
-                : ListView.builder(
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: messages.isEmpty
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(24),
+                            child: Text(
+                              widget.isBroadcast
+                                  ? 'Напишите сообщение в Общий эфир — его получат все устройства поблизости.'
+                                  : 'Сквозное шифрование (X25519 + ChaCha20-Poly1305) активно.\nМожно отправлять текст, фото, видео, голосовые и файлы до 1 ГБ!\nНажмите на сообщение для реакций, редактирования, пересылки или удаления.',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  color: Colors.white54, fontSize: 13),
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
                     controller: _scrollCtrl,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 12, vertical: 10),
@@ -4369,6 +4412,34 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                       );
                     },
                   ),
+                ),
+                if (_showScrollDownBtn)
+                  Positioned(
+                    right: 14,
+                    bottom: 14,
+                    child: Material(
+                      color: const Color(0xFF141414),
+                      shape: const CircleBorder(
+                        side: BorderSide(color: Colors.white38, width: 1),
+                      ),
+                      elevation: 4,
+                      child: InkWell(
+                        customBorder: const CircleBorder(),
+                        onTap: _scrollToBottom,
+                        child: const SizedBox(
+                          width: 42,
+                          height: 42,
+                          child: Icon(
+                            Icons.keyboard_arrow_down_rounded,
+                            color: Colors.white,
+                            size: 26,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
           SafeArea(
             child: selfBanned
@@ -5136,6 +5207,12 @@ class _QrScannerPageState extends State<QrScannerPage> {
     if (picked == null) return;
     final path = (picked['path'] ?? '').toString();
     if (path.isEmpty) return;
+    final decoded = await eng.decodeQrFromImageFile(path);
+    if (decoded != null && decoded.isNotEmpty && !_alreadyPopped && mounted) {
+      _alreadyPopped = true;
+      Navigator.of(context).pop(decoded);
+      return;
+    }
     final capture = await _ctrl.analyzeImage(path);
     if (capture != null) {
       for (final b in capture.barcodes) {
@@ -7323,10 +7400,11 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
                 ? MayakTheme.accentEmerald
                 : Colors.white54,
             tutorial:
-                'Автоматическая связь между городами с телефона на телефон (без настроек роутера и без домашнего ПК):\n'
-                '1. Нажмите «Авто-настройка связи» — Маяк сам определит ваш внешний адрес через STUN.\n'
-                '2. Нажмите «Скопировать мой код» и отправьте другу в другой город.\n'
-                '3. Друг вставляет код в «QR-код / Ввести IP» — устройства соединяются напрямую с E2EE.',
+                'Пошаговая инструкция для связи между городами и странами (без серверов):\n'
+                '1. Включите тумблер «Межрегиональный режим» ниже и подождите 3–5 секунд до появления зелёного статуса STUN.\n'
+                '2. НЕ нажимайте «Обновить внешний адрес» после отправки кода другу (иначе сменится порт) и не выгружайте Маяк.\n'
+                '3. Нажмите «+ Новый узел» → «Сохранить QR» (или скопируйте код) и отправьте другу.\n'
+                '4. ОБА добавьте QR друг друга через «QR из галереи / файла» и подождите 20–30 секунд (синхронизация на :00 / :30).',
             actionButton: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -8989,7 +9067,7 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Сетевая консоль • v2.8.3', style: TextStyle(fontSize: 16)),
+        title: const Text('Сетевая консоль • v2.9.0', style: TextStyle(fontSize: 16)),
         actions: [
           IconButton(
             tooltip: 'Очистить журнал',

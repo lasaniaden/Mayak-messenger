@@ -7,6 +7,8 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:cryptography/cryptography.dart';
+import 'package:image/image.dart' as img;
+import 'package:zxing2/qrcode.dart' as zx;
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1822,6 +1824,43 @@ class MeshEngine {
     onStateChanged();
   }
 
+  /// Универсальное чтение QR-кода из файла картинки (PNG/JPG/WebP) — работает на Android И Windows!
+  Future<String?> decodeQrFromImageFile(String path) async {
+    try {
+      final bytes = await File(path).readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return null;
+      // Конвертируем в Int32List ARGB для RGBLuminanceSource (zxing2)
+      final w = decoded.width;
+      final h = decoded.height;
+      final pixels = Int32List(w * h);
+      int p = 0;
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          final px = decoded.getPixel(x, y);
+          final r = px.r.toInt() & 0xFF;
+          final g = px.g.toInt() & 0xFF;
+          final b = px.b.toInt() & 0xFF;
+          final a = px.a.toInt() & 0xFF;
+          // Композитинг на белый фон (если PNG с прозрачностью!)
+          final rr = ((r * a + 255 * (255 - a)) ~/ 255) & 0xFF;
+          final gg = ((g * a + 255 * (255 - a)) ~/ 255) & 0xFF;
+          final bb = ((b * a + 255 * (255 - a)) ~/ 255) & 0xFF;
+          pixels[p++] = (0xFF << 24) | (rr << 16) | (gg << 8) | bb;
+        }
+      }
+      final source = zx.RGBLuminanceSource(w, h, pixels);
+      final bitmap = zx.BinaryBitmap(zx.HybridBinarizer(source));
+      final reader = zx.QRCodeReader();
+      final res = reader.decode(bitmap);
+      final text = res.text.trim();
+      return text.isNotEmpty ? text : null;
+    } catch (e) {
+      _addLog('[QR] zxing2 не распознал файл: $e', triggerUi: false);
+      return null;
+    }
+  }
+
   Future<String> saveBytesToDownloads(String fileName, List<int> bytes) async {
     try {
       if (Platform.isAndroid) {
@@ -2292,6 +2331,8 @@ class MeshEngine {
               _addLog('[PUNCH] UDP-туннель открыт с $remoteId (${dg.address.address}:${dg.port})');
               _sendUdpHolePunch(dg.address.address, dg.port);
               _sendUdpMeshJson(dg.address.address, dg.port, _buildHelloJson());
+              _sendUdpMeshJson(dg.address.address, dg.port, _buildPeerSyncJson());
+              _sendUdpMeshJson(dg.address.address, dg.port, _buildChatHistorySyncForPeer(remoteId));
               _flushBufferedPacketsToOnlinePeers();
             }
             onStateChanged();
@@ -2314,7 +2355,10 @@ class MeshEngine {
                 port: senderPort,
                 lastSeenMs: DateTime.now().millisecondsSinceEpoch,
               );
+              _sendUdpMeshJson(senderIp, senderPort, _buildPeerSyncJson());
+              _sendUdpMeshJson(senderIp, senderPort, _buildChatHistorySyncForPeer(peerId));
               _refreshOnlineStatuses();
+              _flushBufferedPacketsToOnlinePeers();
               onStateChanged();
             },
             replyDirect: (replyJson) {
@@ -2647,6 +2691,12 @@ class MeshEngine {
     for (final entry in _blePeers.entries.toList()) {
       await sendToPeer(entry.value, (line) => unawaited(_sendBleLine(entry.key, line)));
     }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    for (final entry in _remoteUdpPeers.entries.toList()) {
+      if (entry.value.lastSeenMs > 0 && (nowMs - entry.value.lastSeenMs) < 25000) {
+        await sendToPeer(entry.key, (line) => _sendUdpMeshJson(entry.value.ip, entry.value.port, line));
+      }
+    }
   }
 
   void _broadcastRawLineToPttTargets(String line) {
@@ -2659,6 +2709,14 @@ class MeshEngine {
     for (final entry in _blePeers.entries.toList()) {
       if (target == 'ALL' || entry.value == target) {
         unawaited(_sendBleLine(entry.key, line));
+      }
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    for (final entry in _remoteUdpPeers.entries.toList()) {
+      if (entry.value.lastSeenMs > 0 && (nowMs - entry.value.lastSeenMs) < 25000) {
+        if (target == 'ALL' || entry.value.ip.isNotEmpty && entry.key == target) {
+          _sendUdpMeshJson(entry.value.ip, entry.value.port, line);
+        }
       }
     }
   }
@@ -5170,7 +5228,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.3) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.9.0) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');
@@ -5285,6 +5343,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       try {
         await _nativeChannel.invokeMethod('acquireMulticastLock');
         await _nativeChannel.invokeMethod('bindProcessToWifiForLan');
+        unawaited(_nativeChannel.invokeMethod('requestNotificationPermission').catchError((_) {}));
         await _nativeChannel.invokeMethod('startBackgroundService');
         bgServiceActive = true;
       } catch (_) {}
@@ -6823,7 +6882,11 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final totalSize = await file.length();
     if (totalSize <= 0) return;
     final cleanFileName = _sanitizeFileName(filePath.split(RegExp(r'[\\/]')).last);
-    final totalChunks = (totalSize / fileChunkSize).ceil();
+    final isUdpOnlyPeer = !_tcpPeers.containsValue(targetNodeId) &&
+        !_blePeers.containsValue(targetNodeId) &&
+        _remoteUdpPeers.containsKey(targetNodeId);
+    final effectiveChunkSize = isUdpOnlyPeer ? 600 : fileChunkSize;
+    final totalChunks = (totalSize / effectiveChunkSize).ceil();
 
     final job = pendingFileJobs.putIfAbsent(
       '${fileId}_$targetNodeId',
@@ -6848,8 +6911,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         if (!isPeerDirectlyConnected(targetNodeId)) {
           break;
         }
-        await raf.setPosition(idx * fileChunkSize);
-        final chunkLen = min(fileChunkSize, totalSize - idx * fileChunkSize);
+        await raf.setPosition(idx * effectiveChunkSize);
+        final chunkLen = min(effectiveChunkSize, totalSize - idx * effectiveChunkSize);
         final chunkBytes = await raf.read(chunkLen);
 
         final isLastChunk = (idx == totalChunks - 1);
@@ -6868,6 +6931,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           'fs': totalSize,
           'idx': idx,
           'tot': totalChunks,
+          'cs': effectiveChunkSize,
           'wack': needWindowAck,
           'nick': nickname,
           'b64': base64Encode(chunkBytes),
@@ -8225,8 +8289,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         incomingCallFromPeerId = senderId;
         incomingCallMode = mode;
         _incomingCallId = (envelope['callId'] ?? '').toString();
-        _incomingCallUdpPort =
-            (envelope['udpPort'] as num?)?.toInt() ?? callMediaUdpPort;
+        _incomingCallUdpPort = _remoteUdpPeers[senderId]?.port ??
+            (envelope['udpPort'] as num?)?.toInt() ??
+            callMediaUdpPort;
         unawaited(_startIncomingRingtone(caller: contact.displayTitle, mode: mode));
         unawaited(_triggerIncomingNotification(
           senderId,
@@ -8239,8 +8304,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         if (activeCallPeerId == senderId && !isCallAccepted) {
           isCallAccepted = true;
           _activeCallPeerIp = _resolvePeerIp(senderId);
-          _activeCallPeerUdpPort =
-              (envelope['udpPort'] as num?)?.toInt() ?? callMediaUdpPort;
+          _activeCallPeerUdpPort = _remoteUdpPeers[senderId]?.port ??
+              (envelope['udpPort'] as num?)?.toInt() ??
+              callMediaUdpPort;
           final remoteCallId = (envelope['callId'] ?? '').toString();
           if (remoteCallId.isNotEmpty && remoteCallId != _activeCallId) {
             _activeCallId = remoteCallId;
@@ -8699,7 +8765,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     if (!assembly.receivedChunkIndices.contains(idx)) {
       final raf = assembly.openRaf;
       if (raf != null) {
-        await raf.setPosition(idx * fileChunkSize);
+        final rxChunkSize = (envelope['cs'] as num?)?.toInt() ?? fileChunkSize;
+        await raf.setPosition(idx * rxChunkSize);
         await raf.writeFrom(chunkBytes);
         assembly.receivedChunkIndices.add(idx);
       }
