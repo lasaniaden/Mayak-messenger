@@ -684,16 +684,12 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
                       color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: MayakTheme.accentCyan.withOpacity(0.25),
-                          blurRadius: 16,
-                        ),
-                      ],
+                      borderRadius: BorderRadius.circular(12),
                     ),
                     child: QrImageView(
-                      data: engine.cachedInviteCode,
+                      data: engine.isAutoInterRegionalEnabled
+                          ? engine.buildInterRegionalInviteLink()
+                          : engine.cachedInviteCode,
                       version: QrVersions.auto,
                       size: 190,
                     ),
@@ -705,10 +701,12 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                   Expanded(
                     child: OutlinedButton.icon(
                       icon: const Icon(Icons.copy, size: 16),
-                      label: const Text('Скопировать инвайт'),
+                      label: const Text('Копировать код'),
                       onPressed: () {
-                        Clipboard.setData(
-                            ClipboardData(text: engine.cachedInviteCode));
+                        final codeToCopy = engine.isAutoInterRegionalEnabled
+                            ? engine.buildInterRegionalInviteLink()
+                            : engine.cachedInviteCode;
+                        Clipboard.setData(ClipboardData(text: codeToCopy));
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
                               content: Text('Код приглашения скопирован')),
@@ -716,23 +714,56 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                       },
                     ),
                   ),
-                  if (Platform.isAndroid) ...[
-                    const SizedBox(width: 8),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.download_rounded, size: 16),
+                      label: const Text('Сохранить QR'),
+                      onPressed: () async {
+                        final codeToSave = engine.isAutoInterRegionalEnabled
+                            ? engine.buildInterRegionalInviteLink()
+                            : engine.cachedInviteCode;
+                        final painter = QrPainter(
+                          data: codeToSave,
+                          version: QrVersions.auto,
+                          color: const Color(0xFF000000),
+                          emptyColor: const Color(0xFFFFFFFF),
+                          gapless: true,
+                        );
+                        final picData = await painter.toImageData(640);
+                        if (picData == null) return;
+                        final saved = await engine.saveBytesToDownloads(
+                          'mayak_qr_${engine.nodeId}.png',
+                          picData.buffer.asUint8List(),
+                        );
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('QR-визитка сохранена: $saved')),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  if (Platform.isAndroid)
                     Expanded(
                       child: FilledButton.icon(
                         style: FilledButton.styleFrom(
-                          backgroundColor: MayakTheme.accentIndigo,
-                          foregroundColor: Colors.white,
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black,
                         ),
                         icon: const Icon(Icons.qr_code_scanner, size: 18),
-                        label: const Text('Сканировать QR'),
+                        label: const Text('Камера QR'),
                         onPressed: () async {
                           final camOk = await engine.requestCameraPermission();
                           if (!camOk) return;
                           if (!ctx.mounted) return;
                           final scanned = await Navigator.of(ctx).push<String>(
                             MaterialPageRoute(
-                              builder: (_) => const QrScannerPage(),
+                              builder: (_) => QrScannerPage(engine: engine),
                             ),
                           );
                           if (scanned != null && scanned.isNotEmpty) {
@@ -749,7 +780,51 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                         },
                       ),
                     ),
-                  ],
+                  if (Platform.isAndroid) const SizedBox(width: 8),
+                  if (Platform.isAndroid)
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.photo_library_outlined, size: 18),
+                        label: const Text('QR из галереи'),
+                        onPressed: () async {
+                          final picked = await engine.pickFileForChat(mode: 'image');
+                          if (picked == null) return;
+                          final path = (picked['path'] ?? '').toString();
+                          if (path.isEmpty) return;
+                          final scanCtrl = MobileScannerController();
+                          try {
+                            final capture = await scanCtrl.analyzeImage(path);
+                            String? found;
+                            if (capture != null) {
+                              for (final b in capture.barcodes) {
+                                if (b.rawValue != null && b.rawValue!.isNotEmpty) {
+                                  found = b.rawValue;
+                                  break;
+                                }
+                              }
+                            }
+                            if (found != null && found.isNotEmpty) {
+                              final peerId =
+                                  await engine.connectWithInviteOrIp(found);
+                              if (ctx.mounted) Navigator.pop(ctx);
+                              if (peerId != null && mounted) {
+                                final c = engine.knownContacts[peerId];
+                                if (c != null) {
+                                  _openChatRoom(c.nodeId, c.displayTitle, false);
+                                }
+                              }
+                            } else if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text('QR-код на изображении не найден')),
+                              );
+                            }
+                          } finally {
+                            await scanCtrl.dispose();
+                          }
+                        },
+                      ),
+                    ),
                 ],
               ),
               const SizedBox(height: 14),
@@ -1147,6 +1222,19 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                       if (!mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(content: Text(msg)),
+                      );
+                    },
+                  ),
+                  _uniformMonoAction(
+                    icon: Icons.bug_report_outlined,
+                    label: 'Сетевая консоль и тех. отчёт (копировать)',
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => NetConsoleScreen(engine: engine),
+                        ),
                       );
                     },
                   ),
@@ -5024,20 +5112,64 @@ extension MeshEngineListenerExt on MeshEngine {
 }
 
 class QrScannerPage extends StatefulWidget {
-  const QrScannerPage({super.key});
+  final MeshEngine? engine;
+  const QrScannerPage({super.key, this.engine});
 
   @override
   State<QrScannerPage> createState() => _QrScannerPageState();
 }
 
 class _QrScannerPageState extends State<QrScannerPage> {
+  final MobileScannerController _ctrl = MobileScannerController();
   bool _alreadyPopped = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _scanFromGallery() async {
+    final eng = widget.engine;
+    if (eng == null || _alreadyPopped) return;
+    final picked = await eng.pickFileForChat(mode: 'image');
+    if (picked == null) return;
+    final path = (picked['path'] ?? '').toString();
+    if (path.isEmpty) return;
+    final capture = await _ctrl.analyzeImage(path);
+    if (capture != null) {
+      for (final b in capture.barcodes) {
+        final raw = b.rawValue;
+        if (raw != null && raw.isNotEmpty && !_alreadyPopped && mounted) {
+          _alreadyPopped = true;
+          Navigator.of(context).pop(raw);
+          return;
+        }
+      }
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('QR-код на выбранной картинке не распознан')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Наведите камеру на QR узла')),
+      appBar: AppBar(
+        title: const Text('Сканер QR узла'),
+        actions: [
+          if (widget.engine != null)
+            IconButton(
+              tooltip: 'Выбрать QR из галереи',
+              icon: const Icon(Icons.photo_library_outlined),
+              onPressed: _scanFromGallery,
+            ),
+        ],
+      ),
       body: MobileScanner(
+        controller: _ctrl,
         onDetect: (capture) {
           if (_alreadyPopped) return;
           for (final barcode in capture.barcodes) {
@@ -7237,6 +7369,19 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
                   icon: const Icon(Icons.copy_rounded, size: 18),
                   label: const Text('Скопировать мой код для друга'),
                 ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => NetConsoleScreen(engine: engine),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.terminal_rounded, size: 18),
+                  label: const Text('Открыть сетевую консоль (логи)'),
+                ),
               ],
             ),
           ),
@@ -8783,6 +8928,166 @@ class _WindowsDevicesSettingsScreenState
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class NetConsoleScreen extends StatefulWidget {
+  final MeshEngine engine;
+  const NetConsoleScreen({super.key, required this.engine});
+
+  @override
+  State<NetConsoleScreen> createState() => _NetConsoleScreenState();
+}
+
+class _NetConsoleScreenState extends State<NetConsoleScreen> {
+  Timer? _refreshTimer;
+  bool _runningTest = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _runNetworkTest() async {
+    if (_runningTest) return;
+    setState(() => _runningTest = true);
+    try {
+      await widget.engine.refreshNetworkCache(force: true);
+      await widget.engine.discoverExternalEndpointAuto(forceRefresh: true);
+      await widget.engine.pingAllKnownNodes();
+    } finally {
+      if (mounted) setState(() => _runningTest = false);
+    }
+  }
+
+  void _copyReport() {
+    final report = widget.engine.buildFullDiagnosticReport();
+    Clipboard.setData(ClipboardData(text: report));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Технический отчёт скопирован в буфер — можно вставить в чат'),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final e = widget.engine;
+    final logs = e.debugLogs;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: const Text('Сетевая консоль • v2.8.0', style: TextStyle(fontSize: 16)),
+        actions: [
+          IconButton(
+            tooltip: 'Очистить журнал',
+            icon: const Icon(Icons.delete_outline_rounded),
+            onPressed: () {
+              e.clearDebugLogs();
+              setState(() {});
+            },
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0A0A0A),
+                border: Border.all(color: Colors.white24),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                'Узел: ${e.nodeId} | Порт: ${e.listenPort} | VPN: ${e.vpnDetected ? "ДА" : "нет"}\n'
+                'LAN IP: ${e.cachedIps.isEmpty ? "нет" : e.cachedIps.join(", ")}\n'
+                'UPnP: ${e.upnpPortMapped ? "OK (${e.upnpExternalIp})" : "нет"} | IPv6: ${e.globalIpv6Address.isEmpty ? "нет" : e.globalIpv6Address}\n'
+                'STUN: ${e.discoveredExternalEndpoint.isEmpty ? "нет" : e.discoveredExternalEndpoint} | В сети: ${e.connectedPeersCount}',
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11.5,
+                  color: Colors.white70,
+                  height: 1.4,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _runningTest ? null : _runNetworkTest,
+                      icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                      label: Text(_runningTest ? 'Тест...' : 'Тест сети'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                      ),
+                      onPressed: _copyReport,
+                      icon: const Icon(Icons.copy_all_rounded, size: 18),
+                      label: const Text('Копировать отчёт'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: Container(
+                margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF050505),
+                  border: Border.all(color: Colors.white24),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: logs.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'Журнал пуст. Нажмите «Тест сети».',
+                          style: TextStyle(color: Colors.white38, fontFamily: 'monospace', fontSize: 12),
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: logs.length,
+                        itemBuilder: (_, idx) => Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: SelectableText(
+                            logs[idx],
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 11,
+                              color: Colors.white70,
+                              height: 1.3,
+                            ),
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

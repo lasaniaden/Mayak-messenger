@@ -1210,6 +1210,8 @@ class MeshEngine {
   int _lastIpRefreshMs = 0;
 
   final Map<Socket, String> _tcpPeers = {};
+  final Map<Socket, int> _tcpLastRxMs = {};
+  int _beaconTickCounter = 0;
   final Set<String> _connectingHosts = {};
   final Map<String, String> _blePeers = {};
 
@@ -1820,6 +1822,31 @@ class MeshEngine {
     onStateChanged();
   }
 
+  Future<String> saveBytesToDownloads(String fileName, List<int> bytes) async {
+    try {
+      if (Platform.isAndroid) {
+        final savedPath = await _nativeChannel.invokeMethod<String>(
+          'saveFileToDownloads',
+          {'fileName': fileName, 'bytes': Uint8List.fromList(bytes)},
+        );
+        if (savedPath != null && savedPath.isNotEmpty) {
+          return savedPath;
+        }
+      }
+      final sep = Platform.pathSeparator;
+      final home = Platform.environment['USERPROFILE'] ??
+          Platform.environment['HOME'] ??
+          Directory.systemTemp.path;
+      final dl = Directory('$home${sep}Downloads');
+      if (!await dl.exists()) await dl.create(recursive: true);
+      final outFile = File('${dl.path}$sep$fileName');
+      await outFile.writeAsBytes(bytes, flush: true);
+      return outFile.path;
+    } catch (e) {
+      return 'Ошибка сохранения: $e';
+    }
+  }
+
   Future<String> exportBackupJsonToDownloads() async {
     await _saveContactsAndChats();
     final signSeedBytes = await _signKeyPair.extractPrivateKeyBytes();
@@ -1995,18 +2022,35 @@ class MeshEngine {
           InternetAddress.anyIPv4,
           port,
           reuseAddress: true,
+          reusePort: false,
         );
         _callUdpListenPort = _callUdpSocket!.port;
-        _callUdpSocket!.listen((event) {
-          if (event == RawSocketEvent.read) {
-            final dg = _callUdpSocket?.receive();
-            if (dg != null) {
-              unawaited(_onCallUdpDatagram(dg));
+        _callUdpSocket!.listen(
+          (event) {
+            if (event == RawSocketEvent.read) {
+              try {
+                final dg = _callUdpSocket?.receive();
+                if (dg != null) {
+                  unawaited(_onCallUdpDatagram(dg));
+                }
+              } catch (e) {
+                // Игнорируем WSAECONNRESET (10054) на Windows при ICMP Port Unreachable
+                _addLog('[UDP] Предупреждение чтения (игнор 10054): $e', triggerUi: false);
+              }
             }
-          }
-        }, onError: (_) {});
+          },
+          onError: (e) {
+            _addLog('[UDP] Ошибка сокета (игнор): $e', triggerUi: false);
+          },
+          onDone: () {
+            _callUdpSocket = null;
+          },
+          cancelOnError: false,
+        );
         break;
-      } catch (_) {}
+      } catch (e) {
+        _addLog('[UDP] Не удалось открыть порт $port: $e', triggerUi: false);
+      }
     }
   }
 
@@ -2186,6 +2230,7 @@ class MeshEngine {
         final ep = '$b0.$b1.$b2.$b3:$port';
         if (!_stunObservedEndpoints.contains(ep)) {
           _stunObservedEndpoints.add(ep);
+          _addLog('[STUN] <- Ответ: $ep (всего уникальных: ${_stunObservedEndpoints.length})', triggerUi: false);
         }
         if (_stunPendingCompleter != null && !_stunPendingCompleter!.isCompleted) {
           _stunPendingCompleter!.complete(ep);
@@ -2208,10 +2253,11 @@ class MeshEngine {
       // 2. Межрегиональный UDP Hole Punch / Keepalive (0x4D 0x05 + nodeId)
       if (d[1] == 0x05) {
         try {
-          final remoteId = utf8.decode(d.sublist(2)).trim();
+          final remoteId = utf8.decode(d.sublist(2), allowMalformed: true).split('|').first.trim();
           if (remoteId.isNotEmpty && remoteId != nodeId) {
             final now = DateTime.now().millisecondsSinceEpoch;
-            final wasKnown = _remoteUdpPeers.containsKey(remoteId);
+            final prev = _remoteUdpPeers[remoteId];
+            final wasAlive = prev != null && prev.lastSeenMs > 0 && (now - prev.lastSeenMs) < 20000;
             _remoteUdpPeers[remoteId] = (
               ip: dg.address.address,
               port: dg.port,
@@ -2223,9 +2269,10 @@ class MeshEngine {
               c.lastSeenTimestamp = now;
               c.lastAddress = '${dg.address.address}:${dg.port}';
             }
-            if (!wasKnown) {
-              _addLog('Межрегиональный UDP-туннель открыт с $remoteId (${dg.address.address}:${dg.port})!');
+            if (!wasAlive) {
+              _addLog('[PUNCH] UDP-туннель открыт с $remoteId (${dg.address.address}:${dg.port})');
               _sendUdpHolePunch(dg.address.address, dg.port);
+              _sendUdpMeshJson(dg.address.address, dg.port, _buildHelloJson());
               _flushBufferedPacketsToOnlinePeers();
             }
             onStateChanged();
@@ -2266,13 +2313,21 @@ class MeshEngine {
     final sock = _callUdpSocket;
     if (sock == null || ip.isEmpty || port <= 0) return;
     try {
-      final idBytes = utf8.encode(nodeId);
-      final out = Uint8List(2 + idBytes.length);
+      // Переменный паддинг (0..32 байт) против сигнатурной классификации фиксированных хендшейков
+      final padLen = Random.secure().nextInt(33);
+      final idBytes = utf8.encode('$nodeId|');
+      final out = Uint8List(2 + idBytes.length + padLen);
       out[0] = 0x4D;
       out[1] = 0x05;
-      out.setRange(2, out.length, idBytes);
+      out.setRange(2, 2 + idBytes.length, idBytes);
+      if (padLen > 0) {
+        final pad = _randomBytes(padLen);
+        out.setRange(2 + idBytes.length, out.length, pad);
+      }
       sock.send(out, InternetAddress(ip), port);
-    } catch (_) {}
+    } catch (e) {
+      _addLog('[PUNCH] Ошибка отправки к $ip:$port: $e', triggerUi: false);
+    }
   }
 
   void _sendUdpMeshJson(String ip, int port, String jsonLine) {
@@ -2286,7 +2341,9 @@ class MeshEngine {
       out[1] = 0x06;
       out.setRange(2, out.length, body);
       sock.send(out, InternetAddress(ip), port);
-    } catch (_) {}
+    } catch (e) {
+      _addLog('[UDP] Ошибка отправки Mesh-пакета к $ip:$port: $e', triggerUi: false);
+    }
   }
 
   void _ensureUdpPeerPunchLoop() {
@@ -3044,19 +3101,78 @@ if ($cams) { $cams -join "`n" }
         includeLoopback: false,
         type: InternetAddressType.IPv6,
       );
+      final foundSummary = <String>[];
       for (final iface in ifaces) {
         final low = iface.name.toLowerCase();
         if (low.contains('tun') || low.contains('vpn') || low.contains('wg')) continue;
         for (final addr in iface.addresses) {
           final ip = addr.address.split('%').first;
-          // Глобальный маршрутизируемый IPv6 (2000::/3 — 2xxx: или 3xxx:)
+          foundSummary.add('${iface.name}=$ip');
           if ((ip.startsWith('2') || ip.startsWith('3')) && !ip.startsWith('fe80')) {
             globalIpv6Address = ip;
+            _addLog('[IPv6] Найден глобальный адрес: $ip (${iface.name})', triggerUi: false);
             return;
           }
         }
       }
-    } catch (_) {}
+      _addLog('[IPv6] Глобальный IPv6 не найден (интерфейсов: ${foundSummary.length})', triggerUi: false);
+    } catch (e) {
+      _addLog('[IPv6] Ошибка проверки: $e', triggerUi: false);
+    }
+  }
+
+  /// Компактный клиент NAT-PMP (RFC 6886, порт 5351) для роутеров MikroTik / Apple / ZyXEL
+  Future<void> _tryNatPmpPortMapping() async {
+    try {
+      final lanIp = cachedIps.firstWhere(
+        (ip) => ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.'),
+        orElse: () => '',
+      );
+      if (lanIp.isEmpty) return;
+      final parts = lanIp.split('.');
+      if (parts.length != 4) return;
+      final gw = InternetAddress('${parts[0]}.${parts[1]}.${parts[2]}.1');
+      final sock = await RawDatagramSocket.bind(InternetAddress(lanIp), 0, reusePort: false);
+      final extComp = Completer<String?>();
+      sock.listen((ev) {
+        if (ev == RawSocketEvent.read) {
+          final dg = sock.receive();
+          if (dg == null || dg.data.length < 12) return;
+          final d = dg.data;
+          // Ответ на запрос внешнего адреса (ver=0, opcode=128, result=0)
+          if (d[0] == 0 && d[1] == 128 && d[2] == 0 && d[3] == 0 && !extComp.isCompleted) {
+            extComp.complete('${d[8]}.${d[9]}.${d[10]}.${d[11]}');
+          }
+        }
+      }, onError: (_) {});
+      // 1. Запрос внешнего IPv4
+      sock.send(Uint8List.fromList([0, 0]), gw, 5351);
+      final extIp = await extComp.future
+          .timeout(const Duration(milliseconds: 1200), onTimeout: () => null);
+      if (extIp != null && extIp.isNotEmpty) {
+        // 2. Проброс TCP (opcode=2) и UDP (opcode=1) на 3600с
+        for (final pair in [(2, listenPort), (1, _callUdpListenPort)]) {
+          final req = Uint8List(12);
+          req[0] = 0;
+          req[1] = pair.$1;
+          req[4] = (pair.$2 >> 8) & 0xFF;
+          req[5] = pair.$2 & 0xFF;
+          req[6] = (pair.$2 >> 8) & 0xFF;
+          req[7] = pair.$2 & 0xFF;
+          req[10] = (3600 >> 8) & 0xFF;
+          req[11] = 3600 & 0xFF;
+          sock.send(req, gw, 5351);
+        }
+        upnpExternalIp = extIp;
+        upnpPortMapped = true;
+        _addLog('[NAT-PMP] Шлюз ${gw.address} открыл порты $listenPort/$_callUdpListenPort на $extIp', triggerUi: false);
+      } else {
+        _addLog('[NAT-PMP] Шлюз ${gw.address} не ответил на порт 5351', triggerUi: false);
+      }
+      sock.close();
+    } catch (e) {
+      _addLog('[NAT-PMP] Ошибка: $e', triggerUi: false);
+    }
   }
 
   /// Автоматический UPnP-IGD: сам просит домашний роутер открыть TCP 42070 и UDP 42072 без ручных настроек!
@@ -3064,28 +3180,49 @@ if ($cams) { $cams -join "`n" }
     upnpPortMapped = false;
     upnpExternalIp = '';
     try {
-      final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       final locCompleter = Completer<String?>();
       const ssdp = 'M-SEARCH * HTTP/1.1\r\n'
           'HOST: 239.255.255.250:1900\r\n'
           'MAN: "ssdp:discover"\r\n'
           'MX: 2\r\n'
           'ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n';
-      sock.listen((ev) {
-        if (ev == RawSocketEvent.read && !locCompleter.isCompleted) {
-          final dg = sock.receive();
-          if (dg == null) return;
-          final txt = utf8.decode(dg.data, allowMalformed: true);
-          final m = RegExp(r'LOCATION:\s*(http[^\r\n]+)', caseSensitive: false)
-              .firstMatch(txt);
-          if (m != null) locCompleter.complete(m.group(1)!.trim());
-        }
-      });
-      sock.send(utf8.encode(ssdp), InternetAddress('239.255.255.250'), 1900);
+      final ssdpBytes = utf8.encode(ssdp);
+      // Пер-интерфейсный SSDP: шлём отдельно с каждого физического LAN IPv4 (обходит VirtualBox/WSL/VPN на Windows!)
+      final bindAddrs = <InternetAddress>[
+        for (final ip in cachedIps)
+          if (ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.'))
+            InternetAddress(ip),
+        InternetAddress.anyIPv4,
+      ];
+      final openSocks = <RawDatagramSocket>[];
+      for (final ba in bindAddrs) {
+        try {
+          final s = await RawDatagramSocket.bind(ba, 0, reuseAddress: true, reusePort: false);
+          openSocks.add(s);
+          s.listen((ev) {
+            if (ev == RawSocketEvent.read && !locCompleter.isCompleted) {
+              final dg = s.receive();
+              if (dg == null) return;
+              final txt = utf8.decode(dg.data, allowMalformed: true);
+              final m = RegExp(r'LOCATION:\s*(http[^\r\n]+)', caseSensitive: false)
+                  .firstMatch(txt);
+              if (m != null) locCompleter.complete(m.group(1)!.trim());
+            }
+          }, onError: (_) {});
+          s.send(ssdpBytes, InternetAddress('239.255.255.250'), 1900);
+        } catch (_) {}
+      }
       final locUrl = await locCompleter.future
           .timeout(const Duration(seconds: 2), onTimeout: () => null);
-      sock.close();
-      if (locUrl == null) return;
+      for (final s in openSocks) {
+        try { s.close(); } catch (_) {}
+      }
+      if (locUrl == null) {
+        _addLog('[UPnP] Роутер не ответил на SSDP, пробую NAT-PMP (порт 5351)...', triggerUi: false);
+        await _tryNatPmpPortMapping();
+        return;
+      }
+      _addLog('[UPnP] Найден шлюз: $locUrl', triggerUi: false);
 
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
       final descUri = Uri.parse(locUrl);
@@ -3098,6 +3235,7 @@ if ($cams) { $cams -join "`n" }
         caseSensitive: false,
       ).firstMatch(xml);
       if (srvMatch == null) {
+        _addLog('[UPnP] Сервис WANIP/WANPPP не найден в XML шлюза', triggerUi: false);
         client.close(force: true);
         return;
       }
@@ -3106,6 +3244,7 @@ if ($cams) { $cams -join "`n" }
       final ctrlUri = descUri.resolve(ctrlPath);
       final myLanIp = cachedIps.isNotEmpty ? cachedIps.first : '';
       if (myLanIp.isEmpty) {
+        _addLog('[UPnP] Нет локального LAN IP для проброса', triggerUi: false);
         client.close(force: true);
         return;
       }
@@ -3155,10 +3294,14 @@ if ($cams) { $cams -join "`n" }
       if (ipM != null) {
         upnpExternalIp = ipM.group(1)!.trim();
         upnpPortMapped = true;
-        _addLog('UPnP-IGD: роутер сам открыл порты $listenPort/$_callUdpListenPort на $upnpExternalIp!');
+        _addLog('[UPnP] Успешно открыты TCP $listenPort и UDP $_callUdpListenPort на $upnpExternalIp', triggerUi: false);
+      } else {
+        _addLog('[UPnP] GetExternalIPAddress не вернул IP', triggerUi: false);
       }
       client.close(force: true);
-    } catch (_) {}
+    } catch (e) {
+      _addLog('[UPnP] Ошибка: $e', triggerUi: false);
+    }
   }
 
   /// Авто-настройка межрегиональной связи: российские + мировые STUN + UPnP-IGD + IPv6!
@@ -3181,13 +3324,13 @@ if ($cams) { $cams -join "`n" }
       if (sock != null) {
         _stunObservedEndpoints.clear();
         _stunPendingCompleter = Completer<String?>();
-        // Российские и стабильные мировые STUN-серверы (без заблокированного Cloudflare!)
+        // Пул STUN под РФ и ОАЭ 2026: сначала нестандартные порты (443 / 19302), затем РФ и резерв
         final stunServers = [
-          ('stun.sipnet.ru', 3478),
-          ('stun.voip.yandex.net', 3478),
-          ('stun.stunprotocol.org', 3478),
-          ('stun.ekiga.net', 3478),
+          ('stun.nextcloud.com', 443),
           ('stun.l.google.com', 19302),
+          ('stun1.l.google.com', 19302),
+          ('stun.sipnet.ru', 3478),
+          ('stun.stunprotocol.org', 3478),
         ];
 
         Future<void> sendStunToAll() async {
@@ -3206,13 +3349,21 @@ if ($cams) { $cams -join "`n" }
               }
               final addrs = await InternetAddress.lookup(srv.$1)
                   .timeout(const Duration(seconds: 2));
+              bool sent = false;
               for (final a in addrs) {
                 if (a.type == InternetAddressType.IPv4) {
                   sock.send(reqBytes, a, srv.$2);
+                  sent = true;
+                  _addLog('[STUN] -> ${srv.$1} (${a.address}:${srv.$2})', triggerUi: false);
                   break;
                 }
               }
-            } catch (_) {}
+              if (!sent) {
+                _addLog('[STUN] Нет IPv4 для ${srv.$1}', triggerUi: false);
+              }
+            } catch (e) {
+              _addLog('[STUN] Сбой ${srv.$1}: $e', triggerUi: false);
+            }
           }
         }
 
@@ -4885,13 +5036,60 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
   void _addLog(String msg, {bool triggerUi = true}) {
     final now = DateTime.now();
     final ts =
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}.${now.millisecond.toString().padLeft(3, '0')}';
     debugLogs.insert(0, '[$ts] $msg');
-    if (debugLogs.length > 80) {
+    if (debugLogs.length > 400) {
       debugLogs.removeLast();
     }
     lastStatusLog = msg;
     if (triggerUi) onStateChanged();
+  }
+
+  void clearDebugLogs() {
+    debugLogs.clear();
+    _addLog('[DIAG] Журнал очищен пользователем');
+  }
+
+  String buildFullDiagnosticReport() {
+    final now = DateTime.now();
+    final nowMs = now.millisecondsSinceEpoch;
+    final sb = StringBuffer();
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.0) ===');
+    sb.writeln('Time: ${now.toIso8601String()}');
+    sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
+    sb.writeln('NodeId: $nodeId | Nick: $nickname');
+    sb.writeln('VPN detected: $vpnDetected | Local IPs: ${cachedIps.join(", ")}');
+    sb.writeln('TCP4 Server: ${_tcpServer != null ? "LISTEN :$listenPort" : "OFF"}');
+    sb.writeln('TCP6 Server: ${_tcpServerV6 != null ? "LISTEN :$listenPort" : "OFF"}');
+    sb.writeln('UDP Call/Mesh Socket: ${_callUdpSocket != null ? "OPEN :$_callUdpListenPort" : "OFF"}');
+    sb.writeln('InterRegional Enabled: $isAutoInterRegionalEnabled');
+    sb.writeln('InterRegional Status: $interRegionalStatusText');
+    sb.writeln('UPnP Mapped: $upnpPortMapped | UPnP Ext IP: ${upnpExternalIp.isEmpty ? "-" : upnpExternalIp}');
+    sb.writeln('Global IPv6: ${globalIpv6Address.isEmpty ? "-" : globalIpv6Address}');
+    sb.writeln('STUN Endpoint: ${discoveredExternalEndpoint.isEmpty ? "-" : discoveredExternalEndpoint}');
+    sb.writeln('STUN Observed (${_stunObservedEndpoints.length}): ${_stunObservedEndpoints.join(", ")}');
+    sb.writeln('Active TCP peers: ${_tcpPeers.length} | BLE peers: ${_blePeers.length} | Remote UDP peers: ${_remoteUdpPeers.length}');
+    sb.writeln('Buffered outbox: ${myPersistentOutbox.length} | transit: ${transitBuffer.length}');
+    sb.writeln('');
+    sb.writeln('--- CONTACTS (${knownContacts.length}) ---');
+    for (final c in knownContacts.values) {
+      final hasTcp = _tcpPeers.containsValue(c.nodeId);
+      final hasBle = _blePeers.containsValue(c.nodeId);
+      final udp = _remoteUdpPeers[c.nodeId];
+      final ageSec = c.lastSeenTimestamp > 0 ? ((nowMs - c.lastSeenTimestamp) / 1000).toStringAsFixed(1) : 'never';
+      final udpInfo = udp == null
+          ? 'no'
+          : '${udp.ip}:${udp.port} (age=${udp.lastSeenMs > 0 ? ((nowMs - udp.lastSeenMs) / 1000).toStringAsFixed(1) : "never"}s)';
+      sb.writeln(
+          '• ${c.nodeId} (${c.nickname}): online=${c.isOnline} direct=${c.isDirectPeer} tcp=$hasTcp ble=$hasBle udp=$udpInfo lastAddr=${c.lastAddress} lastSeen=${ageSec}s');
+    }
+    sb.writeln('');
+    sb.writeln('--- RECENT LOGS (newest first, up to 250) ---');
+    for (final line in debugLogs.take(250)) {
+      sb.writeln(line);
+    }
+    sb.writeln('=== END REPORT ===');
+    return sb.toString();
   }
 
   Future<dynamic> _handleNativeCallback(MethodCall call) async {
@@ -5627,6 +5825,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       platformInfo: targetOs,
       address: candidateIps.isNotEmpty ? '${candidateIps.first}:$port' : '',
       allowEvenIfDeleted: true,
+      markOnline: false,
     );
 
     final extUdp = (decoded['extUdp'] ?? '').toString().trim();
@@ -5647,6 +5846,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
           Future.delayed(Duration(milliseconds: k * 350), () {
             _sendUdpHolePunch(uIp, uPort);
             if (k == 1 || k == 3) {
+              _sendUdpMeshJson(uIp, uPort, _buildHelloJson());
               for (int delta = -2; delta <= 8; delta++) {
                 if (delta != 0 && uPort + delta > 1024 && uPort + delta < 65535) {
                   _sendUdpHolePunch(uIp, uPort + delta);
@@ -5655,12 +5855,36 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
             }
           });
         }
-        _addLog('Запущен межрегиональный UDP Hole Punch к $uIp:$uPort...');
+        // Синхронное UTC-рандеву: дополнительный выровненный залп на ближайшей границе 30с окна UTC (:00 / :30)
+        final nowUtcMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+        final waitToSlotMs = 30000 - (nowUtcMs % 30000);
+        if (waitToSlotMs > 1500 && waitToSlotMs <= 30000) {
+          for (final off in [0, 250, 500, 1000, 2000]) {
+            Future.delayed(Duration(milliseconds: waitToSlotMs + off), () {
+              if (!isPeerDirectlyConnected(targetId)) {
+                _sendUdpHolePunch(uIp, uPort);
+                if (off == 250 || off == 1000) {
+                  _sendUdpMeshJson(uIp, uPort, _buildHelloJson());
+                }
+              }
+            });
+          }
+          _addLog('[PUNCH] Старт UDP Hole Punch + UTC-рандеву через ${(waitToSlotMs / 1000).toStringAsFixed(1)}с к $uIp:$uPort');
+        } else {
+          _addLog('[PUNCH] Старт UDP Hole Punch + Hello к $uIp:$uPort (target=$targetId)');
+        }
       }
     }
+    _addLog('[INVITE] Кандидаты TCP для $targetId: ${candidateIps.join(", ")} (port=$port, extUdp=$extUdp)');
     for (final ip in candidateIps) {
-      unawaited(connectToHost(ip, port,
-          expectedNodeId: targetId, forceNewConnection: true));
+      final isLan = ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.');
+      unawaited(connectToHost(
+        ip,
+        port,
+        expectedNodeId: targetId,
+        timeout: isLan ? const Duration(seconds: 2) : const Duration(seconds: 4),
+        forceNewConnection: true,
+      ));
     }
     unawaited(_saveContactsAndChats());
     onStateChanged();
@@ -6715,6 +6939,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     String? platformInfo,
     String? address,
     bool allowEvenIfDeleted = false,
+    bool markOnline = true,
   }) {
     if (nodeId.isEmpty || nodeId == this.nodeId) return;
     if (dhPubHex.length != 64 || signPubHex.length != 64) return;
@@ -6809,9 +7034,11 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       if (address != null && address.isNotEmpty) {
         existing.lastAddress = address;
       }
-      existing.packetsSeenCount++;
-      existing.lastSeenTimestamp = now;
-      existing.isOnline = true;
+      if (markOnline) {
+        existing.packetsSeenCount++;
+        existing.lastSeenTimestamp = now;
+        existing.isOnline = true;
+      }
       existing.isDirectPeer = isPeerConnected;
     } else {
       knownContacts[nodeId] = ContactProfile(
@@ -6821,11 +7048,11 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         nickname: cleanNick.isNotEmpty ? cleanNick : 'Узел $nodeId',
         hwFingerprint: cleanHw,
         platformInfo: cleanOs,
-        isOnline: true,
+        isOnline: markOnline ? true : isPeerConnected,
         isDirectPeer: isPeerConnected,
         lastAddress: address ?? '',
-        packetsSeenCount: 1,
-        lastSeenTimestamp: now,
+        packetsSeenCount: markOnline ? 1 : 0,
+        lastSeenTimestamp: markOnline ? now : 0,
       );
     }
   }
@@ -6869,7 +7096,12 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     if (_connectingHosts.contains(key)) return;
     _connectingHosts.add(key);
     try {
-      final srcIp = _selectLocalSourceIpFor(host);
+      final isIpv6 = host.contains(':');
+      final isLan = !isIpv6 && (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.'));
+      final srcIp = isLan ? _selectLocalSourceIpFor(host) : null;
+      if (forceNewConnection) {
+        _addLog('[TCP] Подключение к $host:$port (${isIpv6 ? "IPv6" : (isLan ? "LAN" : "WAN")})...', triggerUi: false);
+      }
       Socket socket;
       if (srcIp != null) {
         try {
@@ -6885,8 +7117,14 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       } else {
         socket = await Socket.connect(host, port, timeout: timeout);
       }
+      if (forceNewConnection) {
+        _addLog('[TCP] Сокет открыт: $host:$port', triggerUi: false);
+      }
       _setupTcpSocket(socket);
-    } catch (_) {
+    } catch (e) {
+      if (forceNewConnection) {
+        _addLog('[TCP] Не удалось $host:$port: $e', triggerUi: false);
+      }
     } finally {
       _connectingHosts.remove(key);
     }
@@ -6898,6 +7136,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       remoteAddr = '${socket.remoteAddress.address}:${socket.remotePort}';
     } catch (_) {}
 
+    _tcpLastRxMs[socket] = DateTime.now().millisecondsSinceEpoch;
     _sendTcpLine(socket, _buildHelloJson());
     _sendTcpLine(socket, _buildPeerSyncJson());
 
@@ -6906,6 +7145,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         .transform(const LineSplitter())
         .listen(
           (line) {
+            _tcpLastRxMs[socket] = DateTime.now().millisecondsSinceEpoch;
             if (line.length > maxLineLengthBytes) return;
             _rxProcessingChain = _rxProcessingChain.then((_) =>
                 _processIncomingJsonLine(
@@ -6995,10 +7235,23 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         replyDirect(jsonEncode({
           'ping_resp': map['ping_req'],
           'from': nodeId,
+          if (remoteAddr.isNotEmpty && !remoteAddr.startsWith('BLE')) 'obs_addr': remoteAddr,
         }));
         return;
       }
       if (map.containsKey('ping_resp')) {
+        final obs = (map['obs_addr'] ?? '').toString().trim();
+        if (obs.isNotEmpty &&
+            !obs.startsWith('192.168.') &&
+            !obs.startsWith('10.') &&
+            !obs.startsWith('172.') &&
+            !obs.startsWith('127.')) {
+          if (discoveredExternalEndpoint.isEmpty) {
+            discoveredExternalEndpoint = obs;
+            _refreshInterRegionalStatusText();
+            _addLog('[REFLECT] Внешний адрес определён через пира Маяк (без STUN): $obs', triggerUi: false);
+          }
+        }
         final pid = map['ping_resp'] as String;
         final fromNode = (map['from'] as String?) ?? '';
         final sentAt = _pendingPingTimestamps.remove(pid);
@@ -8526,8 +8779,22 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
 
       _beaconTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
         if (nodeId.isEmpty || listenPort <= 0) return;
+        _beaconTickCounter++;
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        // Watchdog полуоткрытых TCP-сокетов: если пир вышел из сети без FIN/RST, режем сокет через 16с
+        for (final entry in _tcpPeers.entries.toList()) {
+          final sock = entry.key;
+          final lastRx = _tcpLastRxMs[sock] ?? nowMs;
+          if (nowMs - lastRx > 16000) {
+            _addLog('[ONLINE] TCP таймаут 16с без ответа: ${entry.value} -> OFFLINE', triggerUi: false);
+            _cleanupSocket(sock);
+          } else if (_beaconTickCounter % 2 == 0) {
+            _sendTcpLine(sock, jsonEncode({'ping_req': _randomHex(6), 'from': nodeId}));
+          }
+        }
         await refreshNetworkCache();
-        _refreshOnlineStatuses();
+        final changed = _refreshOnlineStatuses();
+        if (changed) onStateChanged();
         _flushBufferedPacketsToOnlinePeers();
         final beacon = utf8.encode(jsonEncode({
           'id': nodeId,
@@ -8667,15 +8934,28 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     }
   }
 
-  void _refreshOnlineStatuses() {
-    final activeIds = {..._tcpPeers.values, ..._blePeers.values};
+  bool _refreshOnlineStatuses() {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final activeUdpIds = <String>{};
+    for (final entry in _remoteUdpPeers.entries) {
+      if (entry.value.lastSeenMs > 0 && (now - entry.value.lastSeenMs) < 20000) {
+        activeUdpIds.add(entry.key);
+      }
+    }
+    final activeIds = {..._tcpPeers.values, ..._blePeers.values, ...activeUdpIds};
+    bool anyChanged = false;
     for (final c in knownContacts.values) {
+      final wasOnline = c.isOnline;
       final recentlySeen =
           c.lastSeenTimestamp > 0 && (now - c.lastSeenTimestamp) < 14000;
       c.isDirectPeer = activeIds.contains(c.nodeId);
       c.isOnline = c.isDirectPeer || recentlySeen;
+      if (wasOnline != c.isOnline) {
+        anyChanged = true;
+        _addLog('[ONLINE] ${c.nickname} (${c.nodeId}): ${c.isOnline ? "В СЕТИ" : "НЕ В СЕТИ"}', triggerUi: false);
+      }
     }
+    return anyChanged;
   }
 
   Future<String> _calcNodeId(List<int> dhPubBytes) async {
@@ -8698,10 +8978,14 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
   }
 
   void _cleanupSocket(Socket s) {
-    _tcpPeers.remove(s);
+    final removedPeer = _tcpPeers.remove(s);
+    _tcpLastRxMs.remove(s);
     try {
       s.destroy();
     } catch (_) {}
+    if (removedPeer != null) {
+      _addLog('[ONLINE] TCP-соединение закрыто: $removedPeer', triggerUi: false);
+    }
     _refreshOnlineStatuses();
     onStateChanged();
   }
