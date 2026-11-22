@@ -8765,7 +8765,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     if (!assembly.receivedChunkIndices.contains(idx)) {
       final raf = assembly.openRaf;
       if (raf != null) {
-        final rxChunkSize = (envelope['cs'] as num?)?.toInt() ?? fileChunkSize;
+        final rxChunkSize = (env['cs'] as num?)?.toInt() ?? fileChunkSize;
         await raf.setPosition(idx * rxChunkSize);
         await raf.writeFrom(chunkBytes);
         assembly.receivedChunkIndices.add(idx);
