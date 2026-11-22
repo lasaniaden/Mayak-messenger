@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.8.1"
+                  versionName = "2.8.2"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.8.1"
+                  versionName "2.8.2"
               }}
 
               packagingOptions {{
@@ -2704,7 +2704,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.8.1 --build-number=$((2810 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.8.2 --build-number=$((2820 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

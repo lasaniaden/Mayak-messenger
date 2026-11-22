@@ -3075,10 +3075,26 @@ if ($cams) { $cams -join "`n" }
     }
   }
 
+  static bool _isPrivateOrCgnatIpv4(String ip) {
+    final p = ip.split('.');
+    if (p.length != 4) return false;
+    final a = int.tryParse(p[0]) ?? -1;
+    final b = int.tryParse(p[1]) ?? -1;
+    if (a == 10 || a == 127 || a == 0) return true;
+    if (a == 192 && b == 168) return true;
+    if (a == 172 && b >= 16 && b <= 31) return true;
+    if (a == 100 && b >= 64 && b <= 127) return true; // RFC 6598 CGNAT!
+    return false;
+  }
+
   void _refreshInterRegionalStatusText() {
     final parts = <String>[];
     if (upnpPortMapped && upnpExternalIp.isNotEmpty) {
-      parts.add('UPnP OK ($upnpExternalIp:$listenPort)');
+      if (_isPrivateOrCgnatIpv4(upnpExternalIp)) {
+        parts.add('UPnP за CGNAT ($upnpExternalIp)');
+      } else {
+        parts.add('UPnP OK ($upnpExternalIp:$listenPort)');
+      }
     }
     if (globalIpv6Address.isNotEmpty) {
       parts.add('IPv6 OK');
@@ -3441,10 +3457,18 @@ if ($cams) { $cams -join "`n" }
           await Future.delayed(const Duration(milliseconds: 500));
         }
 
-        if (upnpPortMapped && upnpExternalIp.isNotEmpty) {
+        final upnpIsPublic = upnpPortMapped &&
+            upnpExternalIp.isNotEmpty &&
+            !_isPrivateOrCgnatIpv4(upnpExternalIp);
+        if (upnpIsPublic) {
           discoveredExternalEndpoint = '$upnpExternalIp:$_callUdpListenPort';
         } else if (found != null && found.isNotEmpty) {
           discoveredExternalEndpoint = found;
+          if (upnpPortMapped && _isPrivateOrCgnatIpv4(upnpExternalIp)) {
+            _addLog('[UPnP] Роутер за CGNAT ($upnpExternalIp) -> использую белый STUN $found', triggerUi: false);
+          }
+        } else if (upnpPortMapped && upnpExternalIp.isNotEmpty) {
+          discoveredExternalEndpoint = '$upnpExternalIp:$_callUdpListenPort';
         }
 
         if (discoveredExternalEndpoint.isNotEmpty) {
@@ -3468,12 +3492,14 @@ if ($cams) { $cams -join "`n" }
   }
 
   String buildInterRegionalInviteLink() {
+    final upnpPublic = upnpExternalIp.isNotEmpty && !_isPrivateOrCgnatIpv4(upnpExternalIp);
+    final stunIp = discoveredExternalEndpoint.isNotEmpty
+        ? discoveredExternalEndpoint.split(':').first
+        : '';
     final ips = <String>[
-      if (upnpExternalIp.isNotEmpty) upnpExternalIp,
+      if (upnpPublic) upnpExternalIp,
       if (globalIpv6Address.isNotEmpty) globalIpv6Address,
-      if (discoveredExternalEndpoint.isNotEmpty &&
-          discoveredExternalEndpoint.split(':').first != upnpExternalIp)
-        discoveredExternalEndpoint.split(':').first,
+      if (stunIp.isNotEmpty && stunIp != upnpExternalIp) stunIp,
       if (customExternalEndpoint.isNotEmpty) customExternalEndpoint,
       ...cachedIps,
     ];
@@ -5121,7 +5147,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.1) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.2) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');
