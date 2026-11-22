@@ -3242,51 +3242,76 @@ if ($cams) { $cams -join "`n" }
       final srvType = srvMatch.group(1)!;
       final ctrlPath = srvMatch.group(2)!;
       final ctrlUri = descUri.resolve(ctrlPath);
-      final myLanIp = cachedIps.isNotEmpty ? cachedIps.first : '';
+      // Выбираем LAN IP строго из подсети /24 роутера (игнорируя VirtualBox 192.168.56.1 и Hotspot 192.168.137.1!)
+      final gwParts = descUri.host.split('.');
+      final gwPrefix = gwParts.length == 4 ? '${gwParts[0]}.${gwParts[1]}.${gwParts[2]}.' : '';
+      String myLanIp = '';
+      if (gwPrefix.isNotEmpty) {
+        myLanIp = cachedIps.firstWhere((ip) => ip.startsWith(gwPrefix), orElse: () => '');
+      }
+      if (myLanIp.isEmpty && cachedIps.isNotEmpty) {
+        myLanIp = cachedIps.first;
+      }
       if (myLanIp.isEmpty) {
         _addLog('[UPnP] Нет локального LAN IP для проброса', triggerUi: false);
         client.close(force: true);
         return;
       }
+      _addLog('[UPnP] Проброс портов $listenPort/$_callUdpListenPort на LAN $myLanIp (шлюз ${descUri.host})...', triggerUi: false);
 
       Future<String> soapCall(String action, String bodyXml) async {
+        final env = '<?xml version="1.0"?>'
+            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+            '<s:Body><u:$action xmlns:u="$srvType">$bodyXml</u:$action></s:Body>'
+            '</s:Envelope>';
+        final payloadBytes = utf8.encode(env);
         final req = await client.postUrl(ctrlUri);
+        // MiniUPnPd на роутерах рвёт Transfer-Encoding: chunked -> задаём точный Content-Length и Connection: close!
+        req.contentLength = payloadBytes.length;
         req.headers.set('Content-Type', 'text/xml; charset="utf-8"');
         req.headers.set('SOAPAction', '"$srvType#$action"');
-        req.write(
-          '<?xml version="1.0"?>'
-          '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
-          's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
-          '<s:Body><u:$action xmlns:u="$srvType">$bodyXml</u:$action></s:Body>'
-          '</s:Envelope>',
-        );
+        req.headers.set('Connection', 'close');
+        req.add(payloadBytes);
         final r = await req.close().timeout(const Duration(seconds: 3));
-        return await utf8.decoder.bind(r).join();
+        final respText = await utf8.decoder.bind(r).join();
+        if (r.statusCode >= 400) {
+          _addLog('[UPnP] $action HTTP ${r.statusCode}', triggerUi: false);
+        }
+        return respText;
       }
 
-      // 1. Открываем TCP listenPort (42070) и UDP _callUdpListenPort (42072)
-      await soapCall(
-        'AddPortMapping',
-        '<NewRemoteHost></NewRemoteHost>'
-        '<NewExternalPort>$listenPort</NewExternalPort>'
-        '<NewProtocol>TCP</NewProtocol>'
-        '<NewInternalPort>$listenPort</NewInternalPort>'
-        '<NewInternalClient>$myLanIp</NewInternalClient>'
-        '<NewEnabled>1</NewEnabled>'
-        '<NewPortMappingDescription>MayakP2P-TCP</NewPortMappingDescription>'
-        '<NewLeaseDuration>3600</NewLeaseDuration>',
-      );
-      await soapCall(
-        'AddPortMapping',
-        '<NewRemoteHost></NewRemoteHost>'
-        '<NewExternalPort>$_callUdpListenPort</NewExternalPort>'
-        '<NewProtocol>UDP</NewProtocol>'
-        '<NewInternalPort>$_callUdpListenPort</NewInternalPort>'
-        '<NewInternalClient>$myLanIp</NewInternalClient>'
-        '<NewEnabled>1</NewEnabled>'
-        '<NewPortMappingDescription>MayakP2P-UDP</NewPortMappingDescription>'
-        '<NewLeaseDuration>3600</NewLeaseDuration>',
-      );
+      // 1. Открываем TCP listenPort и UDP _callUdpListenPort (каждый вызов изолирован, чтобы сбой одного не ломал второй)
+      try {
+        await soapCall(
+          'AddPortMapping',
+          '<NewRemoteHost></NewRemoteHost>'
+          '<NewExternalPort>$listenPort</NewExternalPort>'
+          '<NewProtocol>TCP</NewProtocol>'
+          '<NewInternalPort>$listenPort</NewInternalPort>'
+          '<NewInternalClient>$myLanIp</NewInternalClient>'
+          '<NewEnabled>1</NewEnabled>'
+          '<NewPortMappingDescription>MayakP2P-TCP</NewPortMappingDescription>'
+          '<NewLeaseDuration>3600</NewLeaseDuration>',
+        );
+      } catch (e) {
+        _addLog('[UPnP] Ошибка TCP AddPortMapping: $e', triggerUi: false);
+      }
+      try {
+        await soapCall(
+          'AddPortMapping',
+          '<NewRemoteHost></NewRemoteHost>'
+          '<NewExternalPort>$_callUdpListenPort</NewExternalPort>'
+          '<NewProtocol>UDP</NewProtocol>'
+          '<NewInternalPort>$_callUdpListenPort</NewInternalPort>'
+          '<NewInternalClient>$myLanIp</NewInternalClient>'
+          '<NewEnabled>1</NewEnabled>'
+          '<NewPortMappingDescription>MayakP2P-UDP</NewPortMappingDescription>'
+          '<NewLeaseDuration>3600</NewLeaseDuration>',
+        );
+      } catch (e) {
+        _addLog('[UPnP] Ошибка UDP AddPortMapping: $e', triggerUi: false);
+      }
       // 2. Получаем внешний IP роутера
       final extXml = await soapCall('GetExternalIPAddress', '');
       final ipM = RegExp(r'<NewExternalIPAddress>([^<]+)</NewExternalIPAddress>')
@@ -3324,13 +3349,13 @@ if ($cams) { $cams -join "`n" }
       if (sock != null) {
         _stunObservedEndpoints.clear();
         _stunPendingCompleter = Completer<String?>();
-        // Пул STUN под РФ и ОАЭ 2026: сначала нестандартные порты (443 / 19302), затем РФ и резерв
+        // Пул STUN под РФ и ОАЭ 2026: сначала нестандартные порты (443 / 19302), затем РФ
         final stunServers = [
           ('stun.nextcloud.com', 443),
           ('stun.l.google.com', 19302),
           ('stun1.l.google.com', 19302),
           ('stun.sipnet.ru', 3478),
-          ('stun.stunprotocol.org', 3478),
+          ('stun2.l.google.com', 19302),
         ];
 
         Future<void> sendStunToAll() async {
@@ -3368,8 +3393,50 @@ if ($cams) { $cams -join "`n" }
         }
 
         await sendStunToAll();
-        final found = await _stunPendingCompleter!.future
-            .timeout(const Duration(seconds: 3), onTimeout: () => null);
+        var found = await _stunPendingCompleter!.future
+            .timeout(const Duration(seconds: 2), onTimeout: () => null);
+        // Если на Windows _callUdpSocket (0.0.0.0:42072) не получил ответа (виртуальный адаптер / Firewall), пробуем эфемерный сокет на реальном LAN IP!
+        if (found == null && cachedIps.isNotEmpty) {
+          final realLan = cachedIps.firstWhere(
+            (ip) => ip.startsWith('192.168.') && !ip.startsWith('192.168.56.') && !ip.startsWith('192.168.137.'),
+            orElse: () => cachedIps.first,
+          );
+          if (realLan != '127.0.0.1') {
+            try {
+              final probeSock = await RawDatagramSocket.bind(InternetAddress(realLan), 0, reusePort: false);
+              _addLog('[STUN] Fallback через LAN $realLan:${probeSock.port}...', triggerUi: false);
+              probeSock.listen((ev) {
+                if (ev == RawSocketEvent.read) {
+                  final dg = probeSock.receive();
+                  if (dg != null && dg.data.length >= 28 && dg.data[0] == 0x01 && dg.data[1] == 0x01) {
+                    _tryParseStunResponse(dg.data);
+                  }
+                }
+              }, onError: (_) {});
+              final rng = Random.secure();
+              for (final srv in stunServers.take(3)) {
+                try {
+                  final reqBytes = Uint8List(20);
+                  reqBytes[0] = 0x00; reqBytes[1] = 0x01;
+                  reqBytes[4] = 0x21; reqBytes[5] = 0x12; reqBytes[6] = 0xA4; reqBytes[7] = 0x42;
+                  for (int i = 0; i < 12; i++) reqBytes[8 + i] = rng.nextInt(256);
+                  final addrs = await InternetAddress.lookup(srv.$1).timeout(const Duration(seconds: 2));
+                  for (final a in addrs) {
+                    if (a.type == InternetAddressType.IPv4) {
+                      probeSock.send(reqBytes, a, srv.$2);
+                      break;
+                    }
+                  }
+                } catch (_) {}
+              }
+              found = await _stunPendingCompleter!.future
+                  .timeout(const Duration(seconds: 2), onTimeout: () => null);
+              probeSock.close();
+            } catch (e) {
+              _addLog('[STUN] Fallback ошибка: $e', triggerUi: false);
+            }
+          }
+        }
         if (found != null) {
           await Future.delayed(const Duration(milliseconds: 500));
         }
@@ -5054,7 +5121,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.0) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.1) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');
@@ -5738,6 +5805,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
         if (lower.contains('wsl') ||
             lower.contains('docker') ||
             lower.contains('vbox') ||
+            lower.contains('virtualbox') ||
             lower.contains('vethernet') ||
             lower.contains('vmware') ||
             lower.contains('hyper-v')) {
@@ -5754,7 +5822,9 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
             continue;
           }
 
-          if (ip.startsWith('192.168.')) {
+          // VirtualBox Host-Only (192.168.56.*) и Windows Hotspot (192.168.137.*) всегда в конец списка!
+          final isVirtualSub = ip.startsWith('192.168.56.') || ip.startsWith('192.168.137.');
+          if (ip.startsWith('192.168.') && !isVirtualSub) {
             if (!preferredLan.contains(ip)) preferredLan.add(ip);
           } else {
             if (!fallbackLan.contains(ip)) fallbackLan.add(ip);
