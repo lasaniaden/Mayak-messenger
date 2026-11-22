@@ -1966,7 +1966,11 @@ class MeshEngine {
 
   void _flushBufferedPacketsToOnlinePeers() {
     _evictExpired();
-    if (_tcpPeers.isEmpty && _blePeers.isEmpty) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final liveUdpPeers = _remoteUdpPeers.entries
+        .where((e) => e.value.lastSeenMs > 0 && (nowMs - e.value.lastSeenMs) < 25000)
+        .toList();
+    if (_tcpPeers.isEmpty && _blePeers.isEmpty && liveUdpPeers.isEmpty) return;
 
     // Удаляем пакеты, по которым уже есть ACK доставки
     for (final ackId in deliveredAcks.keys) {
@@ -1980,7 +1984,7 @@ class MeshEngine {
     };
     if (combined.isEmpty) return;
 
-    // Отправка на все активные TCP-сокеты с защитой от перегрузки
+    // 1. Отправка на все активные TCP-сокеты с защитой от перегрузки
     int sentCount = 0;
     for (final entry in _tcpPeers.entries.toList()) {
       final sock = entry.key;
@@ -1992,6 +1996,21 @@ class MeshEngine {
         _sendTcpLine(sock, jsonEncode(pkt.toJson()));
         sentCount++;
         if (sentCount >= 24) break;
+      }
+    }
+
+    // 2. Отправка на все живые межрегиональные UDP-туннели!
+    for (final entry in liveUdpPeers) {
+      final peerId = entry.key;
+      final ep = entry.value;
+      int udpSent = 0;
+      for (final pkt in combined.values) {
+        if (pkt.dstNodeId != broadcastChannelId && pkt.dstNodeId != peerId) {
+          continue;
+        }
+        _sendUdpMeshJson(ep.ip, ep.port, jsonEncode(pkt.toJson()));
+        udpSent++;
+        if (udpSent >= 12) break;
       }
     }
   }
@@ -3374,7 +3393,7 @@ if ($cams) { $cams -join "`n" }
           ('stun2.l.google.com', 19302),
         ];
 
-        Future<void> sendStunToAll() async {
+        Future<void> sendStunToAll({bool verbose = true}) async {
           final rng = Random.secure();
           for (final srv in stunServers) {
             try {
@@ -3395,20 +3414,24 @@ if ($cams) { $cams -join "`n" }
                 if (a.type == InternetAddressType.IPv4) {
                   sock.send(reqBytes, a, srv.$2);
                   sent = true;
-                  _addLog('[STUN] -> ${srv.$1} (${a.address}:${srv.$2})', triggerUi: false);
+                  if (verbose) {
+                    _addLog('[STUN] -> ${srv.$1} (${a.address}:${srv.$2})', triggerUi: false);
+                  }
                   break;
                 }
               }
-              if (!sent) {
+              if (!sent && verbose) {
                 _addLog('[STUN] Нет IPv4 для ${srv.$1}', triggerUi: false);
               }
             } catch (e) {
-              _addLog('[STUN] Сбой ${srv.$1}: $e', triggerUi: false);
+              if (verbose) {
+                _addLog('[STUN] Сбой ${srv.$1}: $e', triggerUi: false);
+              }
             }
           }
         }
 
-        await sendStunToAll();
+        await sendStunToAll(verbose: true);
         var found = await _stunPendingCompleter!.future
             .timeout(const Duration(seconds: 2), onTimeout: () => null);
         // Если на Windows _callUdpSocket (0.0.0.0:42072) не получил ответа (виртуальный адаптер / Firewall), пробуем эфемерный сокет на реальном LAN IP!
@@ -3475,7 +3498,7 @@ if ($cams) { $cams -join "`n" }
           _stunKeepaliveTimer?.cancel();
           _stunKeepaliveTimer = Timer.periodic(const Duration(seconds: 18), (_) {
             if (isAutoInterRegionalEnabled || _remoteUdpPeers.isNotEmpty) {
-              unawaited(sendStunToAll());
+              unawaited(sendStunToAll(verbose: false));
             }
           });
         }
@@ -5147,7 +5170,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.2) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.8.3) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');

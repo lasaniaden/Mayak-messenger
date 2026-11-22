@@ -687,7 +687,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: QrImageView(
-                      data: engine.isAutoInterRegionalEnabled
+                      data: (engine.isAutoInterRegionalEnabled || engine.discoveredExternalEndpoint.isNotEmpty)
                           ? engine.buildInterRegionalInviteLink()
                           : engine.cachedInviteCode,
                       version: QrVersions.auto,
@@ -703,7 +703,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                       icon: const Icon(Icons.copy, size: 16),
                       label: const Text('Копировать код'),
                       onPressed: () {
-                        final codeToCopy = engine.isAutoInterRegionalEnabled
+                        final codeToCopy = (engine.isAutoInterRegionalEnabled || engine.discoveredExternalEndpoint.isNotEmpty)
                             ? engine.buildInterRegionalInviteLink()
                             : engine.cachedInviteCode;
                         Clipboard.setData(ClipboardData(text: codeToCopy));
@@ -720,7 +720,7 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
                       icon: const Icon(Icons.download_rounded, size: 16),
                       label: const Text('Сохранить QR'),
                       onPressed: () async {
-                        final codeToSave = engine.isAutoInterRegionalEnabled
+                        final codeToSave = (engine.isAutoInterRegionalEnabled || engine.discoveredExternalEndpoint.isNotEmpty)
                             ? engine.buildInterRegionalInviteLink()
                             : engine.cachedInviteCode;
                         final painter = QrPainter(
@@ -8989,7 +8989,7 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Сетевая консоль • v2.8.2', style: TextStyle(fontSize: 16)),
+        title: const Text('Сетевая консоль • v2.8.3', style: TextStyle(fontSize: 16)),
         actions: [
           IconButton(
             tooltip: 'Очистить журнал',
