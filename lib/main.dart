@@ -55,7 +55,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.6.0',
+      title: 'Маяк P2P v2.7.0',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -6940,7 +6940,7 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
             ListTile(
               leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
               title: const Text('О приложении'),
-              subtitle: const Text('Маяк v2.6.0 • Шифрование и справка',
+              subtitle: const Text('Маяк v2.7.0 • Шифрование и справка',
                   style: TextStyle(fontSize: 12, color: Colors.white54)),
               trailing: const Icon(Icons.chevron_right_rounded,
                   color: Colors.white38),
@@ -7198,22 +7198,28 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
             actionButton: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                OutlinedButton.icon(
-                  onPressed: engine.isDiscoveringExternalAddr
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Межрегиональный режим (UPnP + IPv6 + STUN)',
+                      style: TextStyle(fontSize: 13)),
+                  value: engine.isAutoInterRegionalEnabled,
+                  activeColor: Colors.white,
+                  onChanged: engine.isDiscoveringExternalAddr
                       ? null
-                      : () => engine.toggleAutoInterRegionalMode(),
-                  icon: Icon(
-                    engine.isAutoInterRegionalEnabled
-                        ? Icons.sync_rounded
-                        : Icons.public_rounded,
-                    size: 18,
-                  ),
-                  label: Text(engine.isDiscoveringExternalAddr
-                      ? 'Определение адреса...'
-                      : (engine.isAutoInterRegionalEnabled
-                          ? 'Обновить авто-адрес (STUN)'
-                          : 'Включить авто-настройку (STUN)')),
+                      : (v) => engine.setAutoInterRegionalEnabled(v),
                 ),
+                if (engine.isAutoInterRegionalEnabled)
+                  OutlinedButton.icon(
+                    onPressed: engine.isDiscoveringExternalAddr
+                        ? null
+                        : () => engine.discoverExternalEndpointAuto(
+                            forceRefresh: true),
+                    icon: const Icon(Icons.refresh_rounded, size: 18),
+                    label: Text(engine.isDiscoveringExternalAddr
+                        ? 'Обновление адреса...'
+                        : 'Обновить внешний адрес вручную'),
+                  ),
                 const SizedBox(height: 6),
                 OutlinedButton.icon(
                   onPressed: () async {
@@ -7400,7 +7406,7 @@ class _AboutMayakScreenState extends State<AboutMayakScreen> {
               child: const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 child: Text(
-                  'Версия 2.6.0 • Автономный P2P & Mesh мессенджер',
+                  'Версия 2.7.0 • Автономный P2P & Mesh мессенджер',
                   style: TextStyle(fontSize: 12, color: Colors.white54),
                 ),
               ),

@@ -1334,6 +1334,11 @@ class MeshEngine {
   Timer? _udpPeerPunchTimer;
   final List<String> _stunObservedEndpoints = [];
   Completer<String?>? _stunPendingCompleter;
+  // v2.7.0: Dual-Stack IPv6 P2P + Auto UPnP-IGD + Russian STUN
+  ServerSocket? _tcpServerV6;
+  String globalIpv6Address = '';
+  bool upnpPortMapped = false;
+  String upnpExternalIp = '';
 
   final void Function(ChatMessage message) onMessageReceived;
   final void Function() onStateChanged;
@@ -2775,6 +2780,7 @@ if ($cams) { $cams -join "`n" }
       }
       _tcpPeers.clear();
       await _tcpServer?.close();
+      await _tcpServerV6?.close();
       _callUdpSocket?.close();
     } catch (_) {}
   }
@@ -2993,90 +2999,247 @@ if ($cams) { $cams -join "`n" }
   }
 
   Future<void> toggleAutoInterRegionalMode() async {
-    isAutoInterRegionalEnabled = !isAutoInterRegionalEnabled;
-    if (isAutoInterRegionalEnabled) {
-      interRegionalStatusText = 'Авто-настройка (STUN + UPnP)...';
-      onStateChanged();
-      await discoverExternalEndpointAuto();
+    await setAutoInterRegionalEnabled(!isAutoInterRegionalEnabled);
+  }
+
+  Future<void> setAutoInterRegionalEnabled(bool enabled) async {
+    isAutoInterRegionalEnabled = enabled;
+    if (enabled) {
+      if (discoveredExternalEndpoint.isEmpty && upnpExternalIp.isEmpty && globalIpv6Address.isEmpty) {
+        await discoverExternalEndpointAuto(forceRefresh: true);
+      } else {
+        _refreshInterRegionalStatusText();
+        onStateChanged();
+      }
     } else {
+      _stunKeepaliveTimer?.cancel();
       interRegionalStatusText = 'Выключен';
       onStateChanged();
     }
   }
 
-  /// Автоматическое определение внешнего IP:порта прямо на постоянном _callUdpSocket + проверка типа NAT
-  Future<String> discoverExternalEndpointAuto() async {
+  void _refreshInterRegionalStatusText() {
+    final parts = <String>[];
+    if (upnpPortMapped && upnpExternalIp.isNotEmpty) {
+      parts.add('UPnP OK ($upnpExternalIp:$listenPort)');
+    }
+    if (globalIpv6Address.isNotEmpty) {
+      parts.add('IPv6 OK');
+    }
+    if (discoveredExternalEndpoint.isNotEmpty) {
+      final isSym = _stunObservedEndpoints.length > 1;
+      parts.add(isSym
+          ? 'STUN: $discoveredExternalEndpoint (Sym NAT)'
+          : 'STUN: $discoveredExternalEndpoint (Cone NAT)');
+    }
+    interRegionalStatusText = parts.isEmpty
+        ? 'Нет внешнего адреса (проверь интернет)'
+        : parts.join(' • ');
+  }
+
+  Future<void> _detectGlobalIpv6() async {
+    globalIpv6Address = '';
+    try {
+      final ifaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv6,
+      );
+      for (final iface in ifaces) {
+        final low = iface.name.toLowerCase();
+        if (low.contains('tun') || low.contains('vpn') || low.contains('wg')) continue;
+        for (final addr in iface.addresses) {
+          final ip = addr.address.split('%').first;
+          // Глобальный маршрутизируемый IPv6 (2000::/3 — 2xxx: или 3xxx:)
+          if ((ip.startsWith('2') || ip.startsWith('3')) && !ip.startsWith('fe80')) {
+            globalIpv6Address = ip;
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// Автоматический UPnP-IGD: сам просит домашний роутер открыть TCP 42070 и UDP 42072 без ручных настроек!
+  Future<void> _tryAutoUpnpPortMapping() async {
+    upnpPortMapped = false;
+    upnpExternalIp = '';
+    try {
+      final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      final locCompleter = Completer<String?>();
+      const ssdp = 'M-SEARCH * HTTP/1.1\r\n'
+          'HOST: 239.255.255.250:1900\r\n'
+          'MAN: "ssdp:discover"\r\n'
+          'MX: 2\r\n'
+          'ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n';
+      sock.listen((ev) {
+        if (ev == RawSocketEvent.read && !locCompleter.isCompleted) {
+          final dg = sock.receive();
+          if (dg == null) return;
+          final txt = utf8.decode(dg.data, allowMalformed: true);
+          final m = RegExp(r'LOCATION:\s*(http[^\r\n]+)', caseSensitive: false)
+              .firstMatch(txt);
+          if (m != null) locCompleter.complete(m.group(1)!.trim());
+        }
+      });
+      sock.send(utf8.encode(ssdp), InternetAddress('239.255.255.250'), 1900);
+      final locUrl = await locCompleter.future
+          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+      sock.close();
+      if (locUrl == null) return;
+
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+      final descUri = Uri.parse(locUrl);
+      final descReq = await client.getUrl(descUri);
+      final descResp = await descReq.close().timeout(const Duration(seconds: 3));
+      final xml = await utf8.decoder.bind(descResp).join();
+
+      final srvMatch = RegExp(
+        r'<serviceType>(urn:schemas-upnp-org:service:WAN(?:IP|PPP)Connection:\d+)</serviceType>[\s\S]*?<controlURL>([^<]+)</controlURL>',
+        caseSensitive: false,
+      ).firstMatch(xml);
+      if (srvMatch == null) {
+        client.close(force: true);
+        return;
+      }
+      final srvType = srvMatch.group(1)!;
+      final ctrlPath = srvMatch.group(2)!;
+      final ctrlUri = descUri.resolve(ctrlPath);
+      final myLanIp = cachedIps.isNotEmpty ? cachedIps.first : '';
+      if (myLanIp.isEmpty) {
+        client.close(force: true);
+        return;
+      }
+
+      Future<String> soapCall(String action, String bodyXml) async {
+        final req = await client.postUrl(ctrlUri);
+        req.headers.set('Content-Type', 'text/xml; charset="utf-8"');
+        req.headers.set('SOAPAction', '"$srvType#$action"');
+        req.write(
+          '<?xml version="1.0"?>'
+          '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+          's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+          '<s:Body><u:$action xmlns:u="$srvType">$bodyXml</u:$action></s:Body>'
+          '</s:Envelope>',
+        );
+        final r = await req.close().timeout(const Duration(seconds: 3));
+        return await utf8.decoder.bind(r).join();
+      }
+
+      // 1. Открываем TCP listenPort (42070) и UDP _callUdpListenPort (42072)
+      await soapCall(
+        'AddPortMapping',
+        '<NewRemoteHost></NewRemoteHost>'
+        '<NewExternalPort>$listenPort</NewExternalPort>'
+        '<NewProtocol>TCP</NewProtocol>'
+        '<NewInternalPort>$listenPort</NewInternalPort>'
+        '<NewInternalClient>$myLanIp</NewInternalClient>'
+        '<NewEnabled>1</NewEnabled>'
+        '<NewPortMappingDescription>MayakP2P-TCP</NewPortMappingDescription>'
+        '<NewLeaseDuration>3600</NewLeaseDuration>',
+      );
+      await soapCall(
+        'AddPortMapping',
+        '<NewRemoteHost></NewRemoteHost>'
+        '<NewExternalPort>$_callUdpListenPort</NewExternalPort>'
+        '<NewProtocol>UDP</NewProtocol>'
+        '<NewInternalPort>$_callUdpListenPort</NewInternalPort>'
+        '<NewInternalClient>$myLanIp</NewInternalClient>'
+        '<NewEnabled>1</NewEnabled>'
+        '<NewPortMappingDescription>MayakP2P-UDP</NewPortMappingDescription>'
+        '<NewLeaseDuration>3600</NewLeaseDuration>',
+      );
+      // 2. Получаем внешний IP роутера
+      final extXml = await soapCall('GetExternalIPAddress', '');
+      final ipM = RegExp(r'<NewExternalIPAddress>([^<]+)</NewExternalIPAddress>')
+          .firstMatch(extXml);
+      if (ipM != null) {
+        upnpExternalIp = ipM.group(1)!.trim();
+        upnpPortMapped = true;
+        _addLog('UPnP-IGD: роутер сам открыл порты $listenPort/$_callUdpListenPort на $upnpExternalIp!');
+      }
+      client.close(force: true);
+    } catch (_) {}
+  }
+
+  /// Авто-настройка межрегиональной связи: российские + мировые STUN + UPnP-IGD + IPv6!
+  Future<String> discoverExternalEndpointAuto({bool forceRefresh = false}) async {
     if (isDiscoveringExternalAddr) return discoveredExternalEndpoint;
+    if (!forceRefresh && discoveredExternalEndpoint.isNotEmpty) {
+      return discoveredExternalEndpoint;
+    }
     isDiscoveringExternalAddr = true;
-    interRegionalStatusText = 'Определение внешнего адреса (STUN)...';
+    interRegionalStatusText = 'Настройка (UPnP + IPv6 + РФ STUN)...';
     onStateChanged();
     try {
       await _initCallUdpSocket();
-      final sock = _callUdpSocket;
-      if (sock == null) {
-        interRegionalStatusText = 'Ошибка локального UDP-сокета';
-        return '';
-      }
-      _stunObservedEndpoints.clear();
-      _stunPendingCompleter = Completer<String?>();
-      final stunServers = [
-        ('stun.l.google.com', 19302),
-        ('stun.cloudflare.com', 3478),
-        ('stun1.l.google.com', 19302),
-      ];
+      await Future.wait([
+        _detectGlobalIpv6(),
+        _tryAutoUpnpPortMapping(),
+      ]);
 
-      Future<void> sendStunToAll() async {
-        final rng = Random.secure();
-        for (final srv in stunServers) {
-          try {
-            final reqBytes = Uint8List(20);
-            reqBytes[0] = 0x00;
-            reqBytes[1] = 0x01;
-            reqBytes[4] = 0x21;
-            reqBytes[5] = 0x12;
-            reqBytes[6] = 0xA4;
-            reqBytes[7] = 0x42;
-            for (int i = 0; i < 12; i++) {
-              reqBytes[8 + i] = rng.nextInt(256);
-            }
-            final addrs = await InternetAddress.lookup(srv.$1)
-                .timeout(const Duration(seconds: 2));
-            for (final a in addrs) {
-              if (a.type == InternetAddressType.IPv4) {
-                sock.send(reqBytes, a, srv.$2);
-                break;
+      final sock = _callUdpSocket;
+      if (sock != null) {
+        _stunObservedEndpoints.clear();
+        _stunPendingCompleter = Completer<String?>();
+        // Российские и стабильные мировые STUN-серверы (без заблокированного Cloudflare!)
+        final stunServers = [
+          ('stun.sipnet.ru', 3478),
+          ('stun.voip.yandex.net', 3478),
+          ('stun.stunprotocol.org', 3478),
+          ('stun.ekiga.net', 3478),
+          ('stun.l.google.com', 19302),
+        ];
+
+        Future<void> sendStunToAll() async {
+          final rng = Random.secure();
+          for (final srv in stunServers) {
+            try {
+              final reqBytes = Uint8List(20);
+              reqBytes[0] = 0x00;
+              reqBytes[1] = 0x01;
+              reqBytes[4] = 0x21;
+              reqBytes[5] = 0x12;
+              reqBytes[6] = 0xA4;
+              reqBytes[7] = 0x42;
+              for (int i = 0; i < 12; i++) {
+                reqBytes[8 + i] = rng.nextInt(256);
               }
+              final addrs = await InternetAddress.lookup(srv.$1)
+                  .timeout(const Duration(seconds: 2));
+              for (final a in addrs) {
+                if (a.type == InternetAddressType.IPv4) {
+                  sock.send(reqBytes, a, srv.$2);
+                  break;
+                }
+              }
+            } catch (_) {}
+          }
+        }
+
+        await sendStunToAll();
+        final found = await _stunPendingCompleter!.future
+            .timeout(const Duration(seconds: 3), onTimeout: () => null);
+        if (found != null) {
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+
+        if (upnpPortMapped && upnpExternalIp.isNotEmpty) {
+          discoveredExternalEndpoint = '$upnpExternalIp:$_callUdpListenPort';
+        } else if (found != null && found.isNotEmpty) {
+          discoveredExternalEndpoint = found;
+        }
+
+        if (discoveredExternalEndpoint.isNotEmpty) {
+          _stunKeepaliveTimer?.cancel();
+          _stunKeepaliveTimer = Timer.periodic(const Duration(seconds: 18), (_) {
+            if (isAutoInterRegionalEnabled || _remoteUdpPeers.isNotEmpty) {
+              unawaited(sendStunToAll());
             }
-          } catch (_) {}
+          });
         }
       }
-
-      await sendStunToAll();
-      final found = await _stunPendingCompleter!.future
-          .timeout(const Duration(seconds: 3), onTimeout: () => null);
-      // Ждём ещё 450мс, чтобы собрать второй ответ STUN и проверить тип NAT (Cone vs Symmetric)
-      if (found != null) {
-        await Future.delayed(const Duration(milliseconds: 450));
-      }
-
-      if (found != null && found.isNotEmpty) {
-        discoveredExternalEndpoint = found;
-        final isSymmetric = _stunObservedEndpoints.length > 1;
-        interRegionalStatusText = isSymmetric
-            ? '⚠️ Симметричный NAT ($found) — для прямой связи лучше Wi-Fi'
-            : '✅ Готово (Cone NAT) • $found';
-        _addLog('Межрегиональный STUN (постоянный сокет): $found (symmetric=$isSymmetric)');
-
-        // Держим NAT-дырку открытой каждые 18 секунд!
-        _stunKeepaliveTimer?.cancel();
-        _stunKeepaliveTimer = Timer.periodic(const Duration(seconds: 18), (_) {
-          if (isAutoInterRegionalEnabled || _remoteUdpPeers.isNotEmpty) {
-            unawaited(sendStunToAll());
-          }
-        });
-      } else {
-        interRegionalStatusText = 'Нет ответа STUN (проверь интернет или выключи VPN)';
-      }
+      _refreshInterRegionalStatusText();
+      _addLog('Межрегион статус: $interRegionalStatusText');
     } catch (_) {
       interRegionalStatusText = 'Не удалось определить внешний адрес';
     } finally {
@@ -3088,11 +3251,12 @@ if ($cams) { $cams -join "`n" }
 
   String buildInterRegionalInviteLink() {
     final ips = <String>[
-      if (discoveredExternalEndpoint.isNotEmpty)
+      if (upnpExternalIp.isNotEmpty) upnpExternalIp,
+      if (globalIpv6Address.isNotEmpty) globalIpv6Address,
+      if (discoveredExternalEndpoint.isNotEmpty &&
+          discoveredExternalEndpoint.split(':').first != upnpExternalIp)
         discoveredExternalEndpoint.split(':').first,
-      if (customExternalEndpoint.isNotEmpty &&
-          customExternalEndpoint != discoveredExternalEndpoint.split(':').first)
-        customExternalEndpoint,
+      if (customExternalEndpoint.isNotEmpty) customExternalEndpoint,
       ...cachedIps,
     ];
     final map = {
@@ -4830,6 +4994,15 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
         onError: (_) {},
       );
     }
+    try {
+      _tcpServerV6 = await ServerSocket.bind(
+        InternetAddress.anyIPv6,
+        listenPort,
+        v6Only: true,
+        shared: true,
+      );
+      _tcpServerV6!.listen(_setupTcpSocket, onError: (_) {});
+    } catch (_) {}
 
     await _initCallUdpSocket();
     await refreshNetworkCache(force: true);
@@ -5469,10 +5642,17 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
           lastSeenMs: 0,
         );
         _ensureUdpPeerPunchLoop();
-        // Серия быстрых UDP Hole Punch пакетов для пробития NAT (Россия <-> ОАЭ и др.)
-        for (int k = 0; k < 5; k++) {
-          Future.delayed(Duration(milliseconds: k * 300), () {
+        // Серия UDP Hole Punch + веер соседних портов (пробивает Cone NAT и последовательный Symmetric NAT!)
+        for (int k = 0; k < 4; k++) {
+          Future.delayed(Duration(milliseconds: k * 350), () {
             _sendUdpHolePunch(uIp, uPort);
+            if (k == 1 || k == 3) {
+              for (int delta = -2; delta <= 8; delta++) {
+                if (delta != 0 && uPort + delta > 1024 && uPort + delta < 65535) {
+                  _sendUdpHolePunch(uIp, uPort + delta);
+                }
+              }
+            }
           });
         }
         _addLog('Запущен межрегиональный UDP Hole Punch к $uIp:$uPort...');

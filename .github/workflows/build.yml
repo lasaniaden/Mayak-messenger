@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.6.0
+      - name: Recreate Clean Android Platform & Inject Fixed Keystore + Native Bridge v2.7.0
 
         run: |
           rm -rf android
@@ -126,7 +126,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.6.0"
+                  versionName = "2.7.0"
               }}
 
               packaging {{
@@ -194,7 +194,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.6.0"
+                  versionName "2.7.0"
               }}
 
               packagingOptions {{
@@ -2699,7 +2699,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.6.0 --build-number=$((2600 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.7.0 --build-number=$((2700 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
