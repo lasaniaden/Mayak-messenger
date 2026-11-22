@@ -1281,7 +1281,7 @@ class MeshEngine {
   RawDatagramSocket? _callUdpSocket;
   int _callUdpListenPort = callMediaUdpPort;
   String? _activeCallPeerIp;
-  int _activeCallPeerUdpPort = _remoteUdpPeers[peerId]?.port ?? callMediaUdpPort;
+  int _activeCallPeerUdpPort = callMediaUdpPort;
   int _callAudioSeq = 0;
   int _callVideoSeq = 0;
   final Map<int, _UdpVideoAssembly> _udpVideoAssemblies = {};
@@ -2221,7 +2221,7 @@ class MeshEngine {
             if (!wasKnown) {
               _addLog('Межрегиональный UDP-туннель открыт с $remoteId (${dg.address.address}:${dg.port})!');
               _sendUdpHolePunch(dg.address.address, dg.port);
-              unawaited(_flushBufferedPacketsToOnlinePeers());
+              _flushBufferedPacketsToOnlinePeers();
             }
             onStateChanged();
           }
@@ -2562,11 +2562,6 @@ class MeshEngine {
 
     for (final entry in _tcpPeers.entries.toList()) {
       await sendToPeer(entry.value, (line) => _sendTcpLine(entry.key, line));
-    }
-    for (final entry in _remoteUdpPeers.entries.toList()) {
-      if (pkt.dstNodeId == broadcastChannelId || pkt.dstNodeId == entry.key) {
-        _sendUdpMeshJson(entry.value.ip, entry.value.port, serialized);
-      }
     }
     for (final entry in _blePeers.entries.toList()) {
       await sendToPeer(entry.value, (line) => unawaited(_sendBleLine(entry.key, line)));
@@ -3799,7 +3794,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     localVideoFrameBytes = null;
     _activeCallId = _randomHex(12);
     _activeCallPeerIp = _resolvePeerIp(peerId);
-    _activeCallPeerUdpPort = callMediaUdpPort;
+    _activeCallPeerUdpPort = _remoteUdpPeers[peerId]?.port ?? callMediaUdpPort;
     _activeCallMediaKey = await _deriveCallMediaKey(peerId, _activeCallId);
 
     callStatusText = mode == 'video'
@@ -8292,6 +8287,11 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       _sendTcpLine(entry.key, serialized);
     }
 
+    for (final entry in _remoteUdpPeers.entries.toList()) {
+      if (pkt.dstNodeId == broadcastChannelId || pkt.dstNodeId == entry.key) {
+        _sendUdpMeshJson(entry.value.ip, entry.value.port, serialized);
+      }
+    }
     for (final entry in _blePeers.entries.toList()) {
       if (entry.key == excludeBleId) continue;
       if (sentPeerIds.contains(entry.value)) continue;
