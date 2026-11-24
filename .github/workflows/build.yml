@@ -129,7 +129,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.0.0"
+                  versionName = "3.0.1"
               }}
 
               packaging {{
@@ -197,7 +197,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.0.0"
+                  versionName "3.0.1"
               }}
 
               packagingOptions {{
@@ -258,7 +258,6 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
               <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
               <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
-              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
               <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
               <uses-permission android:name="android.permission.CAMERA"/>
               <uses-permission android:name="android.permission.RECORD_AUDIO"/>
@@ -270,8 +269,6 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
-              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
               <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
@@ -311,15 +308,6 @@ jobs:
                       android:exported="false"
                       android:foregroundServiceType="remoteMessaging|dataSync" />
 
-                  <receiver
-                      android:name=".MayakBootReceiver"
-                      android:enabled="true"
-                      android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.BOOT_COMPLETED" />
-                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                      </intent-filter>
-                  </receiver>
 
                   <activity
                       android:name=".MainActivity"
@@ -360,7 +348,6 @@ jobs:
           import android.app.PendingIntent
           import android.app.Service
           import android.content.ContentValues
-          import android.content.BroadcastReceiver
           import android.content.Context
           import android.content.Intent
           import android.content.pm.PackageManager
@@ -418,22 +405,6 @@ jobs:
           import java.io.FileOutputStream
           import java.util.Locale
           import kotlin.system.exitProcess
-
-          class MayakBootReceiver : BroadcastReceiver() {
-              override fun onReceive(context: Context, intent: Intent?) {
-                  val act = intent?.action ?: return
-                  if (act == Intent.ACTION_BOOT_COMPLETED || act == Intent.ACTION_MY_PACKAGE_REPLACED) {
-                      try {
-                          val svc = Intent(context, MayakBackgroundService::class.java)
-                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                              context.startForegroundService(svc)
-                          } else {
-                              context.startService(svc)
-                          }
-                      } catch (_: Throwable) {}
-                  }
-              }
-          }
 
           class MayakBackgroundService : Service() {
               companion object {
@@ -724,15 +695,12 @@ jobs:
                                   val freedBytes = clearDownloadedMediaCacheInternal()
                                   result.success(freedBytes)
                               }
-                              "installApkFile" -> {
-                                  val path = call.argument<String>("path") ?: ""
+                              "openExternalUrl" -> {
+                                  val url = call.argument<String>("url") ?: ""
                                   try {
-                                      val f = File(path)
-                                      if (f.exists()) {
-                                          val uri = androidx.core.content.FileProvider.getUriForFile(this, "${packageName}.fileprovider", f)
-                                          val intent = Intent(Intent.ACTION_VIEW).apply {
-                                              setDataAndType(uri, "application/vnd.android.package-archive")
-                                              addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                      if (url.startsWith("https://") || url.startsWith("http://")) {
+                                          val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                                              addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                           }
                                           startActivity(intent)
                                           result.success(true)
@@ -2767,7 +2735,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=3.0.0 --build-number=$((3000 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=3.0.1 --build-number=$((3010 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -2844,8 +2812,13 @@ jobs:
           mkdir -p release_out
           cp release_assets/android/app-release.apk "release_out/mayak-android-${TAG}.apk"
           (cd release_assets/windows && zip -r "../../release_out/mayak-windows-${TAG}.zip" .)
+          NOTES_ARG="--generate-notes"
+          if [ -f "RELEASE_NOTES.md" ]; then
+            NOTES_ARG="--notes-file RELEASE_NOTES.md"
+          fi
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release upload "${TAG}"               "release_out/mayak-android-${TAG}.apk"               "release_out/mayak-windows-${TAG}.zip"               --clobber
+            gh release edit "${TAG}" --title "Маяк ${TAG}" ${NOTES_ARG}
+            gh release upload "${TAG}" "release_out/mayak-android-${TAG}.apk" "release_out/mayak-windows-${TAG}.zip" --clobber
           else
-            gh release create "${TAG}"               "release_out/mayak-android-${TAG}.apk"               "release_out/mayak-windows-${TAG}.zip"               --title "Маяк ${TAG}"               --generate-notes
+            gh release create "${TAG}" "release_out/mayak-android-${TAG}.apk" "release_out/mayak-windows-${TAG}.zip" --title "Маяк ${TAG}" ${NOTES_ARG}
           fi

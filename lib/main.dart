@@ -55,7 +55,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v3.0.0',
+      title: 'Маяк P2P v3.0.1',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -7198,7 +7198,7 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
             ListTile(
               leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
               title: const Text('О приложении'),
-              subtitle: const Text('Маяк v3.0.0 • Автообновление и справка',
+              subtitle: const Text('Маяк v3.0.1 • Автообновление и справка',
                   style: TextStyle(fontSize: 12, color: Colors.white54)),
               trailing: const Icon(Icons.chevron_right_rounded,
                   color: Colors.white38),
@@ -9116,7 +9116,7 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Сетевая консоль • v3.0.0', style: TextStyle(fontSize: 16)),
+        title: const Text('Сетевая консоль • v3.0.1', style: TextStyle(fontSize: 16)),
         actions: [
           IconButton(
             tooltip: 'Очистить журнал',

@@ -1164,7 +1164,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.0.0';
+  static const String currentAppVersion = '3.0.1';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -2024,11 +2024,25 @@ class MeshEngine {
     }
   }
 
-  /// Скачивание и автоустановка обновления (Android APK / Windows ZIP через скрытый PowerShell без .bat)
+  /// Обновление: на Android открывает прямую загрузку APK в браузере (чисто для Play Protect), на Windows — автообновление ZIP
   Future<String> downloadAndInstallUpdate(
     AppUpdateInfo info, {
     void Function(double progress)? onProgress,
   }) async {
+    if (Platform.isAndroid) {
+      try {
+        final ok = await _nativeChannel.invokeMethod<bool>(
+              'openExternalUrl',
+              {'url': info.downloadUrl},
+            ) ??
+            false;
+        return ok
+            ? 'Открыта загрузка APK в браузере — нажмите «Открыть → Обновить» после скачивания'
+            : 'Откройте ссылку вручную: ${info.downloadUrl}';
+      } catch (e) {
+        return 'Ошибка открытия браузера: $e';
+      }
+    }
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
     try {
       final req = await client.getUrl(Uri.parse(info.downloadUrl));
@@ -2053,17 +2067,6 @@ class MeshEngine {
       }
       await sink.flush();
       await sink.close();
-
-      if (Platform.isAndroid) {
-        final ok = await _nativeChannel.invokeMethod<bool>(
-              'installApkFile',
-              {'path': outFile.path},
-            ) ??
-            false;
-        return ok
-            ? 'Открыт системный установщик Android'
-            : 'Не удалось открыть установщик APK (разрешите установку из неизвестных источников)';
-      }
 
       if (Platform.isWindows) {
         final exePath = Platform.resolvedExecutable;
@@ -5472,7 +5475,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v3.0.0) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v3.0.1) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');
