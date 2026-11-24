@@ -129,7 +129,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.0.1"
+                  versionName = "3.0.2"
               }}
 
               packaging {{
@@ -197,7 +197,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.0.1"
+                  versionName "3.0.2"
               }}
 
               packagingOptions {{
@@ -713,6 +713,12 @@ jobs:
                               }
                               "startBackgroundService" -> {
                                   startBgServiceSafe()
+                                  result.success(true)
+                              }
+                              "stopBackgroundService" -> {
+                                  try {
+                                      stopService(Intent(this, MayakBackgroundService::class.java))
+                                  } catch (_: Throwable) {}
                                   result.success(true)
                               }
                               "stopBackgroundServiceAndExit" -> {
@@ -2735,7 +2741,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=3.0.1 --build-number=$((3010 + ${GITHUB_RUN_NUMBER:-1}))
+        run: flutter build apk --release --build-name=3.0.2 --build-number=$((3020 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

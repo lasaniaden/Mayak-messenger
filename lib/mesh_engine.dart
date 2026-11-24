@@ -1164,7 +1164,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.0.1';
+  static const String currentAppVersion = '3.0.2';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -2076,18 +2076,36 @@ class MeshEngine {
         final psDir = appDir.replaceAll("'", "''");
         final psExe = exePath.replaceAll("'", "''");
         final psCmd =
-            "Wait-Process -Id $curPid -ErrorAction SilentlyContinue; "
-            "Start-Sleep -Milliseconds 600; "
-            "Expand-Archive -LiteralPath '$psZip' -DestinationPath '$psDir' -Force; "
+            "Write-Host 'Mayak Updater: waiting for app to close...'; "
+            "Wait-Process -Id $curPid -Timeout 15 -ErrorAction SilentlyContinue; "
+            "Start-Sleep -Milliseconds 1200; "
+            "\$ok = \$false; "
+            "for (\$i = 0; \$i -lt 5; \$i++) { "
+            "  try { "
+            "    Write-Host ('Extracting update (attempt ' + (\$i + 1) + ')...'); "
+            "    Expand-Archive -LiteralPath '$psZip' -DestinationPath '$psDir' -Force -ErrorAction Stop; "
+            "    \$ok = \$true; break "
+            "  } catch { Start-Sleep -Milliseconds 1200 } "
+            "}; "
             "Remove-Item -LiteralPath '$psZip' -Force -ErrorAction SilentlyContinue; "
+            "Start-Sleep -Milliseconds 800; "
+            "Write-Host 'Starting updated Mayak...'; "
             "Start-Process -FilePath '$psExe'";
         await Process.start(
           'powershell.exe',
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', psCmd],
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
           mode: ProcessStartMode.detached,
         );
-        Future.delayed(const Duration(milliseconds: 350), () => exit(0));
-        return 'Обновление загружено — перезапускаю Маяк...';
+        // Закрываем сокеты и выходим, чтобы файлы и Single-Instance Mutex мгновенно освободились
+        Future.delayed(const Duration(milliseconds: 250), () async {
+          try {
+            await _tcpServer?.close();
+            await _tcpServerV6?.close();
+            _callUdpSocket?.close();
+          } catch (_) {}
+          exit(0);
+        });
+        return 'Обновление загружено — закрываю Маяк для распаковки...';
       }
       return 'Сохранено: ${outFile.path}';
     } catch (e) {
@@ -5475,7 +5493,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v3.0.1) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v3.0.2) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');
@@ -6385,13 +6403,17 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
   Future<String> configureWindowsPublicFirewall() async {
     if (!Platform.isWindows) return 'Только для Windows';
     try {
+      final exePath = Platform.resolvedExecutable;
+      final udpPorts = _callUdpListenPort != 42072 ? '42072,$_callUdpListenPort' : '42072';
       final cmdArgs =
-          '/c netsh advfirewall firewall delete rule name="Mayak P2P TCP 42070" >nul 2>&1 & '
+          '/c netsh advfirewall firewall delete rule name="Mayak P2P App" >nul 2>&1 & '
+          'netsh advfirewall firewall add rule name="Mayak P2P App" dir=in action=allow program="$exePath" enable=yes profile=public,private,domain edge=yes & '
+          'netsh advfirewall firewall delete rule name="Mayak P2P TCP 42070" >nul 2>&1 & '
           'netsh advfirewall firewall delete rule name="Mayak P2P UDP 42069" >nul 2>&1 & '
-          'netsh advfirewall firewall add rule name="Mayak P2P TCP 42070" dir=in action=allow protocol=TCP localport=42070 profile=public,private,domain & '
-          'netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain & '
+          'netsh advfirewall firewall add rule name="Mayak P2P TCP 42070" dir=in action=allow protocol=TCP localport=42070,42071 profile=public,private,domain edge=yes & '
+          'netsh advfirewall firewall add rule name="Mayak P2P UDP 42069" dir=in action=allow protocol=UDP localport=42069 profile=public,private,domain edge=yes & '
           'netsh advfirewall firewall delete rule name="Mayak P2P Call Media UDP 42072" >nul 2>&1 & '
-          'netsh advfirewall firewall add rule name="Mayak P2P Call Media UDP 42072" dir=in action=allow protocol=UDP localport=42072 profile=public,private,domain';
+          'netsh advfirewall firewall add rule name="Mayak P2P Call Media UDP 42072" dir=in action=allow protocol=UDP localport=$udpPorts profile=public,private,domain edge=yes';
 
       final res = await Process.run('powershell', [
         '-NoProfile',

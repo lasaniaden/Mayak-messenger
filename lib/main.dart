@@ -55,7 +55,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v3.0.1',
+      title: 'Маяк P2P v3.0.2',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -4257,7 +4257,7 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                             child: Text(
                               widget.isBroadcast
                                   ? 'Напишите сообщение в Общий эфир — его получат все устройства поблизости.'
-                                  : 'Сквозное шифрование (X25519 + ChaCha20-Poly1305) активно.\nМожно отправлять текст, фото, видео, голосовые и файлы до 1 ГБ!\nНажмите на сообщение для реакций, редактирования, пересылки или удаления.',
+                                  : 'Сквозное шифрование активно.\nМожно отправлять текст, фото, видео, голосовые и файлы до 1 ГБ!\nНажмите на сообщение для реакций, редактирования, пересылки или удаления.',
                               textAlign: TextAlign.center,
                               style: const TextStyle(
                                   color: Colors.white54, fontSize: 13),
@@ -7137,18 +7137,6 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
               ),
               const Divider(height: 1, color: Color(0x1AFFFFFF)),
             ],
-            if (Platform.isAndroid) ...[
-              ListTile(
-                leading: const Icon(Icons.ring_volume_outlined, color: Colors.white),
-                title: const Text('Звонки поверх других приложений'),
-                subtitle: const Text('Разрешить показ экрана звонка, когда Маяк свёрнут',
-                    style: TextStyle(fontSize: 12, color: Colors.white54)),
-                trailing: const Icon(Icons.chevron_right_rounded,
-                    color: Colors.white38),
-                onTap: () => engine.requestAndroidOverlayCallPermission(),
-              ),
-              const Divider(height: 1, color: Color(0x1AFFFFFF)),
-            ],
             ListTile(
               leading: const Icon(Icons.terminal_outlined, color: Colors.white),
               title: const Text('Диагностика и журнал событий'),
@@ -7198,7 +7186,7 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
             ListTile(
               leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
               title: const Text('О приложении'),
-              subtitle: const Text('Маяк v3.0.1 • Автообновление и справка',
+              subtitle: const Text('Маяк v3.0.2 • Автообновление и справка',
                   style: TextStyle(fontSize: 12, color: Colors.white54)),
               trailing: const Icon(Icons.chevron_right_rounded,
                   color: Colors.white38),
@@ -7432,7 +7420,7 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
                 'Когда автопоиск заблокирован в гостевом Wi-Fi:\n'
                 '1. На одном устройстве откройте «QR-код и IP» и покажите QR.\n'
                 '2. На втором отсканируйте QR-код (или введите IP:порт вручную).\n'
-                '3. Узлы мгновенно обменяются ключами X25519/Ed25519 и подключатся напрямую.',
+                '3. Узлы мгновенно обменяются ключами и подключатся напрямую.',
             actionButton: OutlinedButton.icon(
               onPressed: widget.onShowQrAdd,
               icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
@@ -7699,9 +7687,9 @@ class _AboutMayakScreenState extends State<AboutMayakScreen> {
                     style:
                         TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 10),
-                _infoRow('Обмен ключами', 'Double X25519 (эпимерный + статический) + HKDF-SHA256'),
-                _infoRow('Шифрование', 'ChaCha20-Poly1305 AEAD (256-бит ключ, 96-бит nonce)'),
-                _infoRow('Подпись', 'Ed25519 (проверка подлинности каждого пакета)'),
+                _infoRow('Защита', 'Сквозное шифрование (E2EE) по умолчанию'),
+                _infoRow('Приватность', 'Без центральных серверов и без регистрации'),
+                _infoRow('Целостность', 'Криптографическая проверка каждого пакета'),
                 _infoRow('Приватность', 'Sealed Sender + защита от replay-атак (окно seq)'),
                 _infoRow('Звонки и Рация', 'Сквозное шифрование UDP 42072 и BLE/TCP call_bin/ptt_bin'),
                 _infoRow('Серверы', '0 серверов • Без номера телефона и регистрации'),
@@ -9116,7 +9104,7 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Сетевая консоль • v3.0.1', style: TextStyle(fontSize: 16)),
+        title: const Text('Сетевая консоль • v3.0.2', style: TextStyle(fontSize: 16)),
         actions: [
           IconButton(
             tooltip: 'Очистить журнал',
