@@ -55,7 +55,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v2.7.0',
+      title: 'Маяк P2P v3.0.0',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -190,6 +190,13 @@ class _ChatsHomeScreenState extends State<ChatsHomeScreen>
     );
     mayakGlobalEngine = engine;
     engine.init();
+    Future.delayed(const Duration(seconds: 3), () async {
+      if (!mounted) return;
+      final upd = await engine.checkForAppUpdate();
+      if (upd != null && mounted) {
+        _showMayakUpdateDialog(context, engine, upd);
+      }
+    });
   }
 
   @override
@@ -7110,6 +7117,25 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
                 },
               ),
               const Divider(height: 1, color: Color(0x1AFFFFFF)),
+              FutureBuilder<bool>(
+                future: engine.isWindowsAutostartEnabled(),
+                builder: (ctx, snap) {
+                  final val = snap.data ?? false;
+                  return SwitchListTile(
+                    secondary: const Icon(Icons.bolt_rounded, color: Colors.white),
+                    title: const Text('Автозапуск с Windows (в трей)'),
+                    subtitle: const Text('Маяк запускается свёрнутым в трей и принимает сообщения в фоне',
+                        style: TextStyle(fontSize: 12, color: Colors.white54)),
+                    value: val,
+                    activeColor: Colors.white,
+                    onChanged: (v) async {
+                      await engine.setWindowsAutostartEnabled(v);
+                      if (mounted) setState(() {});
+                    },
+                  );
+                },
+              ),
+              const Divider(height: 1, color: Color(0x1AFFFFFF)),
             ],
             if (Platform.isAndroid) ...[
               ListTile(
@@ -7147,9 +7173,32 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
               const Divider(height: 1, color: Color(0x1AFFFFFF)),
             ],
             ListTile(
+              leading: const Icon(Icons.system_update_alt_rounded, color: Colors.white),
+              title: const Text('Проверить обновления'),
+              subtitle: const Text('Текущая версия: v${MeshEngine.currentAppVersion} (GitHub Releases)',
+                  style: TextStyle(fontSize: 12, color: Colors.white54)),
+              trailing: const Icon(Icons.chevron_right_rounded,
+                  color: Colors.white38),
+              onTap: () async {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Проверка обновлений...')),
+                );
+                final upd = await engine.checkForAppUpdate();
+                if (!mounted) return;
+                if (upd != null) {
+                  _showMayakUpdateDialog(context, engine, upd);
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('У вас установлена последняя версия Маяк v${MeshEngine.currentAppVersion}')),
+                  );
+                }
+              },
+            ),
+            const Divider(height: 1, color: Color(0x1AFFFFFF)),
+            ListTile(
               leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
               title: const Text('О приложении'),
-              subtitle: const Text('Маяк v2.7.0 • Шифрование и справка',
+              subtitle: const Text('Маяк v3.0.0 • Автообновление и справка',
                   style: TextStyle(fontSize: 12, color: Colors.white54)),
               trailing: const Icon(Icons.chevron_right_rounded,
                   color: Colors.white38),
@@ -9067,7 +9116,7 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Сетевая консоль • v2.9.1', style: TextStyle(fontSize: 16)),
+        title: const Text('Сетевая консоль • v3.0.0', style: TextStyle(fontSize: 16)),
         actions: [
           IconButton(
             tooltip: 'Очистить журнал',
@@ -9169,4 +9218,116 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       ),
     );
   }
+}
+
+void _showMayakUpdateDialog(BuildContext context, MeshEngine engine, AppUpdateInfo info) {
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) {
+      bool downloading = false;
+      double progress = 0.0;
+      String status = '';
+      return StatefulBuilder(
+        builder: (ctx, setDState) => AlertDialog(
+          backgroundColor: const Color(0xFF0A0A0A),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+            side: const BorderSide(color: Colors.white24, width: 1),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.system_update_alt_rounded, color: Colors.white, size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Вышло обновление ${info.tagName}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Текущая: v${MeshEngine.currentAppVersion} → Новая: ${info.tagName}',
+                  style: const TextStyle(fontSize: 12.5, color: Colors.white70),
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF121212),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Text(
+                    info.notes.length > 600 ? '${info.notes.substring(0, 600)}...' : info.notes,
+                    style: const TextStyle(fontSize: 12, color: Colors.white70, height: 1.35),
+                  ),
+                ),
+                if (downloading || status.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  if (downloading)
+                    LinearProgressIndicator(
+                      value: progress > 0 ? progress : null,
+                      backgroundColor: Colors.white12,
+                      color: Colors.white,
+                    ),
+                  if (status.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(status, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                  ],
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            if (!downloading)
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Позже', style: TextStyle(color: Colors.white54)),
+              ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black,
+              ),
+              onPressed: downloading
+                  ? null
+                  : () async {
+                      setDState(() {
+                        downloading = true;
+                        progress = 0.0;
+                        status = 'Загрузка ${info.assetName}...';
+                      });
+                      final msg = await engine.downloadAndInstallUpdate(
+                        info,
+                        onProgress: (p) {
+                          if (ctx.mounted) {
+                            setDState(() {
+                              progress = p;
+                              status = 'Загрузка: ${(p * 100).toStringAsFixed(0)}%';
+                            });
+                          }
+                        },
+                      );
+                      if (ctx.mounted) {
+                        setDState(() {
+                          downloading = false;
+                          status = msg;
+                        });
+                      }
+                    },
+              icon: const Icon(Icons.download_rounded, size: 18),
+              label: Text(downloading ? 'Загрузка...' : 'Скачать и обновить'),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }

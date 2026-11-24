@@ -1,7 +1,7 @@
 name: p2p_mesh
 description: Autonomous P2P & BLE Mesh Intercom (Zero-Server)
 publish_to: 'none'
-version: 2.9.1+2911
+version: 3.0.0+3001
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

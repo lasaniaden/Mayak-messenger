@@ -1,9 +1,35 @@
 #!/usr/bin/env python3
-"""Inject native Win32 System Tray (minimize to tray on X close + right-click menu) into Flutter Windows runner."""
+"""Inject native Win32 System Tray, Single-Instance Mutex (no duplicate tray icons), and --minimized support into Flutter Windows runner."""
 import pathlib
 
 
 def main():
+    # 1. Patch windows/runner/main.cpp with Single-Instance Win32 Mutex
+    main_cpp_p = pathlib.Path("windows/runner/main.cpp")
+    main_cpp = main_cpp_p.read_text(encoding="utf-8")
+    if "MayakMeshSingleInstanceMutex_v3" not in main_cpp:
+        anchor = "int APIENTRY wWinMain("
+        assert anchor in main_cpp, "wWinMain anchor missing in main.cpp"
+        idx = main_cpp.index("{", main_cpp.index(anchor)) + 1
+        mutex_code = (
+            "\n  // v3.0.0: Single-Instance protection (prevents duplicate tray icons & port conflicts)\n"
+            '  HANDLE hSingleMutex = ::CreateMutexW(nullptr, TRUE, L"Local\\\\MayakMeshSingleInstanceMutex_v3");\n'
+            "  if (hSingleMutex != nullptr && ::GetLastError() == ERROR_ALREADY_EXISTS) {\n"
+            '    HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", nullptr);\n'
+            "    if (existing != nullptr) {\n"
+            "      ::PostMessageW(existing, WM_APP + 102, 0, 0);\n"
+            "      ::ShowWindow(existing, SW_SHOW);\n"
+            "      ::ShowWindow(existing, SW_RESTORE);\n"
+            "      ::SetForegroundWindow(existing);\n"
+            "    }\n"
+            "    ::CloseHandle(hSingleMutex);\n"
+            "    return EXIT_SUCCESS;\n"
+            "  }\n"
+        )
+        main_cpp = main_cpp[:idx] + mutex_code + main_cpp[idx:]
+        main_cpp_p.write_text(main_cpp, encoding="utf-8")
+
+    # 2. Patch flutter_window.h
     hdr_p = pathlib.Path("windows/runner/flutter_window.h")
     cpp_p = pathlib.Path("windows/runner/flutter_window.cpp")
 
@@ -24,12 +50,13 @@ def main():
         )
     hdr_p.write_text(hdr, encoding="utf-8")
 
+    # 3. Patch flutter_window.cpp
     cpp = cpp_p.read_text(encoding="utf-8")
     if '"resource.h"' not in cpp:
         cpp = '#include "resource.h"\n' + cpp
 
     tray_init = (
-        "  // v2.5.1: Native Win32 System Tray\n"
+        "  // v3.0.0: Native Win32 System Tray + --minimized autostart support\n"
         "  tray_nid_.cbSize = sizeof(NOTIFYICONDATAW);\n"
         "  tray_nid_.hWnd = GetHandle();\n"
         "  tray_nid_.uID = 1001;\n"
@@ -38,6 +65,10 @@ def main():
         "  tray_nid_.hIcon = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON));\n"
         '  wcscpy_s(tray_nid_.szTip, L"Mayak P2P");\n'
         "  tray_added_ = Shell_NotifyIconW(NIM_ADD, &tray_nid_) != FALSE;\n"
+        "  const wchar_t* cmd_line = GetCommandLineW();\n"
+        '  if (cmd_line != nullptr && wcsstr(cmd_line, L"--minimized") != nullptr) {\n'
+        "    ShowWindow(GetHandle(), SW_HIDE);\n"
+        "  }\n"
         "  return true;"
     )
     assert "  return true;" in cpp, "OnCreate return true anchor missing"
@@ -61,6 +92,11 @@ def main():
         "        return 0;\n"
         "      }\n"
         "      break;\n"
+        "    case WM_APP + 102:\n"
+        "      ShowWindow(hwnd, SW_SHOW);\n"
+        "      ShowWindow(hwnd, SW_RESTORE);\n"
+        "      SetForegroundWindow(hwnd);\n"
+        "      return 0;\n"
         "    case WM_APP + 42: {\n"
         "      if (lparam == WM_LBUTTONUP || lparam == WM_LBUTTONDBLCLK) {\n"
         "        ShowWindow(hwnd, SW_SHOW);\n"
@@ -101,7 +137,7 @@ def main():
     assert "  switch (message) {" in cpp, "MessageHandler switch anchor missing"
     cpp = cpp.replace("  switch (message) {", tray_msg, 1)
     cpp_p.write_text(cpp, encoding="utf-8")
-    print("OK: Windows System Tray injected into flutter_window.h/.cpp")
+    print("OK: Windows Single-Instance + System Tray + --minimized injected")
 
 
 if __name__ == "__main__":

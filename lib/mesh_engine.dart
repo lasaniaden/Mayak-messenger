@@ -1145,7 +1145,27 @@ class PeerLocationRecord {
   });
 }
 
+class AppUpdateInfo {
+  final String tagName;
+  final String version;
+  final String notes;
+  final String downloadUrl;
+  final String assetName;
+  final int sizeBytes;
+
+  const AppUpdateInfo({
+    required this.tagName,
+    required this.version,
+    required this.notes,
+    required this.downloadUrl,
+    required this.assetName,
+    required this.sizeBytes,
+  });
+}
+
 class MeshEngine {
+  static const String currentAppVersion = '3.0.0';
+  static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
   static const int defaultTcpPort = 42070;
@@ -1861,6 +1881,219 @@ class MeshEngine {
     }
   }
 
+  /// Выравнивание длины Padmé (оверхед < 12%, скрывает точный размер сообщений от анализа трафика)
+  static int _padmeLength(int l) {
+    if (l <= 1) return l;
+    final e = (log(l) / ln2).floor();
+    final s = (log(e) / ln2).floor() + 1;
+    final lastBits = e - s;
+    if (lastBits <= 0) return l;
+    final bitMask = (1 << lastBits) - 1;
+    return (l + bitMask) & ~bitMask;
+  }
+
+  static List<int> _applyPadmeJsonPadding(List<int> rawBytes) {
+    final targetLen = _padmeLength(rawBytes.length);
+    if (targetLen <= rawBytes.length) return rawBytes;
+    final out = Uint8List(targetLen);
+    out.setRange(0, rawBytes.length, rawBytes);
+    // Пробелы в конце JSON полностью валидны для jsonDecode и 100% обратно совместимы
+    for (int i = rawBytes.length; i < targetLen; i++) {
+      out[i] = 0x20;
+    }
+    return out;
+  }
+
+  /// Проверка автозапуска Windows (реестр HKCU\...\Run, без .bat)
+  Future<bool> isWindowsAutostartEnabled() async {
+    if (!Platform.isWindows) return false;
+    try {
+      final res = await Process.run('reg', [
+        'query',
+        r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run',
+        '/v',
+        'MayakMessenger',
+      ]);
+      return res.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Включение/выключение автозапуска Windows сразу в трей (--minimized)
+  Future<bool> setWindowsAutostartEnabled(bool enabled) async {
+    if (!Platform.isWindows) return false;
+    try {
+      if (enabled) {
+        final exe = Platform.resolvedExecutable;
+        final res = await Process.run('reg', [
+          'add',
+          r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run',
+          '/v',
+          'MayakMessenger',
+          '/t',
+          'REG_SZ',
+          '/d',
+          '"$exe" --minimized',
+          '/f',
+        ]);
+        return res.exitCode == 0;
+      } else {
+        await Process.run('reg', [
+          'delete',
+          r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run',
+          '/v',
+          'MayakMessenger',
+          '/f',
+        ]);
+        return true;
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static bool _isNewerVersion(String remoteVer, String localVer) {
+    List<int> parse(String s) => s
+        .replaceFirst(RegExp(r'^[vV]'), '')
+        .split('+')
+        .first
+        .split('.')
+        .map((p) => int.tryParse(p.trim()) ?? 0)
+        .toList();
+    final r = parse(remoteVer);
+    final l = parse(localVer);
+    final maxLen = max(r.length, l.length);
+    for (int i = 0; i < maxLen; i++) {
+      final rv = i < r.length ? r[i] : 0;
+      final lv = i < l.length ? l[i] : 0;
+      if (rv > lv) return true;
+      if (rv < lv) return false;
+    }
+    return false;
+  }
+
+  /// Проверка обновлений через GitHub Releases API (не блокирует офлайн-работу)
+  Future<AppUpdateInfo?> checkForAppUpdate() async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+    try {
+      final uri = Uri.parse('https://api.github.com/repos/$githubRepo/releases/latest');
+      final req = await client.getUrl(uri);
+      req.headers.set('User-Agent', 'Mayak-P2P/$currentAppVersion');
+      req.headers.set('Accept', 'application/vnd.github+json');
+      final resp = await req.close().timeout(const Duration(seconds: 6));
+      if (resp.statusCode != 200) return null;
+      final body = await utf8.decoder.bind(resp).join();
+      final data = jsonDecode(body) as Map<String, dynamic>;
+      final tag = (data['tag_name'] ?? '').toString().trim();
+      final ver = tag.replaceFirst(RegExp(r'^[vV]'), '');
+      if (ver.isEmpty || !_isNewerVersion(ver, currentAppVersion)) return null;
+      final notes = (data['body'] ?? '').toString().trim();
+      final assets = (data['assets'] as List?) ?? const [];
+      String? url;
+      String? name;
+      int size = 0;
+      for (final raw in assets) {
+        if (raw is! Map) continue;
+        final n = (raw['name'] ?? '').toString();
+        final u = (raw['browser_download_url'] ?? '').toString();
+        final low = n.toLowerCase();
+        final match = Platform.isAndroid
+            ? low.endsWith('.apk')
+            : (Platform.isWindows ? low.endsWith('.zip') && low.contains('windows') : false);
+        if (match && u.isNotEmpty) {
+          url = u;
+          name = n;
+          size = (raw['size'] as num?)?.toInt() ?? 0;
+          break;
+        }
+      }
+      if (url == null || name == null) return null;
+      return AppUpdateInfo(
+        tagName: tag,
+        version: ver,
+        notes: notes.isEmpty ? 'Улучшения стабильности и безопасности сети Маяк.' : notes,
+        downloadUrl: url,
+        assetName: name,
+        sizeBytes: size,
+      );
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Скачивание и автоустановка обновления (Android APK / Windows ZIP через скрытый PowerShell без .bat)
+  Future<String> downloadAndInstallUpdate(
+    AppUpdateInfo info, {
+    void Function(double progress)? onProgress,
+  }) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final req = await client.getUrl(Uri.parse(info.downloadUrl));
+      req.headers.set('User-Agent', 'Mayak-P2P/$currentAppVersion');
+      final resp = await req.close().timeout(const Duration(seconds: 20));
+      if (resp.statusCode != 200) {
+        return 'Ошибка загрузки: HTTP ${resp.statusCode}';
+      }
+      final total = resp.contentLength > 0 ? resp.contentLength : info.sizeBytes;
+      final tmpDir = Directory.systemTemp;
+      final sep = Platform.pathSeparator;
+      final targetPath = '${tmpDir.path}${sep}mayak_update_${info.version}_${info.assetName}';
+      final outFile = File(targetPath);
+      final sink = outFile.openWrite();
+      int received = 0;
+      await for (final chunk in resp) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (total > 0 && onProgress != null) {
+          onProgress((received / total).clamp(0.0, 1.0));
+        }
+      }
+      await sink.flush();
+      await sink.close();
+
+      if (Platform.isAndroid) {
+        final ok = await _nativeChannel.invokeMethod<bool>(
+              'installApkFile',
+              {'path': outFile.path},
+            ) ??
+            false;
+        return ok
+            ? 'Открыт системный установщик Android'
+            : 'Не удалось открыть установщик APK (разрешите установку из неизвестных источников)';
+      }
+
+      if (Platform.isWindows) {
+        final exePath = Platform.resolvedExecutable;
+        final appDir = File(exePath).parent.path;
+        final curPid = pid;
+        final psZip = outFile.path.replaceAll("'", "''");
+        final psDir = appDir.replaceAll("'", "''");
+        final psExe = exePath.replaceAll("'", "''");
+        final psCmd =
+            "Wait-Process -Id $curPid -ErrorAction SilentlyContinue; "
+            "Start-Sleep -Milliseconds 600; "
+            "Expand-Archive -LiteralPath '$psZip' -DestinationPath '$psDir' -Force; "
+            "Remove-Item -LiteralPath '$psZip' -Force -ErrorAction SilentlyContinue; "
+            "Start-Process -FilePath '$psExe'";
+        await Process.start(
+          'powershell.exe',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', psCmd],
+          mode: ProcessStartMode.detached,
+        );
+        Future.delayed(const Duration(milliseconds: 350), () => exit(0));
+        return 'Обновление загружено — перезапускаю Маяк...';
+      }
+      return 'Сохранено: ${outFile.path}';
+    } catch (e) {
+      return 'Ошибка обновления: $e';
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<String> saveBytesToDownloads(String fileName, List<int> bytes) async {
     try {
       if (Platform.isAndroid) {
@@ -2074,7 +2307,18 @@ class MeshEngine {
 
   Future<void> _initCallUdpSocket() async {
     if (_callUdpSocket != null) return;
-    for (final port in [callMediaUdpPort, 0]) {
+    int preferredUdpPort = callMediaUdpPort;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedPort = prefs.getInt('mayak_udp_port_v3');
+      if (savedPort != null && savedPort >= 49152 && savedPort <= 65535) {
+        preferredUdpPort = savedPort;
+      } else {
+        preferredUdpPort = 49152 + Random.secure().nextInt(16380);
+        await prefs.setInt('mayak_udp_port_v3', preferredUdpPort);
+      }
+    } catch (_) {}
+    for (final port in [preferredUdpPort, 0]) {
       try {
         _callUdpSocket = await RawDatagramSocket.bind(
           InternetAddress.anyIPv4,
@@ -5228,7 +5472,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v2.9.1) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v3.0.0) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');
@@ -7752,8 +7996,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final aadBytes =
         utf8.encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$expiresAt');
 
+    final paddedBytes = _applyPadmeJsonPadding(sealedPayloadBytes);
     final secretBox = await _cipher.encrypt(
-      sealedPayloadBytes,
+      paddedBytes,
       secretKey: sessionKey,
       nonce: nonce,
       aad: aadBytes,
