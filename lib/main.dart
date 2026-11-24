@@ -9067,7 +9067,7 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Сетевая консоль • v2.9.0', style: TextStyle(fontSize: 16)),
+        title: const Text('Сетевая консоль • v2.9.1', style: TextStyle(fontSize: 16)),
         actions: [
           IconButton(
             tooltip: 'Очистить журнал',

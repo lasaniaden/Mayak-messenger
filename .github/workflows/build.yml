@@ -5,6 +5,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-android:
     runs-on: ubuntu-latest
@@ -126,7 +129,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "2.9.0"
+                  versionName = "2.9.1"
               }}
 
               packaging {{
@@ -194,7 +197,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "2.9.0"
+                  versionName "2.9.1"
               }}
 
               packagingOptions {{
@@ -2711,7 +2714,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Obfuscated Release APK
-        run: flutter build apk --release --build-name=2.9.0 --build-number=$((2900 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
+        run: flutter build apk --release --build-name=2.9.1 --build-number=$((2910 + ${GITHUB_RUN_NUMBER:-1})) --obfuscate --split-debug-info=build/symbols
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -2757,3 +2760,39 @@ jobs:
         with:
           name: p2p-mesh-windows-pc
           path: build/windows/x64/runner/Release/
+
+  publish-release:
+    needs: [build-android, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: p2p-mesh-android-apk
+          path: release_assets/android
+
+      - name: Download Windows Build
+        uses: actions/download-artifact@v4
+        with:
+          name: p2p-mesh-windows-pc
+          path: release_assets/windows
+
+      - name: Package & Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+          TAG="v${VER}"
+          mkdir -p release_out
+          cp release_assets/android/app-release.apk "release_out/mayak-android-${TAG}.apk"
+          (cd release_assets/windows && zip -r "../../release_out/mayak-windows-${TAG}.zip" .)
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}"               "release_out/mayak-android-${TAG}.apk"               "release_out/mayak-windows-${TAG}.zip"               --clobber
+          else
+            gh release create "${TAG}"               "release_out/mayak-android-${TAG}.apk"               "release_out/mayak-windows-${TAG}.zip"               --title "Маяк ${TAG}"               --generate-notes
+          fi
