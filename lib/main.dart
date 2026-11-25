@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -6220,12 +6221,20 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
     final isVideo = engine.activeCallMode == 'video';
     final mm = (_seconds ~/ 60).toString().padLeft(2, '0');
     final ss = (_seconds % 60).toString().padLeft(2, '0');
-    final hasRemoteVideo = isVideo &&
+    final hasWebRtcRemote = isVideo &&
         !engine.remoteCallVideoMuted &&
-        engine.remoteVideoFrameBytes != null;
-    final hasLocalPreview = isVideo &&
+        engine.webrtc.hasRemoteVideo;
+    final hasWebRtcLocal = isVideo &&
         !engine.isCallVideoMuted &&
-        engine.localVideoFrameBytes != null;
+        engine.webrtc.hasLocalVideo;
+    final hasRemoteVideo = hasWebRtcRemote ||
+        (isVideo &&
+            !engine.remoteCallVideoMuted &&
+            engine.remoteVideoFrameBytes != null);
+    final hasLocalPreview = hasWebRtcLocal ||
+        (isVideo &&
+            !engine.isCallVideoMuted &&
+            engine.localVideoFrameBytes != null);
 
     return PopScope(
       canPop: false,
@@ -6238,11 +6247,16 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
           fit: StackFit.expand,
           children: [
             if (hasRemoteVideo)
-              Image.memory(
-                engine.remoteVideoFrameBytes!,
-                gaplessPlayback: true,
-                fit: BoxFit.contain,
-              )
+              hasWebRtcRemote
+                  ? RTCVideoView(
+                      engine.webrtc.remoteRenderer,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                    )
+                  : Image.memory(
+                      engine.remoteVideoFrameBytes!,
+                      gaplessPlayback: true,
+                      fit: BoxFit.contain,
+                    )
             else
               Center(
                 child: Column(
@@ -6318,18 +6332,24 @@ class _CallSessionScreenState extends State<CallSessionScreen> {
                     ),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(6),
-                      child: Transform(
-                        alignment: Alignment.center,
-                        transform: (Platform.isAndroid &&
-                                engine.isCallFrontCamera)
-                            ? Matrix4.rotationY(pi)
-                            : Matrix4.identity(),
-                        child: Image.memory(
-                          engine.localVideoFrameBytes!,
-                          gaplessPlayback: true,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
+                      child: hasWebRtcLocal
+                          ? RTCVideoView(
+                              engine.webrtc.localRenderer,
+                              mirror: Platform.isAndroid && engine.isCallFrontCamera,
+                              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                            )
+                          : Transform(
+                              alignment: Alignment.center,
+                              transform: (Platform.isAndroid &&
+                                      engine.isCallFrontCamera)
+                                  ? Matrix4.rotationY(pi)
+                                  : Matrix4.identity(),
+                              child: Image.memory(
+                                engine.localVideoFrameBytes!,
+                                gaplessPlayback: true,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
                     ),
                   ),
                 ),

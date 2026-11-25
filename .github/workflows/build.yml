@@ -126,10 +126,10 @@ jobs:
 
               defaultConfig {{
                   applicationId = "com.mayak.mesh.p2p_mesh"
-                  minSdk = 23
+                  minSdk = 24
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.1.6"
+                  versionName = "3.2.0"
               }}
 
               packaging {{
@@ -194,10 +194,10 @@ jobs:
 
               defaultConfig {{
                   applicationId "com.mayak.mesh.p2p_mesh"
-                  minSdkVersion 23
+                  minSdkVersion 24
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.1.6"
+                  versionName "3.2.0"
               }}
 
               packagingOptions {{
@@ -244,7 +244,12 @@ jobs:
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
           with open(manifest_path, "w") as f:
-              f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              f.write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" tools:node="remove" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" tools:node="remove" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" tools:node="remove" />
 
               <uses-feature android:name="android.hardware.camera" android:required="false"/>
               <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
@@ -543,7 +548,9 @@ jobs:
               private var notifIdCounter = 1001
               private var isAppInForeground = true
 
-              private var mediaRecorder: MediaRecorder? = null
+              private var voiceAudioRecord: android.media.AudioRecord? = null
+              private val voiceRecordingFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+              private var voiceRecordThread: Thread? = null
               private var currentVoiceFilePath: String? = null
               private var voiceStartMs: Long = 0L
               private var audioPlayer: MediaPlayer? = null
@@ -1330,48 +1337,97 @@ jobs:
                   videoTextureEntry = null
               }
 
+              private fun writeWavHeader(out: java.io.RandomAccessFile, pcmBytes: Long, sampleRate: Int) {
+                  val totalDataLen = pcmBytes + 36
+                  val byteRate = sampleRate * 2L
+                  val hdr = ByteArray(44)
+                  hdr[0] = 'R'.code.toByte(); hdr[1] = 'I'.code.toByte(); hdr[2] = 'F'.code.toByte(); hdr[3] = 'F'.code.toByte()
+                  hdr[4] = (totalDataLen and 0xff).toByte(); hdr[5] = ((totalDataLen shr 8) and 0xff).toByte()
+                  hdr[6] = ((totalDataLen shr 16) and 0xff).toByte(); hdr[7] = ((totalDataLen shr 24) and 0xff).toByte()
+                  hdr[8] = 'W'.code.toByte(); hdr[9] = 'A'.code.toByte(); hdr[10] = 'V'.code.toByte(); hdr[11] = 'E'.code.toByte()
+                  hdr[12] = 'f'.code.toByte(); hdr[13] = 'm'.code.toByte(); hdr[14] = 't'.code.toByte(); hdr[15] = ' '.code.toByte()
+                  hdr[16] = 16; hdr[17] = 0; hdr[18] = 0; hdr[19] = 0
+                  hdr[20] = 1; hdr[21] = 0; hdr[22] = 1; hdr[23] = 0
+                  hdr[24] = (sampleRate and 0xff).toByte(); hdr[25] = ((sampleRate shr 8) and 0xff).toByte()
+                  hdr[26] = ((sampleRate shr 16) and 0xff).toByte(); hdr[27] = ((sampleRate shr 24) and 0xff).toByte()
+                  hdr[28] = (byteRate and 0xff).toByte(); hdr[29] = ((byteRate shr 8) and 0xff).toByte()
+                  hdr[30] = ((byteRate shr 16) and 0xff).toByte(); hdr[31] = ((byteRate shr 24) and 0xff).toByte()
+                  hdr[32] = 2; hdr[33] = 0; hdr[34] = 16; hdr[35] = 0
+                  hdr[36] = 'd'.code.toByte(); hdr[37] = 'a'.code.toByte(); hdr[38] = 't'.code.toByte(); hdr[39] = 'a'.code.toByte()
+                  hdr[40] = (pcmBytes and 0xff).toByte(); hdr[41] = ((pcmBytes shr 8) and 0xff).toByte()
+                  hdr[42] = ((pcmBytes shr 16) and 0xff).toByte(); hdr[43] = ((pcmBytes shr 24) and 0xff).toByte()
+                  out.seek(0)
+                  out.write(hdr)
+              }
+
               private fun startVoiceRecordingInternal(): Boolean {
                   return try {
                       stopVoiceRecordingInternal()
-                      val outDir = File(filesDir, "voice_notes").apply { mkdirs() }
-                      val outFile = File(outDir, "voice_${System.currentTimeMillis()}.m4a")
-                      val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                          MediaRecorder(this)
-                      } else {
-                          @Suppress("DEPRECATION")
-                          MediaRecorder()
+                      val sampleRate = 16000
+                      val minBuf = android.media.AudioRecord.getMinBufferSize(
+                          sampleRate,
+                          android.media.AudioFormat.CHANNEL_IN_MONO,
+                          android.media.AudioFormat.ENCODING_PCM_16BIT
+                      ).coerceAtLeast(4096)
+                      val rec = android.media.AudioRecord(
+                          android.media.MediaRecorder.AudioSource.MIC,
+                          sampleRate,
+                          android.media.AudioFormat.CHANNEL_IN_MONO,
+                          android.media.AudioFormat.ENCODING_PCM_16BIT,
+                          minBuf
+                      )
+                      if (rec.state != android.media.AudioRecord.STATE_INITIALIZED) {
+                          rec.release()
+                          return false
                       }
-                      recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-                      recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                      recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                      recorder.setAudioSamplingRate(16000)
-                      recorder.setAudioEncodingBitRate(24000)
-                      recorder.setOutputFile(outFile.absolutePath)
-                      recorder.prepare()
-                      recorder.start()
-                      mediaRecorder = recorder
+                      val outDir = File(filesDir, "voice_notes").apply { mkdirs() }
+                      val outFile = File(outDir, "voice_${System.currentTimeMillis()}.wav")
+                      voiceAudioRecord = rec
                       currentVoiceFilePath = outFile.absolutePath
                       voiceStartMs = System.currentTimeMillis()
+                      voiceRecordingFlag.set(true)
+                      rec.startRecording()
+                      voiceRecordThread = Thread {
+                          try {
+                              val raf = java.io.RandomAccessFile(outFile, "rw")
+                              raf.write(ByteArray(44))
+                              val buf = ByteArray(2048)
+                              var totalPcm = 0L
+                              while (voiceRecordingFlag.get()) {
+                                  val n = rec.read(buf, 0, buf.size)
+                                  if (n > 0) {
+                                      raf.write(buf, 0, n)
+                                      totalPcm += n
+                                  }
+                              }
+                              writeWavHeader(raf, totalPcm, sampleRate)
+                              raf.close()
+                          } catch (_: Throwable) {}
+                      }.apply { start() }
                       true
                   } catch (t: Throwable) {
-                      mediaRecorder = null
+                      voiceRecordingFlag.set(false)
+                      voiceAudioRecord = null
                       false
                   }
               }
 
               private fun stopVoiceRecordingInternal(): Map<String, Any>? {
-                  val rec = mediaRecorder ?: return null
+                  val rec = voiceAudioRecord ?: return null
                   val path = currentVoiceFilePath
-                  mediaRecorder = null
+                  voiceRecordingFlag.set(false)
+                  voiceAudioRecord = null
                   currentVoiceFilePath = null
                   return try {
-                      rec.stop()
-                      rec.release()
+                      try { rec.stop() } catch (_: Throwable) {}
+                      try { voiceRecordThread?.join(1200) } catch (_: Throwable) {}
+                      voiceRecordThread = null
+                      try { rec.release() } catch (_: Throwable) {}
                       val durSec = ((System.currentTimeMillis() - voiceStartMs) / 1000L).coerceAtLeast(1L)
-                      if (path != null && File(path).exists() && File(path).length() > 0) {
+                      if (path != null && File(path).exists() && File(path).length() > 44) {
                           mapOf(
                               "path" to path,
-                              "name" to "Голосовое_${durSec}сек.m4a",
+                              "name" to "Голосовое_${durSec}сек.wav",
                               "size" to File(path).length(),
                               "durationSec" to durSec
                           )
@@ -2773,7 +2829,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release --build-name=3.1.6 --build-number=$((3160 + ${GITHUB_RUN_NUMBER:-1}))
+        run: flutter build apk --release --build-name=3.2.0 --build-number=$((3200 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -2856,7 +2912,7 @@ jobs:
           fi
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release edit "${TAG}" --title "Маяк ${TAG}" ${NOTES_ARG}
-            gh release upload "${TAG}" "release_out/mayak-android-${TAG}.apk" "release_out/mayak-windows-${TAG}.zip" --clobber
           else
-            gh release create "${TAG}" "release_out/mayak-android-${TAG}.apk" "release_out/mayak-windows-${TAG}.zip" --title "Маяк ${TAG}" ${NOTES_ARG}
+            gh release create "${TAG}" --title "Маяк ${TAG}" ${NOTES_ARG}
           fi
+          gh release upload "${TAG}" "release_out/mayak-android-${TAG}.apk" "release_out/mayak-windows-${TAG}.zip" --clobber

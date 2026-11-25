@@ -10,6 +10,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:image/image.dart' as img;
 import 'package:zxing2/qrcode.dart' as zx;
 import 'mayak_dht.dart';
+import 'mayak_media_rtc.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1180,7 +1181,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.1.6';
+  static const String currentAppVersion = '3.2.0';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -1285,6 +1286,26 @@ class MeshEngine {
   int _lastFileUiNotifyMs = 0;
   final Map<String, int> _activeFileStreamGen = {};
   final Map<String, Timer> _downloadWatchdogTimers = {};
+  final Set<String> _revokedFileIds = {};
+  final Map<String, Map<int, String>> _incomingSdpParts = {};
+  bool _isCallInitiator = false;
+  late final MayakSoLoudPlayer soloudPlayer = MayakSoLoudPlayer()
+    ..onStateChanged = () {
+      currentlyPlayingAudioPath = soloudPlayer.currentPath;
+      isAudioPlaying = soloudPlayer.isPlaying;
+      audioPositionMs = soloudPlayer.positionMs;
+      audioDurationMs = soloudPlayer.durationMs;
+      onStateChanged();
+    }
+    ..onLog = (m) => _addLog(m, triggerUi: false);
+  late final MayakWebRtcController webrtc = MayakWebRtcController()
+    ..onStateChanged = () {
+      if (webrtc.isConnected) {
+        activeCallTransport = 'WebRTC P2P';
+      }
+      onStateChanged();
+    }
+    ..onLog = (m) => _addLog(m, triggerUi: false);
   Timer? _onlineReconnectWatchdog;
   int _onlineReconnectTicks = 0;
   final Map<String, int> _lastDhtAutoLookupMs = {};
@@ -3132,6 +3153,7 @@ class MeshEngine {
       try {
         await _nativeChannel
             .invokeMethod('setCallSpeaker', {'enabled': isCallSpeakerOn});
+        await webrtc.setSpeakerphone(isCallSpeakerOn);
       } catch (_) {}
     }
     onStateChanged();
@@ -4775,6 +4797,54 @@ try {
     _winVideoServer = null;
   }
 
+  Future<void> _sendWebRtcSignal(
+      String targetNodeId, String kind, Map<String, dynamic> payload) async {
+    final contact = knownContacts[targetNodeId];
+    if (contact == null) return;
+    if (kind == 'WEBRTC_OFFER' || kind == 'WEBRTC_ANSWER') {
+      final rawJson = jsonEncode(payload);
+      const chunkLen = 360;
+      final sid = _randomHex(6);
+      final total = (rawJson.length / chunkLen).ceil().clamp(1, 64);
+      for (int i = 0; i < total; i++) {
+        final start = i * chunkLen;
+        final end = min(start + chunkLen, rawJson.length);
+        final partEnv = jsonEncode({
+          'v': 2,
+          'kind': 'WEBRTC_SDP_PART',
+          'sid': sid,
+          'sk': kind,
+          'idx': i,
+          'tot': total,
+          'd': rawJson.substring(start, end),
+        });
+        await _encryptAndQueueSealedDataPacket(
+          targetNodeId: targetNodeId,
+          contact: contact,
+          msgId: '${sid}_sdp_$i',
+          sealedPayloadBytes: utf8.encode(partEnv),
+          keepInTransitBuffer: false,
+          persistInOutbox: false,
+          skipPadding: true,
+        );
+        if (total > 1) {
+          await Future.delayed(const Duration(milliseconds: 12));
+        }
+      }
+      return;
+    }
+    final env = jsonEncode({'v': 2, 'kind': kind, ...payload});
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: targetNodeId,
+      contact: contact,
+      msgId: _randomHex(10),
+      sealedPayloadBytes: utf8.encode(env),
+      keepInTransitBuffer: false,
+      persistInOutbox: false,
+      skipPadding: true,
+    );
+  }
+
   Future<void> _startCallMediaPipelines() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -4799,28 +4869,25 @@ try {
             ? 'Wi-Fi UDP'
             : 'Bluetooth / Mesh';
 
-    // 1. Полнодуплексный аудио-поток 16 kHz 16-bit Mono PCM
-    if (Platform.isAndroid) {
-      try {
-        await _nativeChannel.invokeMethod('setCallSpeaker', {'enabled': isCallSpeakerOn});
-        await _nativeChannel.invokeMethod('startCallAudio');
-        await _nativeChannel
-            .invokeMethod('setCallAudioMuted', {'muted': isCallMicMuted});
-      } catch (_) {}
-    } else if (Platform.isWindows) {
-      WindowsPcmAudioBridge.startFullDuplex(_onLocalCapturedPcm);
-      WindowsPcmAudioBridge.setMicMuted(isCallMicMuted);
-    }
-
-    // 2. Поток видео (если ВЧ и камера не выключена)
-    if (activeCallMode == 'video' && !isCallVideoMuted) {
+    // 1. Нативный WebRTC (libwebrtc M144+: C++ CaptureSinkFilter без qedit.dll, Camera2, AEC3/NS/AGC2, WGC)
+    final peerId = activeCallPeerId;
+    if (peerId != null) {
+      activeCallTransport = 'WebRTC P2P';
       if (Platform.isAndroid) {
         try {
-          await _nativeChannel
-              .invokeMethod('startCallCamera', {'front': isCallFrontCamera});
+          await _nativeChannel.invokeMethod('setCallSpeaker', {'enabled': isCallSpeakerOn});
         } catch (_) {}
-      } else if (Platform.isWindows) {
-        unawaited(_startWindowsVideoStreamer());
+      }
+      await webrtc.startSession(
+        isCaller: _isCallInitiator,
+        isVideo: activeCallMode == 'video',
+        useScreenOnWindows: windowsVideoSource == 'screen',
+        startMicMuted: isCallMicMuted,
+        startVideoMuted: isCallVideoMuted,
+        sendSignal: (kind, payload) => _sendWebRtcSignal(peerId, kind, payload),
+      );
+      if (Platform.isAndroid) {
+        await webrtc.setSpeakerphone(isCallSpeakerOn);
       }
     }
 
@@ -4839,6 +4906,8 @@ try {
     _udpPunchTimer?.cancel();
     _udpPunchTimer = null;
     _udpVideoAssemblies.clear();
+    _incomingSdpParts.clear();
+    await webrtc.disposeSession();
     if (Platform.isAndroid) {
       try {
         await _nativeChannel.invokeMethod('stopCallAudio');
@@ -4875,14 +4944,7 @@ try {
 
   Future<void> toggleCallMicMute() async {
     isCallMicMuted = !isCallMicMuted;
-    if (Platform.isAndroid) {
-      try {
-        await _nativeChannel
-            .invokeMethod('setCallAudioMuted', {'muted': isCallMicMuted});
-      } catch (_) {}
-    } else if (Platform.isWindows) {
-      WindowsPcmAudioBridge.setMicMuted(isCallMicMuted);
-    }
+    webrtc.setMicMuted(isCallMicMuted);
     unawaited(_sendCallStateSync());
     onStateChanged();
   }
@@ -4890,27 +4952,7 @@ try {
   Future<void> toggleCallVideoMute() async {
     if (activeCallMode != 'video') return;
     isCallVideoMuted = !isCallVideoMuted;
-    if (isCallAccepted) {
-      if (isCallVideoMuted) {
-        localVideoFrameBytes = null;
-        if (Platform.isAndroid) {
-          try {
-            await _nativeChannel.invokeMethod('stopCallCamera');
-          } catch (_) {}
-        } else if (Platform.isWindows) {
-          await _stopWindowsVideoStreamer();
-        }
-      } else {
-        if (Platform.isAndroid) {
-          try {
-            await _nativeChannel
-                .invokeMethod('startCallCamera', {'front': isCallFrontCamera});
-          } catch (_) {}
-        } else if (Platform.isWindows) {
-          unawaited(_startWindowsVideoStreamer());
-        }
-      }
-    }
+    webrtc.setVideoMuted(isCallVideoMuted);
     unawaited(_sendCallStateSync());
     onStateChanged();
   }
@@ -4919,14 +4961,12 @@ try {
     if (activeCallMode != 'video' || isCallVideoMuted) return;
     if (Platform.isAndroid) {
       isCallFrontCamera = !isCallFrontCamera;
-      try {
-        await _nativeChannel.invokeMethod('switchCallCamera');
-      } catch (_) {}
+      await webrtc.switchCamera();
     } else if (Platform.isWindows) {
       windowsVideoSource =
           windowsVideoSource == 'camera' ? 'screen' : 'camera';
       if (isCallAccepted) {
-        unawaited(_startWindowsVideoStreamer());
+        unawaited(webrtc.switchWindowsVideoSource(windowsVideoSource == 'screen'));
       }
     }
     onStateChanged();
@@ -4939,6 +4979,7 @@ try {
     await _stopIncomingRingtone();
     await _stopCallMediaPipelines();
 
+    _isCallInitiator = true;
     activeCallPeerId = peerId;
     activeCallMode = mode;
     isCallAccepted = false;
@@ -5008,6 +5049,7 @@ try {
     await _stopIncomingRingtone();
     await _stopCallTonesOutgoing();
 
+    _isCallInitiator = false;
     final contact = knownContacts[pid];
     activeCallPeerId = pid;
     activeCallMode = incomingCallMode;
@@ -5690,6 +5732,10 @@ try {
   Future<void> deleteMessageForEveryone(
       String chatId, String targetMsgId) async {
     deletedMessageIds.add(targetMsgId);
+    _revokedFileIds.add(targetMsgId);
+    final streamKey = '${targetMsgId}_$chatId';
+    _activeFileStreamGen[streamKey] = (_activeFileStreamGen[streamKey] ?? 0) + 1;
+    offeredFileCatalog.remove(targetMsgId);
     getMessagesFor(chatId).removeWhere((m) => m.msgId == targetMsgId);
     transitBuffer.remove(targetMsgId);
     myPersistentOutbox.remove(targetMsgId);
@@ -6176,7 +6222,7 @@ try {
     });
 
     if (Platform.isWindows) unawaited(_cleanupWindowsOldUpdateFiles());
-    _addLog('Защищенный узел v3.1.6 готов (порт $listenPort)');
+    _addLog('Защищенный узел v3.2.0 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -7360,7 +7406,17 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
   }
 
   Future<void> togglePlayAudioFile(String filePath) async {
+    final lower = filePath.toLowerCase();
+    final isLegacyM4a = lower.endsWith('.m4a') || lower.endsWith('.aac');
+    if (Platform.isWindows || !isLegacyM4a) {
+      if (Platform.isAndroid) {
+        try { await _nativeChannel.invokeMethod('stopAudioFile'); } catch (_) {}
+      }
+      await soloudPlayer.togglePlayFile(filePath);
+      return;
+    }
     if (Platform.isAndroid) {
+      await soloudPlayer.stop();
       final info = await _nativeChannel
           .invokeMapMethod<String, dynamic>('playAudioFile', {'path': filePath});
       if (info != null) {
@@ -7371,29 +7427,6 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         _startAudioProgressPolling();
         onStateChanged();
       }
-    } else if (Platform.isWindows) {
-      await _ensureWinMediaAudioPlayer();
-      if (_winAudioProc == null) return;
-      if (currentlyPlayingAudioPath == filePath) {
-        if (isAudioPlaying) {
-          _winAudioProc!.stdin.writeln('PAUSE');
-          isAudioPlaying = false;
-        } else {
-          _winAudioProc!.stdin.writeln('PLAY');
-          isAudioPlaying = true;
-        }
-        onStateChanged();
-        return;
-      }
-      final absPath = File(filePath).absolute.path;
-      audioPositionMs = 0;
-      audioDurationMs = 1000;
-      currentlyPlayingAudioPath = filePath;
-      isAudioPlaying = true;
-      final b64Path = base64Encode(utf8.encode(absPath));
-      _addLog('[AUDIO] Воспроизведение на ПК: $absPath (exists=${File(absPath).existsSync()})', triggerUi: false);
-      _winAudioProc!.stdin.writeln('LOAD64|$b64Path');
-      onStateChanged();
     }
   }
 
@@ -7401,28 +7434,25 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final targetMs = newPositionMs.clamp(0, audioDurationMs);
     audioPositionMs = targetMs;
     onStateChanged();
+    if (soloudPlayer.currentPath != null) {
+      await soloudPlayer.seek(targetMs);
+      return;
+    }
     if (Platform.isAndroid) {
       await _nativeChannel
           .invokeMethod('seekAudioFile', {'positionMs': targetMs});
-    } else if (Platform.isWindows &&
-        currentlyPlayingAudioPath != null &&
-        _winAudioProc != null) {
-      _winAudioProc!.stdin.writeln('SEEK|$targetMs');
     }
   }
 
   Future<void> stopAudioPlayback() async {
     _audioProgressTimer?.cancel();
+    await soloudPlayer.stop();
     currentlyPlayingAudioPath = null;
     isAudioPlaying = false;
     audioPositionMs = 0;
     if (Platform.isAndroid) {
       try {
         await _nativeChannel.invokeMethod('stopAudioFile');
-      } catch (_) {}
-    } else if (Platform.isWindows) {
-      try {
-        _winAudioProc?.stdin.writeln('STOP');
       } catch (_) {}
     }
     onStateChanged();
@@ -9235,6 +9265,47 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           unawaited(_stopCallMediaPipelines());
           unawaited(_playCallEndTone());
         }
+      } else if (kind == 'WEBRTC_SDP_PART') {
+        final sid = (envelope['sid'] ?? '').toString();
+        final sk = (envelope['sk'] ?? '').toString();
+        final idx = (envelope['idx'] as num?)?.toInt() ?? 0;
+        final tot = (envelope['tot'] as num?)?.toInt() ?? 1;
+        final partData = (envelope['d'] ?? '').toString();
+        if (sid.isNotEmpty && sk.isNotEmpty && tot > 0 && tot <= 64) {
+          final bucket = _incomingSdpParts.putIfAbsent(sid, () => {});
+          bucket[idx] = partData;
+          if (bucket.length >= tot) {
+            _incomingSdpParts.remove(sid);
+            final sb = StringBuffer();
+            for (int i = 0; i < tot; i++) {
+              sb.write(bucket[i] ?? '');
+            }
+            try {
+              final decoded = jsonDecode(sb.toString()) as Map<String, dynamic>;
+              unawaited(webrtc.handleSignal(sk, decoded));
+            } catch (e) {
+              _addLog('[RTC] Ошибка сборки SDP $sk: $e', triggerUi: false);
+            }
+          }
+        }
+      } else if (kind == 'WEBRTC_ICE') {
+        unawaited(webrtc.handleSignal('WEBRTC_ICE', envelope));
+      } else if (kind == 'FILE_REVOKED') {
+        final fid = (envelope['fid'] ?? '').toString();
+        if (fid.isNotEmpty) {
+          _revokedFileIds.add(fid);
+          deletedMessageIds.add(fid);
+          _downloadWatchdogTimers.remove(fid)?.cancel();
+          final asm = _incomingFiles.remove(fid);
+          if (asm != null) {
+            try { await asm.openRaf?.close(); } catch (_) {}
+            try { await File(asm.partFilePath).delete(); } catch (_) {}
+          }
+          getMessagesFor(senderId).removeWhere((m) => m.msgId == fid);
+          unawaited(_saveContactsAndChats());
+          onStateChanged();
+          _addLog('[FILE] Файл $fid отозван отправителем — загрузка отменена');
+        }
       } else if (kind == 'FILE_MISSING') {
         final fid = (envelope['fid'] ?? '').toString();
         _downloadWatchdogTimers.remove(fid)?.cancel();
@@ -9608,6 +9679,14 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final chunkBytes = base64Decode((env['b64'] as String?) ?? '');
 
     if (tot <= 0 || tot > 40000 || totalSize > 1050 * 1024 * 1024) return;
+    if (deletedMessageIds.contains(fileId) || _revokedFileIds.contains(fileId)) {
+      final stale = _incomingFiles.remove(fileId);
+      if (stale != null) {
+        try { await stale.openRaf?.close(); } catch (_) {}
+        try { await File(stale.partFilePath).delete(); } catch (_) {}
+      }
+      return;
+    }
 
     final now = DateTime.now().millisecondsSinceEpoch;
     final expiredIds = <String>[];
@@ -9666,22 +9745,10 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     }
 
     if (existingMsg == null) {
-      existingMsg = ChatMessage(
-        msgId: fileId,
-        peerId: senderId,
-        senderId: senderId,
-        senderName: contact.displayTitle,
-        text: '📎 $fileName',
-        timestamp: now,
-        isMe: false,
-        isDelivered: false,
-        fileName: fileName,
-        fileSize: totalSize,
-        isMediaRevealed: false,
-        isDownloading: true,
-        transferProgress: assembly.receivedChunkIndices.length / tot,
-      );
-      msgs.add(existingMsg);
+      _incomingFiles.remove(fileId);
+      try { await assembly.openRaf?.close(); } catch (_) {}
+      try { await File(partPath).delete(); } catch (_) {}
+      return;
     } else {
       existingMsg.isDownloading = true;
       existingMsg.transferProgress =
@@ -9736,7 +9803,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       return;
     }
     if (assembly.receivedChunkIndices.length <= 1 ||
-        now - _lastFileUiNotifyMs >= 250) {
+        now - _lastFileUiNotifyMs >= 400) {
       _lastFileUiNotifyMs = now;
       onStateChanged();
     }
