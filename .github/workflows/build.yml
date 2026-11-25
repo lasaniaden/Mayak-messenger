@@ -2737,10 +2737,47 @@ jobs:
             fi
           done
 
+      - name: Cache Gradle Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-v1-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: |
+            gradle-v1-${{ runner.os }}-
+
+      - name: Configure Google Maven Central Mirror (Avoid 429 Rate Limits)
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat << 'GRADLE_EOF' > ~/.gradle/init.d/maven-mirror.gradle
+          def mirrorUrl = 'https://maven-central.storage-download.googleapis.com/maven2/'
+          def rewriteRepos = { repos ->
+              if (repos != null) {
+                  repos.all { repo ->
+                      if (repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository) {
+                          def u = repo.url.toString()
+                          if (u.startsWith('https://repo.maven.apache.org/maven2') || u.startsWith('https://repo1.maven.org/maven2')) {
+                              repo.setUrl(mirrorUrl)
+                          }
+                      }
+                  }
+              }
+          }
+          gradle.settingsEvaluated { settings ->
+              rewriteRepos(settings.pluginManagement.repositories)
+              rewriteRepos(settings.dependencyResolutionManagement.repositories)
+          }
+          allprojects {
+              rewriteRepos(buildscript.repositories)
+              rewriteRepos(repositories)
+          }
+          GRADLE_EOF
+
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Obfuscated Release APK
+      - name: Build Release APK
         run: flutter build apk --release --build-name=3.1.0 --build-number=$((3100 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact

@@ -7480,11 +7480,12 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       );
       return;
     }
-    final file = File(filePath);
+    final resolvedFilePath = filePath;
+    final file = File(resolvedFilePath);
 
     final totalSize = await file.length();
     if (totalSize <= 0) return;
-    final cleanFileName = _sanitizeFileName(filePath.split(RegExp(r'[\\/]')).last);
+    final cleanFileName = _sanitizeFileName(resolvedFilePath.split(RegExp(r'[\\/]')).last);
     final isUdpOnlyPeer = !_tcpPeers.containsValue(targetNodeId) &&
         !_blePeers.containsValue(targetNodeId) &&
         _remoteUdpPeers.containsKey(targetNodeId);
@@ -7496,7 +7497,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       () => PendingFileJob(
         fileId: fileId,
         targetNodeId: targetNodeId,
-        filePath: filePath,
+        filePath: resolvedFilePath,
         fileName: cleanFileName,
         confirmedChunkIndex: 0,
       ),
