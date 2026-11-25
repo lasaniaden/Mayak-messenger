@@ -1180,7 +1180,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.1.5';
+  static const String currentAppVersion = '3.1.6';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -2108,128 +2108,100 @@ class MeshEngine {
         final exePath = Platform.resolvedExecutable;
         final appDir = File(exePath).parent.path;
         final exeName = exePath.split(RegExp(r'[\\/]')).last;
-        final curPid = pid;
-        final psZip = outFile.path.replaceAll("'", "''");
-        final psDir = appDir.replaceAll("'", "''");
-        final psExeName = exeName.replaceAll("'", "''");
-        final psStage = '${tmpDir.path}${sep}mayak_stage_${info.version}_${DateTime.now().millisecondsSinceEpoch}'.replaceAll("'", "''");
-        final psScriptPath = '${tmpDir.path}${sep}mayak_updater_${info.version}.ps1';
-        final psLogPath = '${tmpDir.path}${sep}mayak_updater.log'.replaceAll("'", "''");
+        final stageDir = Directory('$appDir${sep}_mayak_upd_stage');
+        try {
+          if (await stageDir.exists()) {
+            await stageDir.delete(recursive: true);
+          }
+          await stageDir.create(recursive: true);
 
-        final psBody = '''
-\$ErrorActionPreference = 'Stop'
-Set-Location \$env:TEMP
-\$log = '$psLogPath'
-function Log(\$m) {
-  \$line = "[MayakUpdater] " + (Get-Date -Format "HH:mm:ss") + " " + \$m
-  Write-Host \$line
-  Add-Content -LiteralPath \$log -Value \$line -ErrorAction SilentlyContinue
-}
-try {
-  \$zipPath = '$psZip'
-  \$appDir = '$psDir'
-  \$stageDir = '$psStage'
-  \$exeName = '$psExeName'
-  \$backupDir = \$appDir + '_old_backup'
+          _addLog('[UPD] Распаковка архива (${outFile.lengthSync()} Б) чистым Dart...');
+          final zipBytes = await outFile.readAsBytes();
+          final extractedCount = await _extractZipBytesPureDart(zipBytes, stageDir.path);
+          if (extractedCount <= 0) {
+            throw Exception('Архив пуст или повреждён');
+          }
 
-  Log "Ожидание закрытия Маяка (PID $curPid)..."
-  try { Wait-Process -Id $curPid -Timeout 6 -ErrorAction SilentlyContinue } catch {}
-  try {
-    \$still = Get-Process -Id $curPid -ErrorAction SilentlyContinue
-    if (\$still) { Stop-Process -Id $curPid -Force -ErrorAction SilentlyContinue }
-  } catch {}
-  Get-Process -Name 'p2p_mesh' -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-      if (\$_.Path -and \$_.Path.StartsWith(\$appDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Stop-Process -Id \$_.Id -Force -ErrorAction SilentlyContinue
-      }
-    } catch {}
-  }
-  Start-Sleep -Milliseconds 1200
+          // Ищем корень распакованной сборки (где лежит p2p_mesh.exe)
+          String srcRoot = stageDir.path;
+          if (!await File('$srcRoot$sep$exeName').exists()) {
+            await for (final ent in stageDir.list(recursive: true)) {
+              if (ent is File &&
+                  ent.path.toLowerCase().endsWith('$sep${exeName.toLowerCase()}')) {
+                srcRoot = ent.parent.path;
+                break;
+              }
+            }
+          }
+          final stagedExe = File('$srcRoot$sep$exeName');
+          if (!await stagedExe.exists() || await stagedExe.length() < 50000) {
+            throw Exception('В архиве не найден корректный $exeName');
+          }
 
-  Log "Распаковка архива во временную папку..."
-  if (Test-Path -LiteralPath \$stageDir) { Remove-Item -LiteralPath \$stageDir -Recurse -Force -ErrorAction SilentlyContinue }
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  [System.IO.Compression.ZipFile]::ExtractToDirectory(\$zipPath, \$stageDir)
+          // Атомарная замена файлов на лету (схема TGWSProxy / Telegram Desktop):
+          // Windows NTFS разрешает переименовывать запущенный .exe и загруженные .dll в .old без PowerShell!
+          final srcRootNorm = srcRoot.endsWith(sep) ? srcRoot : '$srcRoot$sep';
+          int replacedCount = 0;
+          await for (final ent in Directory(srcRoot).list(recursive: true)) {
+            if (ent is! File) continue;
+            final rel = ent.path.substring(srcRootNorm.length);
+            if (rel.isEmpty || rel.contains('..')) continue;
+            final destPath = '$appDir$sep$rel';
+            final destFile = File(destPath);
+            if (!await destFile.parent.exists()) {
+              await destFile.parent.create(recursive: true);
+            }
+            if (await destFile.exists()) {
+              final oldPath = '$destPath.old';
+              final oldFile = File(oldPath);
+              if (await oldFile.exists()) {
+                try {
+                  await oldFile.delete();
+                } catch (_) {
+                  try {
+                    await oldFile.rename('$destPath.old_${DateTime.now().millisecondsSinceEpoch}');
+                  } catch (_) {}
+                }
+              }
+              await destFile.rename(oldPath);
+            }
+            await ent.rename(destPath);
+            replacedCount++;
+          }
 
-  \$srcDir = \$stageDir
-  if (-not (Test-Path -LiteralPath (Join-Path \$srcDir \$exeName))) {
-    \$foundExe = Get-ChildItem -LiteralPath \$stageDir -Filter \$exeName -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (\$foundExe) { \$srcDir = \$foundExe.DirectoryName }
-  }
-  if (-not (Test-Path -LiteralPath (Join-Path \$srcDir \$exeName))) {
-    throw "В архиве не найден \$exeName"
-  }
+          try {
+            await stageDir.delete(recursive: true);
+          } catch (_) {}
+          try {
+            await outFile.delete();
+          } catch (_) {}
 
-  Log "Удаление старой папки и установка новой версии в \$appDir..."
-  if (Test-Path -LiteralPath \$backupDir) { Remove-Item -LiteralPath \$backupDir -Recurse -Force -ErrorAction SilentlyContinue }
-  \$replaced = \$false
-  for (\$attempt = 1; \$attempt -le 6; \$attempt++) {
-    try {
-      if (Test-Path -LiteralPath \$appDir) {
-        Rename-Item -LiteralPath \$appDir -NewName (Split-Path -Leaf \$backupDir) -ErrorAction Stop
-      }
-      New-Item -ItemType Directory -Path \$appDir -Force | Out-Null
-      Copy-Item -Path (Join-Path \$srcDir '*') -Destination \$appDir -Recurse -Force -ErrorAction Stop
-      if (Test-Path -LiteralPath (Join-Path \$appDir \$exeName)) {
-        \$replaced = \$true
-        break
-      }
-    } catch {
-      Log ("Попытка \$attempt не удалась: " + \$_.Exception.Message)
-      if (-not (Test-Path -LiteralPath \$appDir) -and (Test-Path -LiteralPath \$backupDir)) {
-        Rename-Item -LiteralPath \$backupDir -NewName (Split-Path -Leaf \$appDir) -ErrorAction SilentlyContinue
-      }
-      Start-Sleep -Milliseconds 1200
-    }
-  }
+          _addLog('[UPD] Заменено файлов: $replacedCount -> перезапуск на v${info.version}');
 
-  if (-not \$replaced) {
-    Log "Пробую прямую очистку содержимого папки..."
-    Get-ChildItem -LiteralPath \$appDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    Copy-Item -Path (Join-Path \$srcDir '*') -Destination \$appDir -Recurse -Force -ErrorAction Stop
-  }
-
-  if (Test-Path -LiteralPath \$backupDir) {
-    Remove-Item -LiteralPath \$backupDir -Recurse -Force -ErrorAction SilentlyContinue
-  }
-  Remove-Item -LiteralPath \$stageDir -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath \$zipPath -Force -ErrorAction SilentlyContinue
-
-  \$newExe = Join-Path \$appDir \$exeName
-  Log "Запуск обновлённого Маяка: \$newExe"
-  Start-Sleep -Milliseconds 500
-  Start-Process -FilePath \$newExe -WorkingDirectory \$appDir
-} catch {
-  Log ("ОШИБКА ОБНОВЛЕНИЯ: " + \$_.Exception.Message)
-  if ((Test-Path -LiteralPath (\$appDir + '_old_backup')) -and -not (Test-Path -LiteralPath \$appDir)) {
-    Rename-Item -LiteralPath (\$appDir + '_old_backup') -NewName (Split-Path -Leaf \$appDir) -ErrorAction SilentlyContinue
-  }
-} finally {
-  Remove-Item -LiteralPath \$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-}
-''';
-
-        // UTF-8 with BOM для корректной работы с русскими путями в PowerShell 5.1
-        final psBytes = <int>[0xEF, 0xBB, 0xBF, ...utf8.encode(psBody)];
-        await File(psScriptPath).writeAsBytes(psBytes, flush: true);
-
-        await Process.start(
-          'powershell.exe',
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScriptPath],
-          workingDirectory: tmpDir.path,
-          mode: ProcessStartMode.detached,
-        );
-        // Закрываем сокеты и выходим, чтобы папка и Single-Instance Mutex мгновенно освободились
-        Future.delayed(const Duration(milliseconds: 200), () async {
+          // Закрываем сокеты, запускаем новый p2p_mesh.exe --updated и выходим
           try {
             await _tcpServer?.close();
             await _tcpServerV6?.close();
             _callUdpSocket?.close();
+            _winAudioProc?.kill();
+            _winVideoProcess?.kill();
           } catch (_) {}
-          exit(0);
-        });
-        return 'Обновление загружено — закрываю Маяк для замены папки и перезапуска...';
+
+          await Process.start(
+            exePath,
+            ['--updated'],
+            workingDirectory: appDir,
+            mode: ProcessStartMode.detached,
+          );
+          Future.delayed(const Duration(milliseconds: 150), () => exit(0));
+          return 'Обновление v${info.version} установлено ($replacedCount файлов) — перезапускаю Маяк...';
+        } catch (e) {
+          _addLog('[UPD] Ошибка автообновления: $e');
+          try {
+            if (await stageDir.exists()) await stageDir.delete(recursive: true);
+          } catch (_) {}
+          return 'Ошибка автообновления: $e';
+        }
       }
       return 'Сохранено: ${outFile.path}';
     } catch (e) {
@@ -2237,6 +2209,95 @@ try {
     } finally {
       client.close(force: true);
     }
+  }
+
+  /// Чистая Dart-распаковка ZIP (без PowerShell, .bat и внешних процессов — 100% чисто для Dr.Web)
+  Future<int> _extractZipBytesPureDart(Uint8List bytes, String destDir) async {
+    if (bytes.length < 22) return 0;
+    final bd = ByteData.sublistView(bytes);
+    // Ищем End of Central Directory (0x06054b50) с конца файла
+    int eocdOff = -1;
+    final minOff = max(0, bytes.length - 65557);
+    for (int i = bytes.length - 22; i >= minOff; i--) {
+      if (bytes[i] == 0x50 &&
+          bytes[i + 1] == 0x4B &&
+          bytes[i + 2] == 0x05 &&
+          bytes[i + 3] == 0x06) {
+        eocdOff = i;
+        break;
+      }
+    }
+    if (eocdOff < 0) return 0;
+    final totalEntries = bd.getUint16(eocdOff + 10, Endian.little);
+    final cdOffset = bd.getUint32(eocdOff + 16, Endian.little);
+    int pos = cdOffset;
+    int extracted = 0;
+    final sep = Platform.pathSeparator;
+
+    for (int idx = 0; idx < totalEntries; idx++) {
+      if (pos + 46 > bytes.length) break;
+      final sig = bd.getUint32(pos, Endian.little);
+      if (sig != 0x02014B50) break;
+      final method = bd.getUint16(pos + 10, Endian.little);
+      final compSize = bd.getUint32(pos + 20, Endian.little);
+      final nameLen = bd.getUint16(pos + 28, Endian.little);
+      final extraLen = bd.getUint16(pos + 30, Endian.little);
+      final commentLen = bd.getUint16(pos + 32, Endian.little);
+      final localHdrOff = bd.getUint32(pos + 42, Endian.little);
+      final rawName = utf8.decode(
+        bytes.sublist(pos + 46, pos + 46 + nameLen),
+        allowMalformed: true,
+      );
+      pos += 46 + nameLen + extraLen + commentLen;
+
+      final normName = rawName.replaceAll('\\', '/');
+      if (normName.isEmpty || normName.startsWith('/') || normName.contains('..')) {
+        continue;
+      }
+      if (normName.endsWith('/')) {
+        await Directory('$destDir$sep${normName.replaceAll('/', sep)}')
+            .create(recursive: true);
+        continue;
+      }
+      if (localHdrOff + 30 > bytes.length) continue;
+      final lNameLen = bd.getUint16(localHdrOff + 26, Endian.little);
+      final lExtraLen = bd.getUint16(localHdrOff + 28, Endian.little);
+      final dataStart = localHdrOff + 30 + lNameLen + lExtraLen;
+      if (dataStart + compSize > bytes.length) continue;
+
+      final compressed = bytes.sublist(dataStart, dataStart + compSize);
+      List<int> content;
+      if (method == 0) {
+        content = compressed;
+      } else if (method == 8) {
+        content = ZLibDecoder(raw: true).convert(compressed);
+      } else {
+        continue;
+      }
+      final outPath = '$destDir$sep${normName.replaceAll('/', sep)}';
+      final outFile = File(outPath);
+      if (!await outFile.parent.exists()) {
+        await outFile.parent.create(recursive: true);
+      }
+      await outFile.writeAsBytes(content, flush: true);
+      extracted++;
+    }
+    return extracted;
+  }
+
+  Future<void> _cleanupWindowsOldUpdateFiles() async {
+    if (!Platform.isWindows) return;
+    try {
+      final appDir = File(Platform.resolvedExecutable).parent;
+      await for (final ent in appDir.list(recursive: true)) {
+        if (ent is File &&
+            (ent.path.endsWith('.old') || ent.path.contains('.old_'))) {
+          try {
+            await ent.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   String buildDiagnosticLogReport() {
@@ -6114,7 +6175,8 @@ try {
       }
     });
 
-    _addLog('Защищенный узел v3.1.5 готов (порт $listenPort)');
+    if (Platform.isWindows) unawaited(_cleanupWindowsOldUpdateFiles());
+    _addLog('Защищенный узел v3.1.6 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }

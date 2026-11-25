@@ -12,18 +12,29 @@ def main():
         assert anchor in main_cpp, "wWinMain anchor missing in main.cpp"
         idx = main_cpp.index("{", main_cpp.index(anchor)) + 1
         mutex_code = (
-            "\n  // v3.0.0: Single-Instance protection (prevents duplicate tray icons & port conflicts)\n"
-            '  HANDLE hSingleMutex = ::CreateMutexW(nullptr, TRUE, L"Local\\\\MayakMeshSingleInstanceMutex_v3");\n'
-            "  if (hSingleMutex != nullptr && ::GetLastError() == ERROR_ALREADY_EXISTS) {\n"
-            '    HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", nullptr);\n'
-            "    if (existing != nullptr) {\n"
-            "      ::PostMessageW(existing, WM_APP + 102, 0, 0);\n"
-            "      ::ShowWindow(existing, SW_SHOW);\n"
-            "      ::ShowWindow(existing, SW_RESTORE);\n"
-            "      ::SetForegroundWindow(existing);\n"
+            "\n  // v3.1.6: Single-Instance protection with --updated graceful handoff wait\n"
+            '  bool isUpdatedRelaunch = (command_line != nullptr && ::wcsstr(command_line, L"--updated") != nullptr);\n'
+            '  HANDLE hSingleMutex = nullptr;\n'
+            "  for (int attempt = 0; attempt < (isUpdatedRelaunch ? 30 : 1); ++attempt) {\n"
+            '    hSingleMutex = ::CreateMutexW(nullptr, TRUE, L"Local\\\\MayakMeshSingleInstanceMutex_v3");\n'
+            "    if (hSingleMutex != nullptr && ::GetLastError() == ERROR_ALREADY_EXISTS) {\n"
+            "      if (isUpdatedRelaunch && attempt < 29) {\n"
+            "        ::CloseHandle(hSingleMutex);\n"
+            "        hSingleMutex = nullptr;\n"
+            "        ::Sleep(200);\n"
+            "        continue;\n"
+            "      }\n"
+            '      HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", nullptr);\n'
+            "      if (existing != nullptr) {\n"
+            "        ::PostMessageW(existing, WM_APP + 102, 0, 0);\n"
+            "        ::ShowWindow(existing, SW_SHOW);\n"
+            "        ::ShowWindow(existing, SW_RESTORE);\n"
+            "        ::SetForegroundWindow(existing);\n"
+            "      }\n"
+            "      ::CloseHandle(hSingleMutex);\n"
+            "      return EXIT_SUCCESS;\n"
             "    }\n"
-            "    ::CloseHandle(hSingleMutex);\n"
-            "    return EXIT_SUCCESS;\n"
+            "    break;\n"
             "  }\n"
         )
         main_cpp = main_cpp[:idx] + mutex_code + main_cpp[idx:]
