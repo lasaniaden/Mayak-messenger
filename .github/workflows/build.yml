@@ -129,7 +129,7 @@ jobs:
                   minSdk = 24
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.2.1"
+                  versionName = "3.2.2"
               }}
 
               packaging {{
@@ -197,7 +197,7 @@ jobs:
                   minSdkVersion 24
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.2.1"
+                  versionName "3.2.2"
               }}
 
               packagingOptions {{
@@ -1341,11 +1341,11 @@ jobs:
                   val totalDataLen = pcmBytes + 36
                   val byteRate = sampleRate * 2L
                   val hdr = ByteArray(44)
-                  hdr[0] = 'R'.code.toByte(); hdr[1] = 'I'.code.toByte(); hdr[2] = 'F'.code.toByte(); hdr[3] = 'F'.code.toByte()
+                  hdr[0] = 0x52.toByte(); hdr[1] = 0x49.toByte(); hdr[2] = 0x46.toByte(); hdr[3] = 0x46.toByte()
                   hdr[4] = (totalDataLen and 0xff).toByte(); hdr[5] = ((totalDataLen shr 8) and 0xff).toByte()
                   hdr[6] = ((totalDataLen shr 16) and 0xff).toByte(); hdr[7] = ((totalDataLen shr 24) and 0xff).toByte()
-                  hdr[8] = 'W'.code.toByte(); hdr[9] = 'A'.code.toByte(); hdr[10] = 'V'.code.toByte(); hdr[11] = 'E'.code.toByte()
-                  hdr[12] = 'f'.code.toByte(); hdr[13] = 'm'.code.toByte(); hdr[14] = 't'.code.toByte(); hdr[15] = ' '.code.toByte()
+                  hdr[8] = 0x57.toByte(); hdr[9] = 0x41.toByte(); hdr[10] = 0x56.toByte(); hdr[11] = 0x45.toByte()
+                  hdr[12] = 0x66.toByte(); hdr[13] = 0x6D.toByte(); hdr[14] = 0x74.toByte(); hdr[15] = 0x20.toByte()
                   hdr[16] = 16; hdr[17] = 0; hdr[18] = 0; hdr[19] = 0
                   hdr[20] = 1; hdr[21] = 0; hdr[22] = 1; hdr[23] = 0
                   hdr[24] = (sampleRate and 0xff).toByte(); hdr[25] = ((sampleRate shr 8) and 0xff).toByte()
@@ -1353,7 +1353,7 @@ jobs:
                   hdr[28] = (byteRate and 0xff).toByte(); hdr[29] = ((byteRate shr 8) and 0xff).toByte()
                   hdr[30] = ((byteRate shr 16) and 0xff).toByte(); hdr[31] = ((byteRate shr 24) and 0xff).toByte()
                   hdr[32] = 2; hdr[33] = 0; hdr[34] = 16; hdr[35] = 0
-                  hdr[36] = 'd'.code.toByte(); hdr[37] = 'a'.code.toByte(); hdr[38] = 't'.code.toByte(); hdr[39] = 'a'.code.toByte()
+                  hdr[36] = 0x64.toByte(); hdr[37] = 0x61.toByte(); hdr[38] = 0x74.toByte(); hdr[39] = 0x61.toByte()
                   hdr[40] = (pcmBytes and 0xff).toByte(); hdr[41] = ((pcmBytes shr 8) and 0xff).toByte()
                   hdr[42] = ((pcmBytes shr 16) and 0xff).toByte(); hdr[43] = ((pcmBytes shr 24) and 0xff).toByte()
                   out.seek(0)
@@ -2829,7 +2829,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release --build-name=3.2.1 --build-number=$((3210 + ${GITHUB_RUN_NUMBER:-1}))
+        run: flutter build apk --release --build-name=3.2.2 --build-number=$((3220 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

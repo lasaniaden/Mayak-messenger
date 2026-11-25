@@ -1181,7 +1181,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.2.1';
+  static const String currentAppVersion = '3.2.2';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -6222,7 +6222,7 @@ try {
     });
 
     if (Platform.isWindows) unawaited(_cleanupWindowsOldUpdateFiles());
-    _addLog('Защищенный узел v3.2.1 готов (порт $listenPort)');
+    _addLog('Защищенный узел v3.2.2 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
