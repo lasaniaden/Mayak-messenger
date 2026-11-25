@@ -3577,11 +3577,16 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                           fontWeight: FontWeight.bold, fontSize: 12),
                     ),
                     Text(
-                      m.isDownloading
-                          ? 'Скачивание ${(m.transferProgress * 100).toInt()}%...'
-                          : 'Нажмите, чтобы скачать (${m.fileSizeFormatted})',
-                      style: const TextStyle(
-                          fontSize: 11, color: MayakTheme.accentCyan),
+                      m.text.contains('(удалён отправителем)')
+                          ? 'Файл удалён у отправителя'
+                          : (m.isDownloading
+                              ? 'Скачивание ${(m.transferProgress * 100).toInt()}%...'
+                              : 'Нажмите, чтобы скачать (${m.fileSizeFormatted})'),
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: m.text.contains('(удалён отправителем)')
+                              ? Colors.white54
+                              : MayakTheme.accentCyan),
                     ),
                   ],
                 ),
@@ -3965,11 +3970,13 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                             ),
                           ),
                           Text(
-                            m.isDownloading
-                                ? 'Скачивание ${(m.transferProgress * 100).toInt()}% (${m.fileSizeFormatted})'
-                                : (hasFileOnDisk
-                                    ? 'Скачан в кэш (${m.fileSizeFormatted})'
-                                    : 'Доступен для скачивания (${m.fileSizeFormatted})'),
+                            m.text.contains('(удалён отправителем)')
+                                ? 'Файл удалён у отправителя'
+                                : (m.isDownloading
+                                    ? 'Скачивание ${(m.transferProgress * 100).toInt()}% (${m.fileSizeFormatted})'
+                                    : (hasFileOnDisk
+                                        ? 'Скачан в кэш (${m.fileSizeFormatted})'
+                                        : 'Доступен для скачивания (${m.fileSizeFormatted})')),
                             style: const TextStyle(
                                 fontSize: 11, color: Colors.white70),
                           ),

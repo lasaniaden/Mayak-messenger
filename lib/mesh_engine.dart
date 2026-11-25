@@ -307,6 +307,11 @@ class WindowsPcmAudioBridge {
     _micMuted = muted;
   }
 
+  static bool isRecentlyPlaying(int windowMs) {
+    if (_lastOutPlayMs <= 0) return false;
+    return (DateTime.now().millisecondsSinceEpoch - _lastOutPlayMs) < windowMs;
+  }
+
   static bool startFullDuplex(void Function(Uint8List pcm) onCaptured) {
     if (!Platform.isWindows) return false;
     stopFullDuplex();
@@ -348,7 +353,7 @@ class WindowsPcmAudioBridge {
           final hdr = _inHdrs[i];
           if ((hdr.ref.dwFlags & _whdrDone) != 0) {
             final recLen = hdr.ref.dwBytesRecorded;
-            if (recLen > 0 && !_micMuted && _onCaptured != null) {
+            if (recLen > 0 && recLen <= _inChunkBytes && !_micMuted && _onCaptured != null) {
               final copy = Uint8List.fromList(
                   _inBufs[i].asTypedList(recLen));
               _onCaptured!(copy);
@@ -374,9 +379,16 @@ class WindowsPcmAudioBridge {
     _inPollTimer = null;
     _onCaptured = null;
     if (_hWaveIn != 0) {
-      try { _waveInReset!(_hWaveIn); } catch (_) {}
+      final hIn = _hWaveIn;
+      _hWaveIn = 0;
+      try { _waveInReset!(hIn); } catch (_) {}
       for (final hdr in _inHdrs) {
-        try { _waveInUnprepare!(_hWaveIn, hdr, sizeOf<_WaveHdr>()); } catch (_) {}
+        if ((hdr.ref.dwFlags & _whdrPrepared) != 0) {
+          try { _waveInUnprepare!(hIn, hdr, sizeOf<_WaveHdr>()); } catch (_) {}
+        }
+      }
+      try { _waveInClose!(hIn); } catch (_) {}
+      for (final hdr in _inHdrs) {
         try { _free!(hdr.cast()); } catch (_) {}
       }
       for (final buf in _inBufs) {
@@ -384,8 +396,6 @@ class WindowsPcmAudioBridge {
       }
       _inHdrs.clear();
       _inBufs.clear();
-      try { _waveInClose!(_hWaveIn); } catch (_) {}
-      _hWaveIn = 0;
     }
     if (_hWaveOut != 0 && _toneTimer == null) {
       _closeOutput();
@@ -394,9 +404,16 @@ class WindowsPcmAudioBridge {
 
   static void _closeOutput() {
     if (_hWaveOut == 0) return;
-    try { _waveOutReset!(_hWaveOut); } catch (_) {}
+    final hOut = _hWaveOut;
+    _hWaveOut = 0;
+    try { _waveOutReset!(hOut); } catch (_) {}
     for (final hdr in _outHdrs) {
-      try { _waveOutUnprepare!(_hWaveOut, hdr, sizeOf<_WaveHdr>()); } catch (_) {}
+      if ((hdr.ref.dwFlags & _whdrPrepared) != 0) {
+        try { _waveOutUnprepare!(hOut, hdr, sizeOf<_WaveHdr>()); } catch (_) {}
+      }
+    }
+    try { _waveOutClose!(hOut); } catch (_) {}
+    for (final hdr in _outHdrs) {
       try { _free!(hdr.cast()); } catch (_) {}
     }
     for (final buf in _outBufs) {
@@ -404,8 +421,6 @@ class WindowsPcmAudioBridge {
     }
     _outHdrs.clear();
     _outBufs.clear();
-    try { _waveOutClose!(_hWaveOut); } catch (_) {}
-    _hWaveOut = 0;
   }
 
   static Uint8List _synthTone(double freq1, double freq2, int durationMs,
@@ -1266,6 +1281,13 @@ class MeshEngine {
   final Map<String, IncomingFileStreamAssembly> _incomingFiles = {};
   final Map<String, PendingFileJob> pendingFileJobs = {};
   final Map<String, Completer<void>> _fileWindowAckWaiters = {};
+  Directory? _cachedFilesDir;
+  int _lastFileUiNotifyMs = 0;
+  final Map<String, int> _activeFileStreamGen = {};
+  final Map<String, Timer> _downloadWatchdogTimers = {};
+  Timer? _onlineReconnectWatchdog;
+  int _onlineReconnectTicks = 0;
+  final Map<String, int> _lastDhtAutoLookupMs = {};
   final Map<String, int> _pendingPingTimestamps = {};
   final Map<String, Completer<int>> _pingCompleters = {};
 
@@ -1289,7 +1311,7 @@ class MeshEngine {
   bool remoteCallMicMuted = false;
   bool remoteCallVideoMuted = false;
   bool isCallFrontCamera = true;
-  bool isCallSpeakerOn = true;
+  bool isCallSpeakerOn = false;
   int _callStartedMs = 0;
   int _lastCallUdpRxMs = 0;
   int _lastBleVideoTxMs = 0;
@@ -1350,6 +1372,7 @@ class MeshEngine {
   // v2.5.0: Подавление эха (AES) + авто-STUN/UPnP межрегиональный режим
   int _lastRemoteAudioRxMs = 0;
   bool _remoteVoiceActive = false;
+  double _remoteNoiseFloor = 180.0;
   bool isAutoInterRegionalEnabled = false;
   bool isDiscoveringExternalAddr = false;
   String discoveredExternalEndpoint = '';
@@ -1413,7 +1436,7 @@ class MeshEngine {
 
   bool isPeerDirectlyConnected(String peerId) {
     final u = _remoteUdpPeers[peerId];
-    final udpAlive = u != null && (DateTime.now().millisecondsSinceEpoch - u.lastSeenMs) < 35000;
+    final udpAlive = u != null && (DateTime.now().millisecondsSinceEpoch - u.lastSeenMs) < 15000;
     return _tcpPeers.containsValue(peerId) || _blePeers.containsValue(peerId) || udpAlive;
   }
 
@@ -2333,7 +2356,9 @@ class MeshEngine {
     }
     final c = knownContacts[peerId];
     if (c != null && c.lastAddress.isNotEmpty) {
-      final host = c.lastAddress.split(':').first.trim();
+      var addr = c.lastAddress.trim();
+      if (addr.startsWith('udp:')) addr = addr.substring(4);
+      final host = addr.split(':').first.trim();
       if (host.isNotEmpty && !host.startsWith('BLE')) return host;
     }
     return null;
@@ -2598,7 +2623,9 @@ class MeshEngine {
           if (remoteId.isNotEmpty && remoteId != nodeId) {
             final now = DateTime.now().millisecondsSinceEpoch;
             final prev = _remoteUdpPeers[remoteId];
-            final wasAlive = prev != null && prev.lastSeenMs > 0 && (now - prev.lastSeenMs) < 20000;
+            final wasAlive = prev != null && prev.lastSeenMs > 0 && (now - prev.lastSeenMs) < 15000;
+            final newUdpAddr = 'udp:${dg.address.address}:${dg.port}';
+            final addrChanged = prev == null || prev.ip != dg.address.address || prev.port != dg.port;
             _remoteUdpPeers[remoteId] = (
               ip: dg.address.address,
               port: dg.port,
@@ -2607,18 +2634,24 @@ class MeshEngine {
             final c = knownContacts[remoteId];
             if (c != null) {
               c.isOnline = true;
+              c.isDirectPeer = true;
               c.lastSeenTimestamp = now;
-              c.lastAddress = '${dg.address.address}:${dg.port}';
+              if (c.lastAddress != newUdpAddr) {
+                c.lastAddress = newUdpAddr;
+              }
             }
-            if (!wasAlive) {
-              _addLog('[PUNCH] UDP-туннель открыт с $remoteId (${dg.address.address}:${dg.port})');
-              _sendUdpHolePunch(dg.address.address, dg.port);
-              _sendUdpMeshJson(dg.address.address, dg.port, _buildHelloJson());
-              _sendUdpMeshJson(dg.address.address, dg.port, _buildPeerSyncJson());
-              _sendUdpMeshJson(dg.address.address, dg.port, _buildChatHistorySyncForPeer(remoteId));
-              _flushBufferedPacketsToOnlinePeers();
+            if (!wasAlive || addrChanged) {
+              if (!wasAlive) {
+                _addLog('[PUNCH] UDP-туннель открыт с $remoteId (${dg.address.address}:${dg.port})');
+                _sendUdpHolePunch(dg.address.address, dg.port);
+                _sendUdpMeshJson(dg.address.address, dg.port, _buildHelloJson());
+                _sendUdpMeshJson(dg.address.address, dg.port, _buildPeerSyncJson());
+                _sendUdpMeshJson(dg.address.address, dg.port, _buildChatHistorySyncForPeer(remoteId));
+                _flushBufferedPacketsToOnlinePeers();
+              }
+              unawaited(_saveContactsAndChats());
+              onStateChanged();
             }
-            onStateChanged();
           }
         } catch (_) {}
         return;
@@ -2633,11 +2666,18 @@ class MeshEngine {
             jsonLine,
             remoteAddr: '$senderIp:$senderPort',
             onHello: (peerId, peerNick) async {
+              final nowMs = DateTime.now().millisecondsSinceEpoch;
               _remoteUdpPeers[peerId] = (
                 ip: senderIp,
                 port: senderPort,
-                lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+                lastSeenMs: nowMs,
               );
+              final hc = knownContacts[peerId];
+              if (hc != null) {
+                hc.lastAddress = 'udp:$senderIp:$senderPort';
+                hc.lastSeenTimestamp = nowMs;
+                unawaited(_saveContactsAndChats());
+              }
               _sendUdpMeshJson(senderIp, senderPort, _buildPeerSyncJson());
               _sendUdpMeshJson(senderIp, senderPort, _buildChatHistorySyncForPeer(peerId));
               _refreshOnlineStatuses();
@@ -2758,14 +2798,31 @@ class MeshEngine {
           sumAbs += v.abs();
           cnt++;
         }
-        if (cnt > 0 && (sumAbs ~/ cnt) > 420) {
-          _lastRemoteAudioRxMs = DateTime.now().millisecondsSinceEpoch;
-          _remoteVoiceActive = true;
+        if (cnt > 0) {
+          final avgAbs = sumAbs / cnt;
+          if (avgAbs < _remoteNoiseFloor * 1.8) {
+            _remoteNoiseFloor = (_remoteNoiseFloor * 0.92 + avgAbs * 0.08).clamp(80.0, 900.0);
+          }
+          if (avgAbs > 450 && avgAbs > _remoteNoiseFloor * 2.5) {
+            _lastRemoteAudioRxMs = DateTime.now().millisecondsSinceEpoch;
+            _remoteVoiceActive = true;
+          }
+        }
+        // Мягкое усиление речи (+4 дБ с ограничителем, без клиппинга)
+        final boosted = Uint8List(pcm.length);
+        for (int i = 0; i + 1 < pcm.length; i += 2) {
+          int v = pcm[i] | (pcm[i + 1] << 8);
+          if (v >= 32768) v -= 65536;
+          int s = (v * 16) ~/ 10;
+          if (s > 32767) s = 32767;
+          if (s < -32768) s = -32768;
+          boosted[i] = s & 0xFF;
+          boosted[i + 1] = (s >> 8) & 0xFF;
         }
         if (Platform.isAndroid) {
-          unawaited(_nativeChannel.invokeMethod('playCallAudioPcm', pcm));
+          unawaited(_nativeChannel.invokeMethod('playCallAudioPcm', boosted));
         } else if (Platform.isWindows) {
-          WindowsPcmAudioBridge.playPcm(pcm);
+          WindowsPcmAudioBridge.playPcm(boosted);
         }
       } else if (type == 0x02 && chunkTotal > 0 && chunkIdx < chunkTotal) {
         if (seq <= _lastRenderedVideoSeq) return;
@@ -2801,22 +2858,29 @@ class MeshEngine {
       return;
     }
     if (activeCallPeerId == null || !isCallAccepted || isCallMicMuted) return;
-    // Мягкое подавление эха (-18 дБ), пока говорит собеседник рядом
+    // Адаптивное подавление эха на ПК (срабатывает ТОЛЬКО на реальную речь собеседника, не на тишину/шум кулера)
+    // На Android используется аппаратный AEC VOICE_COMMUNICATION без программного глушения голоса!
     Uint8List outPcm = pcm;
     final nowAes = DateTime.now().millisecondsSinceEpoch;
-    if (_remoteVoiceActive && (nowAes - _lastRemoteAudioRxMs) < 260) {
-      if (Platform.isWindows) return; // Жёсткий эхо-гейт на ПК: не возвращаем голос собеседника обратно!
-      final att = Uint8List(pcm.length);
-      for (int i = 0; i + 1 < pcm.length; i += 2) {
-        int v = pcm[i] | (pcm[i + 1] << 8);
-        if (v >= 32768) v -= 65536;
-        final scaled = (v * 5) ~/ 100;
-        att[i] = scaled & 0xFF;
-        att[i + 1] = (scaled >> 8) & 0xFF;
+    final sinceRemoteMs = nowAes - _lastRemoteAudioRxMs;
+    if (Platform.isWindows) {
+      if (_remoteVoiceActive && sinceRemoteMs < 320) {
+        final att = Uint8List(pcm.length);
+        for (int i = 0; i + 1 < pcm.length; i += 2) {
+          int v = pcm[i] | (pcm[i + 1] << 8);
+          if (v >= 32768) v -= 65536;
+          final scaled = (v * 12) ~/ 100;
+          att[i] = scaled & 0xFF;
+          att[i + 1] = (scaled >> 8) & 0xFF;
+        }
+        outPcm = att;
+      } else if (_remoteVoiceActive) {
+        _remoteVoiceActive = false;
       }
-      outPcm = att;
-    } else if (_remoteVoiceActive) {
-      _remoteVoiceActive = false;
+    } else {
+      if (_remoteVoiceActive && sinceRemoteMs >= 320) {
+        _remoteVoiceActive = false;
+      }
     }
     _callAudioSeq++;
     if (_shouldUseRelayCallTransport) {
@@ -5339,15 +5403,39 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     if (oldAsm != null) {
       try { await oldAsm.openRaf?.close(); } catch (_) {}
     }
+    if (msg.text.contains('(удалён отправителем)')) {
+      msg.isDownloading = false;
+      msg.transferProgress = 0.0;
+      onStateChanged();
+      return;
+    }
     final pullTargetId = msg.senderId == nodeId ? msg.peerId : msg.senderId;
     final contact = knownContacts[pullTargetId];
     if (contact == null) {
       _addLog('Отправитель файла не найден в списке контактов');
       return;
     }
+    if (!isPeerDirectlyConnected(pullTargetId)) {
+      _addLog('Нет прямой связи с ${contact.displayTitle} — дождитесь статуса «В сети» и попробуйте снова');
+      msg.isDownloading = false;
+      msg.transferProgress = 0.0;
+      onStateChanged();
+      return;
+    }
     msg.isDownloading = true;
     msg.transferProgress = 0.02;
     onStateChanged();
+
+    _downloadWatchdogTimers.remove(msg.msgId)?.cancel();
+    _downloadWatchdogTimers[msg.msgId] = Timer(const Duration(seconds: 12), () {
+      _downloadWatchdogTimers.remove(msg.msgId);
+      if (msg.isDownloading && msg.transferProgress <= 0.03) {
+        msg.isDownloading = false;
+        msg.transferProgress = 0.0;
+        _addLog('Таймаут скачивания «${msg.fileName ?? msg.msgId}» — нет ответа от отправителя');
+        onStateChanged();
+      }
+    });
 
     final reqId = _randomHex(12);
     final reqPayload = jsonEncode({
@@ -5361,7 +5449,8 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       contact: contact,
       msgId: reqId,
       sealedPayloadBytes: utf8.encode(reqPayload),
-      persistInOutbox: true,
+      keepInTransitBuffer: false,
+      persistInOutbox: false,
     );
     _addLog('Запрошено скачивание файла «${msg.fileName ?? msg.msgId}»...');
   }
@@ -5951,7 +6040,41 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
         }
       }
     });
-    _addLog('Защищенный узел v3.1 готов (порт $listenPort)');
+    _onlineReconnectWatchdog?.cancel();
+    _onlineReconnectTicks = 0;
+    _onlineReconnectWatchdog = Timer.periodic(const Duration(seconds: 5), (_) {
+      _onlineReconnectTicks++;
+      final changed = _refreshOnlineStatuses();
+      if (changed) onStateChanged();
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (_onlineReconnectTicks == 1 || _onlineReconnectTicks % 2 == 0) {
+        for (final c in knownContacts.values.toList()) {
+          if (isPeerDirectlyConnected(c.nodeId)) continue;
+          if (c.lastAddress.startsWith('udp:')) {
+            final parts = c.lastAddress.substring(4).split(':');
+            if (parts.length == 2) {
+              final ip = parts[0].trim();
+              final port = int.tryParse(parts[1].trim()) ?? 0;
+              if (ip.isNotEmpty && port > 0) {
+                _sendUdpHolePunch(ip, port);
+                if (_onlineReconnectTicks == 1 || _onlineReconnectTicks % 4 == 0) {
+                  _sendUdpMeshJson(ip, port, _buildHelloJson());
+                }
+              }
+            }
+          }
+          if (isAutoInterRegionalEnabled && isDhtDiscoveryEnabled) {
+            final lastLookup = _lastDhtAutoLookupMs[c.nodeId] ?? 0;
+            if (_onlineReconnectTicks == 1 || (nowMs - lastLookup) > 45000) {
+              _lastDhtAutoLookupMs[c.nodeId] = nowMs;
+              unawaited(resolveContactEndpointFromDht(c.nodeId));
+            }
+          }
+        }
+      }
+    });
+
+    _addLog('Защищенный узел v3.1.2 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -7382,7 +7505,20 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
 
     final fileId = existingFileId ?? _randomHex(12);
     final now = DateTime.now().millisecondsSinceEpoch;
-    offeredFileCatalog[fileId] = filePath;
+    String persistentPath = filePath;
+    if (totalSize <= 25 * 1024 * 1024) {
+      try {
+        final cacheDir = _cachedFilesDir ??= await _getInternalCacheFilesDir();
+        final cachedCopyPath = '${cacheDir.path}/${fileId}_$cleanFileName';
+        if (filePath != cachedCopyPath && !await File(cachedCopyPath).exists()) {
+          await file.copy(cachedCopyPath);
+        }
+        if (await File(cachedCopyPath).exists()) {
+          persistentPath = cachedCopyPath;
+        }
+      } catch (_) {}
+    }
+    offeredFileCatalog[fileId] = persistentPath;
 
     final myMsg = ChatMessage(
       msgId: fileId,
@@ -7393,7 +7529,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       timestamp: now,
       isMe: true,
       isDelivered: false,
-      filePath: filePath,
+      filePath: persistentPath,
       fileName: cleanFileName,
       fileSize: totalSize,
       thumbB64: resolvedThumbB64,
@@ -7489,11 +7625,15 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final isUdpOnlyPeer = !_tcpPeers.containsValue(targetNodeId) &&
         !_blePeers.containsValue(targetNodeId) &&
         _remoteUdpPeers.containsKey(targetNodeId);
-    final effectiveChunkSize = isUdpOnlyPeer ? 600 : fileChunkSize;
+    // 220B raw -> 296B b64 -> ~410B JSON -> 820B hex + headers = ~1230B (< 1280B safe 4G/IPv6 MTU!)
+    final effectiveChunkSize = isUdpOnlyPeer ? 220 : fileChunkSize;
     final totalChunks = (totalSize / effectiveChunkSize).ceil();
+    final streamKey = '${fileId}_$targetNodeId';
+    final myGen = (_activeFileStreamGen[streamKey] ?? 0) + 1;
+    _activeFileStreamGen[streamKey] = myGen;
 
     final job = pendingFileJobs.putIfAbsent(
-      '${fileId}_$targetNodeId',
+      streamKey,
       () => PendingFileJob(
         fileId: fileId,
         targetNodeId: targetNodeId,
@@ -7502,9 +7642,6 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         confirmedChunkIndex: 0,
       ),
     );
-    if (job.isSending) {
-      pendingFileJobs.remove('${fileId}_$targetNodeId');
-    }
     job.isSending = true;
 
     final raf = await file.open(mode: FileMode.read);
@@ -7514,7 +7651,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       final fileEphPubHex = _toHex(fileEphPub.bytes);
 
       for (int idx = 0; idx < totalChunks; idx++) {
-        if (!isPeerDirectlyConnected(targetNodeId)) {
+        if (_activeFileStreamGen[streamKey] != myGen ||
+            !isPeerDirectlyConnected(targetNodeId)) {
           break;
         }
         await raf.setPosition(idx * effectiveChunkSize);
@@ -7554,6 +7692,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           precomputedEphPubHex: fileEphPubHex,
           keepInTransitBuffer: false,
           persistInOutbox: false,
+          skipPadding: isUdpOnlyPeer,
         );
 
         if (winWaiter != null) {
@@ -7561,7 +7700,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
               onTimeout: () {});
           _fileWindowAckWaiters.remove('${fileId}_$idx');
         } else {
-          await Future.delayed(const Duration(milliseconds: 5));
+          await Future.delayed(Duration(milliseconds: isUdpOnlyPeer ? 12 : 5));
         }
       }
     } finally {
@@ -8333,6 +8472,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     String? precomputedEphPubHex,
     bool keepInTransitBuffer = true,
     bool persistInOutbox = true,
+    bool skipPadding = false,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final ephKeyPair = precomputedEphKeyPair ?? await _x25519.newKeyPair();
@@ -8358,7 +8498,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final aadBytes =
         utf8.encode('$msgId|$targetNodeId|$ephPubHex|$dhPubHex|$expiresAt');
 
-    final paddedBytes = _applyPadmeJsonPadding(sealedPayloadBytes);
+    final paddedBytes = skipPadding ? sealedPayloadBytes : _applyPadmeJsonPadding(sealedPayloadBytes);
     final secretBox = await _cipher.encrypt(
       paddedBytes,
       secretKey: sessionKey,
@@ -8967,6 +9107,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         }
       } else if (kind == 'FILE_MISSING') {
         final fid = (envelope['fid'] ?? '').toString();
+        _downloadWatchdogTimers.remove(fid)?.cancel();
         for (final list in chatHistory.values) {
           for (final msg in list) {
             if (msg.msgId == fid) {
@@ -8979,6 +9120,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             }
           }
         }
+        unawaited(_saveContactsAndChats());
         onStateChanged();
         _addLog('Файл $fid больше не доступен на устройстве отправителя.');
       } else if (kind == 'GROUP_INVITE') {
@@ -9354,7 +9496,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       return;
     }
 
-    final dir = await _getInternalCacheFilesDir();
+    _downloadWatchdogTimers.remove(fileId)?.cancel();
+    final dir = _cachedFilesDir ??= await _getInternalCacheFilesDir();
     final partPath = '${dir.path}/${fileId}_$fileName.part';
 
     var assembly = _incomingFiles[fileId];
@@ -9458,8 +9601,15 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       }
 
       unawaited(_saveContactsAndChats());
+      _lastFileUiNotifyMs = now;
+      onStateChanged();
+      return;
     }
-    onStateChanged();
+    if (assembly.receivedChunkIndices.length <= 1 ||
+        now - _lastFileUiNotifyMs >= 250) {
+      _lastFileUiNotifyMs = now;
+      onStateChanged();
+    }
   }
 
   Future<void> _handleAckPacket(
@@ -9621,6 +9771,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         for (final c in knownContacts.values) {
           if (!isPeerDirectlyConnected(c.nodeId) &&
               c.lastAddress.isNotEmpty &&
+              !c.lastAddress.startsWith('udp:') &&
               c.lastAddress.contains(':')) {
             final addrParts = c.lastAddress.split(':');
             if (addrParts.length == 2 && !addrParts[0].startsWith('BLE')) {
@@ -9735,7 +9886,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final now = DateTime.now().millisecondsSinceEpoch;
     final activeUdpIds = <String>{};
     for (final entry in _remoteUdpPeers.entries) {
-      if (entry.value.lastSeenMs > 0 && (now - entry.value.lastSeenMs) < 20000) {
+      if (entry.value.lastSeenMs > 0 && (now - entry.value.lastSeenMs) < 15000) {
         activeUdpIds.add(entry.key);
       }
     }

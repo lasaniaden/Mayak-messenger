@@ -129,7 +129,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.1.0"
+                  versionName = "3.1.2"
               }}
 
               packaging {{
@@ -197,7 +197,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.1.0"
+                  versionName "3.1.2"
               }}
 
               packagingOptions {{
@@ -572,7 +572,7 @@ jobs:
               // v1.8.0: Полнодуплексный аудио/видео движок звонков + рингтон и гудки
               private val callAudioRunning = java.util.concurrent.atomic.AtomicBoolean(false)
               private val callAudioMuted = java.util.concurrent.atomic.AtomicBoolean(false)
-              private val callSpeakerEnabled = java.util.concurrent.atomic.AtomicBoolean(true)
+              private val callSpeakerEnabled = java.util.concurrent.atomic.AtomicBoolean(false)
               private var callAudioRecord: android.media.AudioRecord? = null
               private var callAudioTrack: android.media.AudioTrack? = null
               private var callAec: android.media.audiofx.AcousticEchoCanceler? = null
@@ -2139,13 +2139,8 @@ jobs:
                               }
                           }
                       } catch (_: Throwable) {}
-                      try {
-                          if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
-                              callNs = android.media.audiofx.NoiseSuppressor.create(rec.audioSessionId)?.apply {
-                                  enabled = true
-                              }
-                          }
-                      } catch (_: Throwable) {}
+                      // Не включаем программный NoiseSuppressor поверх VOICE_COMMUNICATION:
+                      // на Samsung/Android двойное шумоподавление «съедает» тихую человеческую речь.
 
                       val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                           android.media.AudioTrack.Builder()
@@ -2778,7 +2773,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release --build-name=3.1.0 --build-number=$((3100 + ${GITHUB_RUN_NUMBER:-1}))
+        run: flutter build apk --release --build-name=3.1.2 --build-number=$((3120 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
