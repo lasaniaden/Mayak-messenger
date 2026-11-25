@@ -7425,6 +7425,47 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
               ),
             ),
           _connectionCard(
+            icon: Icons.bug_report_rounded,
+            title: 'Журнал диагностики (файлы, звук, камера, сеть)',
+            statusText: 'Записей в памяти: ${engine.logs.length}',
+            statusColor: Colors.white70,
+            tutorial:
+                'Если не скачивается голосовое/файл, пропадает статус «В сети» или не включается камера — скопируйте или сохраните лог сразу после попытки и отправьте его для разбора.',
+            actionButton: Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: () async {
+                    final rep = engine.buildDiagnosticLogReport();
+                    await Clipboard.setData(ClipboardData(text: rep));
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Лог диагностики скопирован в буфер обмена')),
+                    );
+                  },
+                  icon: const Icon(Icons.copy_rounded, size: 16),
+                  label: const Text('Скопировать лог'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final rep = engine.buildDiagnosticLogReport();
+                    final path = await engine.saveBytesToDownloads(
+                      'mayak_diag_${DateTime.now().millisecondsSinceEpoch}.txt',
+                      utf8.encode(rep),
+                    );
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Лог сохранён: $path')),
+                    );
+                  },
+                  icon: const Icon(Icons.download_rounded, size: 16),
+                  label: const Text('Сохранить в Загрузки'),
+                ),
+              ],
+            ),
+          ),
+          _connectionCard(
             icon: Icons.qr_code_2_rounded,
             title: 'QR-код и прямой IP',
             statusText: 'Мгновенная привязка узла и обмен ключами',

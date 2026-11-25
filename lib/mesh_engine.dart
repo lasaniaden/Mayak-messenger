@@ -1180,7 +1180,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.1.3';
+  static const String currentAppVersion = '3.1.4';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -2239,6 +2239,23 @@ try {
     }
   }
 
+  String buildDiagnosticLogReport() {
+    final sb = StringBuffer();
+    sb.writeln('=== MAYAK DIAGNOSTIC LOG v$currentAppVersion ===');
+    sb.writeln('Platform: ${Platform.operatingSystem} | NodeId: $nodeId | Nick: $nickname');
+    sb.writeln('TCP peers: ${_tcpPeers.values.toSet().toList()}');
+    sb.writeln('BLE peers: ${_blePeers.values.toSet().toList()}');
+    sb.writeln('UDP peers: ${_remoteUdpPeers.entries.map((e) => '${e.key}=${e.value.ip}:${e.value.port}(age=${((DateTime.now().millisecondsSinceEpoch - e.value.lastSeenMs) / 1000).toStringAsFixed(1)}s)').toList()}');
+    sb.writeln('DHT nodes: ${_dhtClient.knownNodesCount} | ExtUDP: $stunExternalEndpoint | IPv6: $globalIpv6Address');
+    sb.writeln('Active incoming files: ${_incomingFiles.entries.map((e) => '${e.key}:${e.value.receivedChunkIndices.length}/${e.value.totalChunks}').toList()}');
+    sb.writeln('--- RECENT LOGS (last ${logs.length}) ---');
+    final startIdx = logs.length > 250 ? logs.length - 250 : 0;
+    for (int i = startIdx; i < logs.length; i++) {
+      sb.writeln(logs[i]);
+    }
+    return sb.toString();
+  }
+
   Future<String> saveBytesToDownloads(String fileName, List<int> bytes) async {
     try {
       if (Platform.isAndroid) {
@@ -2719,6 +2736,7 @@ try {
               port: dg.port,
               lastSeenMs: now,
             );
+            _ensureUdpPeerPunchLoop();
             final c = knownContacts[remoteId];
             if (c != null) {
               c.isOnline = true;
@@ -2750,6 +2768,14 @@ try {
           final jsonLine = utf8.decode(d.sublist(2));
           final senderIp = dg.address.address;
           final senderPort = dg.port;
+          final nowRx = DateTime.now().millisecondsSinceEpoch;
+          for (final ent in _remoteUdpPeers.entries.toList()) {
+            if (ent.value.ip == senderIp && ent.value.port == senderPort) {
+              _remoteUdpPeers[ent.key] = (ip: senderIp, port: senderPort, lastSeenMs: nowRx);
+              final kc = knownContacts[ent.key];
+              if (kc != null) kc.lastSeenTimestamp = nowRx;
+            }
+          }
           await _processIncomingJsonLine(
             jsonLine,
             remoteAddr: '$senderIp:$senderPort',
@@ -2760,6 +2786,7 @@ try {
                 port: senderPort,
                 lastSeenMs: nowMs,
               );
+              _ensureUdpPeerPunchLoop();
               final hc = knownContacts[peerId];
               if (hc != null) {
                 hc.lastAddress = 'udp:$senderIp:$senderPort';
@@ -4462,302 +4489,218 @@ if ($cams) { $cams -join "`n" }
       }, onError: (_) {});
 
       final useCam = windowsVideoSource == 'camera' ? '1' : '0';
+      // Без qedit.dll / DirectShow COM (которые вызывали падение и WerFault.exe / Dr.Web 500):
+      // используем встроенный WinRT MediaCapture + MediaFrameReader + BitmapEncoder (JPEG)
+      // и чистый Graphics.CopyFromScreen для показа экрана.
       final psScript = '''
-\$code = @"
-using System;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
-using System.IO;
-using System.Net.Sockets;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
-using System.Threading;
-using System.Windows.Forms;
+\$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
 
-public class MayakDirectShowCam : IDisposable {
-    [StructLayout(LayoutKind.Sequential)]
-    public class AMMediaType {
-        public Guid majorType;
-        public Guid subType;
-        [MarshalAs(UnmanagedType.Bool)] public bool fixedSizeSamples;
-        [MarshalAs(UnmanagedType.Bool)] public bool temporalCompression;
-        public int sampleSize;
-        public Guid formatType;
-        public IntPtr unkPtr;
-        public int formatSize;
-        public IntPtr formatPtr;
-    }
-
-    [ComImport, Guid("29840822-5B84-11D0-BD3B-00A0C911CE86"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface ICreateDevEnum {
-        [PreserveSig]
-        int CreateClassEnumerator(ref Guid pType, out IEnumMoniker ppEnumMoniker, int dwFlags);
-    }
-
-    [ComImport, Guid("56a868a9-0ad4-11ce-b03a-0020af0ba770"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IGraphBuilder {
-        [PreserveSig] int AddFilter([MarshalAs(UnmanagedType.IUnknown)] object pFilter, [MarshalAs(UnmanagedType.LPWStr)] string pName);
-        [PreserveSig] int RemoveFilter([MarshalAs(UnmanagedType.IUnknown)] object pFilter);
-        [PreserveSig] int EnumFilters(out IntPtr ppEnum);
-        [PreserveSig] int FindFilterByName([MarshalAs(UnmanagedType.LPWStr)] string pName, out IntPtr ppFilter);
-        [PreserveSig] int ConnectDirect(IntPtr ppinOut, IntPtr ppinIn, IntPtr pmt);
-        [PreserveSig] int Reconnect(IntPtr ppin);
-        [PreserveSig] int Disconnect(IntPtr ppin);
-        [PreserveSig] int SetDefaultSyncSource();
-        [PreserveSig] int Connect(IntPtr ppinOut, IntPtr ppinIn);
-        [PreserveSig] int Render(IntPtr ppinOut);
-        [PreserveSig] int RenderFile([MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFile, [MarshalAs(UnmanagedType.LPWStr)] string lpcwstrPlayList);
-        [PreserveSig] int AddSourceFilter([MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFileName, [MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFilterName, out IntPtr ppFilter);
-        [PreserveSig] int SetLogFile(IntPtr hFile);
-        [PreserveSig] int Abort();
-        [PreserveSig] int ShouldOperationContinue();
-    }
-
-    [ComImport, Guid("93E5A4E0-2D50-11d2-ABFA-00A0C9C6E38D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface ICaptureGraphBuilder2 {
-        [PreserveSig] int SetFiltergraph(IGraphBuilder pfg);
-        [PreserveSig] int GetFiltergraph(out IGraphBuilder ppfg);
-        [PreserveSig] int SetOutputFileName(ref Guid pType, [MarshalAs(UnmanagedType.LPWStr)] string lpstrFile, out IntPtr ppbf, out IntPtr ppSink);
-        [PreserveSig] int FindInterface(IntPtr pCategory, IntPtr pType, [MarshalAs(UnmanagedType.IUnknown)] object pbf, ref Guid riid, out IntPtr ppint);
-        [PreserveSig] int RenderStream(ref Guid pCategory, ref Guid pType, [MarshalAs(UnmanagedType.IUnknown)] object pSource, [MarshalAs(UnmanagedType.IUnknown)] object pfCompressor, [MarshalAs(UnmanagedType.IUnknown)] object pfRenderer);
-    }
-
-    [ComImport, Guid("6B652FFF-11FE-4fce-92AD-0266B5D7C78F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface ISampleGrabber {
-        [PreserveSig] int SetOneShot([MarshalAs(UnmanagedType.Bool)] bool OneShot);
-        [PreserveSig] int SetMediaType([MarshalAs(UnmanagedType.LPStruct)] AMMediaType pmt);
-        [PreserveSig] int GetConnectedMediaType([Out, MarshalAs(UnmanagedType.LPStruct)] AMMediaType pmt);
-        [PreserveSig] int SetBufferSamples([MarshalAs(UnmanagedType.Bool)] bool BufferThem);
-        [PreserveSig] int GetCurrentBuffer(ref int pBufferSize, IntPtr pBuffer);
-        [PreserveSig] int GetCurrentSample(out IntPtr ppSample);
-        [PreserveSig] int SetCallback(IntPtr pCallback, int WhichMethodToCallback);
-    }
-
-    [ComImport, Guid("56a868b1-0ad4-11ce-b03a-0020af0ba770"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
-    interface IMediaControl {
-        [PreserveSig] int Run();
-        [PreserveSig] int Pause();
-        [PreserveSig] int Stop();
-    }
-
-    private IGraphBuilder _graph;
-    private ICaptureGraphBuilder2 _capGraph;
-    private ISampleGrabber _grabber;
-    private IMediaControl _mediaCtrl;
-    public int Width { get; private set; }
-    public int Height { get; private set; }
-    private IntPtr _bufPtr = IntPtr.Zero;
-    private int _bufCap = 0;
-
-    public bool Start(int camIndex) {
-        try {
-            var clsidDevEnum = new Guid("62BE5D10-60EB-11d0-BD3B-00A0C911CE86");
-            var clsidVideoIn = new Guid("860BB310-5D01-11d0-BD3B-00A0C911CE86");
-            var iidBaseFilter = new Guid("56a86895-0ad4-11ce-b03a-0020af0ba770");
-
-            var devEnum = (ICreateDevEnum)Activator.CreateInstance(Type.GetTypeFromCLSID(clsidDevEnum));
-            IEnumMoniker enumMon;
-            if (devEnum.CreateClassEnumerator(ref clsidVideoIn, out enumMon, 0) != 0 || enumMon == null) return false;
-
-            IMoniker[] mon = new IMoniker[1];
-            IntPtr fetched = IntPtr.Zero;
-            IMoniker chosen = null;
-            int idx = 0;
-            while (enumMon.Next(1, mon, fetched) == 0 && mon[0] != null) {
-                if (idx == 0) chosen = mon[0];
-                if (idx == camIndex) { chosen = mon[0]; break; }
-                idx++;
-            }
-            if (chosen == null) return false;
-            mon[0] = chosen;
-
-            object camObj;
-            mon[0].BindToObject(null, null, ref iidBaseFilter, out camObj);
-            if (camObj == null) return false;
-
-            _graph = (IGraphBuilder)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("e436ebb3-524f-11ce-9f53-0020af0ba770")));
-            _capGraph = (ICaptureGraphBuilder2)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("BF87B6E1-8C27-11d0-B3F0-00AA003761C5")));
-            object grabObj = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("C1F400A0-3F08-11d3-9F0B-006008039E37")));
-            object nullObj = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("C1F400A4-3F08-11d3-9F0B-006008039E37")));
-            _grabber = (ISampleGrabber)grabObj;
-
-            var mt = new AMMediaType();
-            mt.majorType = new Guid("73646976-0000-0010-8000-00AA00389B71"); // MEDIATYPE_Video
-            mt.subType = new Guid("e436eb7d-524f-11ce-9f53-0020af0ba770");   // MEDIASUBTYPE_RGB24
-            mt.formatType = new Guid("05589f80-c356-11ce-bf01-00aa0055595a"); // FORMAT_VideoInfo
-            _grabber.SetMediaType(mt);
-            _grabber.SetBufferSamples(true);
-            _grabber.SetOneShot(false);
-
-            _capGraph.SetFiltergraph(_graph);
-            _graph.AddFilter(camObj, "Cam");
-            _graph.AddFilter(grabObj, "Grabber");
-            _graph.AddFilter(nullObj, "Null");
-
-            var pinCat = new Guid("fb6c4281-0353-11d1-905f-0000c0cc16ba"); // PIN_CATEGORY_CAPTURE
-            var medVid = new Guid("73646976-0000-0010-8000-00AA00389B71");
-            int hr = _capGraph.RenderStream(ref pinCat, ref medVid, camObj, grabObj, nullObj);
-            if (hr < 0) return false;
-
-            var connMt = new AMMediaType();
-            if (_grabber.GetConnectedMediaType(connMt) == 0 && connMt.formatPtr != IntPtr.Zero && connMt.formatSize >= 64) {
-                Width = Marshal.ReadInt32(connMt.formatPtr, 52);
-                Height = Math.Abs(Marshal.ReadInt32(connMt.formatPtr, 56));
-                Marshal.FreeCoTaskMem(connMt.formatPtr);
-            }
-            if (Width <= 0 || Height <= 0) { Width = 640; Height = 480; }
-
-            _mediaCtrl = (IMediaControl)_graph;
-            _mediaCtrl.Run();
-            Thread.Sleep(250);
-            return true;
-        } catch {
-            Dispose();
-            return false;
-        }
-    }
-
-    public byte[] GrabJpeg(ImageCodecInfo codec, EncoderParameters ep) {
-        if (_grabber == null) return null;
-        int size = 0;
-        if (_grabber.GetCurrentBuffer(ref size, IntPtr.Zero) != 0 || size <= 0) return null;
-        if (size > _bufCap) {
-            if (_bufPtr != IntPtr.Zero) Marshal.FreeHGlobal(_bufPtr);
-            _bufPtr = Marshal.AllocHGlobal(size);
-            _bufCap = size;
-        }
-        if (_grabber.GetCurrentBuffer(ref size, _bufPtr) != 0) return null;
-
-        int stride = ((Width * 3) + 3) & ~3;
-        if (size < stride * Height) return null;
-        using (var raw = new Bitmap(Width, Height, stride, PixelFormat.Format24bppRgb, _bufPtr)) {
-            raw.RotateFlip(RotateFlipType.RotateNoneFlipY);
-            int tw = 480;
-            int th = Math.Max(180, (int)Math.Round(Height * (480.0 / Math.Max(1, Width))));
-            if (th > 360) th = 360;
-            using (var dst = new Bitmap(tw, th))
-            using (var g = Graphics.FromImage(dst))
-            using (var ms = new MemoryStream()) {
-                g.InterpolationMode = InterpolationMode.Bilinear;
-                g.DrawImage(raw, 0, 0, tw, th);
-                dst.Save(ms, codec, ep);
-                return ms.ToArray();
-            }
-        }
-    }
-
-    public void Dispose() {
-        try { if (_mediaCtrl != null) _mediaCtrl.Stop(); } catch {}
-        if (_bufPtr != IntPtr.Zero) { Marshal.FreeHGlobal(_bufPtr); _bufPtr = IntPtr.Zero; _bufCap = 0; }
-        _mediaCtrl = null; _grabber = null; _capGraph = null; _graph = null;
-    }
+function Await-WinRT(\$op, [Type]\$resultType) {
+  \$m = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    \$_.Name -eq 'AsTask' -and \$_.GetParameters().Count -eq 1 -and \$_.IsGenericMethod
+  })[0].MakeGenericMethod(\$resultType)
+  \$task = \$m.Invoke(\$null, @(\$op))
+  \$task.Wait(5000) | Out-Null
+  return \$task.Result
+}
+function Await-WinRTAction(\$op) {
+  \$m = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    \$_.Name -eq 'AsTask' -and \$_.GetParameters().Count -eq 1 -and -not \$_.IsGenericMethod
+  })[0]
+  \$task = \$m.Invoke(\$null, @(\$op))
+  \$task.Wait(5000) | Out-Null
 }
 
-public class MayakWinVideo {
-    static ImageCodecInfo GetJpegCodec() {
-        foreach (var c in ImageCodecInfo.GetImageEncoders()) {
-            if (c.MimeType == "image/jpeg") return c;
+\$jpegCodec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { \$_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+\$epScr = New-Object System.Drawing.Imaging.EncoderParameters(1)
+\$epScr.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 58L)
+
+\$tryCam = ($useCam -eq 1)
+\$camIndex = $selectedWindowsCameraIndex
+\$mediaCapture = \$null
+\$frameReader = \$null
+\$camOk = \$false
+
+if (\$tryCam) {
+  try {
+    [void][Windows.Media.Capture.MediaCapture, Windows.Media.Capture, ContentType=WindowsRuntime]
+    [void][Windows.Media.Capture.MediaCaptureInitializationSettings, Windows.Media.Capture, ContentType=WindowsRuntime]
+    [void][Windows.Media.Capture.StreamingCaptureMode, Windows.Media.Capture, ContentType=WindowsRuntime]
+    [void][Windows.Media.Capture.MediaCaptureMemoryPreference, Windows.Media.Capture, ContentType=WindowsRuntime]
+    [void][Windows.Media.Capture.MediaCaptureSharingMode, Windows.Media.Capture, ContentType=WindowsRuntime]
+    [void][Windows.Devices.Enumeration.DeviceInformation, Windows.Devices.Enumeration, ContentType=WindowsRuntime]
+    [void][Windows.Devices.Enumeration.DeviceClass, Windows.Devices.Enumeration, ContentType=WindowsRuntime]
+    [void][Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+    [void][Windows.Graphics.Imaging.BitmapPixelFormat, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+    [void][Windows.Graphics.Imaging.BitmapAlphaMode, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+    [void][Windows.Graphics.Imaging.BitmapEncoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+    [void][Windows.Storage.Streams.InMemoryRandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime]
+    [void][Windows.Storage.Streams.DataReader, Windows.Storage.Streams, ContentType=WindowsRuntime]
+
+    \$devs = Await-WinRT ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync([Windows.Devices.Enumeration.DeviceClass]::VideoCapture)) ([Windows.Devices.Enumeration.DeviceInformationCollection])
+    if (\$devs -and \$devs.Count -gt 0) {
+      \$idx = if (\$camIndex -ge 0 -and \$camIndex -lt \$devs.Count) { \$camIndex } else { 0 }
+      \$dev = \$devs[\$idx]
+      [Console]::Error.WriteLine("[CAM] Opening WinRT camera: " + \$dev.Name)
+      \$settings = New-Object Windows.Media.Capture.MediaCaptureInitializationSettings
+      \$settings.VideoDeviceId = \$dev.Id
+      \$settings.StreamingCaptureMode = [Windows.Media.Capture.StreamingCaptureMode]::Video
+      \$settings.MemoryPreference = [Windows.Media.Capture.MediaCaptureMemoryPreference]::Cpu
+      \$settings.SharingMode = [Windows.Media.Capture.MediaCaptureSharingMode]::ExclusiveControl
+
+      \$mediaCapture = New-Object Windows.Media.Capture.MediaCapture
+      Await-WinRTAction (\$mediaCapture.InitializeAsync(\$settings))
+
+      \$colorSource = \$null
+      foreach (\$kv in \$mediaCapture.FrameSources) {
+        if (\$kv.Value.Info.SourceKind -eq [Windows.Media.Capture.Frames.MediaFrameSourceKind]::Color) {
+          \$colorSource = \$kv.Value
+          break
         }
-        return null;
+      }
+      if (\$colorSource -ne \$null) {
+        \$frameReader = Await-WinRT (\$mediaCapture.CreateFrameReaderAsync(\$colorSource, [Windows.Media.MediaProperties.MediaEncodingSubtypes]::Bgra8)) ([Windows.Media.Capture.Frames.MediaFrameReader])
+        \$st = Await-WinRT (\$frameReader.StartAsync()) ([Windows.Media.Capture.Frames.MediaFrameReaderStartStatus])
+        if (\$st -eq [Windows.Media.Capture.Frames.MediaFrameReaderStartStatus]::Success) {
+          \$camOk = \$true
+          [Console]::Error.WriteLine("[CAM] WinRT MediaFrameReader started OK")
+        } else {
+          [Console]::Error.WriteLine("[CAM] MediaFrameReader status: " + \$st)
+        }
+      } else {
+        [Console]::Error.WriteLine("[CAM] No Color FrameSource found")
+      }
+    } else {
+      [Console]::Error.WriteLine("[CAM] No video capture devices found")
     }
-
-    public static void Run(int port, bool tryCam, int camIndex) {
-        var codec = GetJpegCodec();
-        var epCam = new EncoderParameters(1);
-        epCam.Param[0] = new EncoderParameter(Encoder.Quality, 64L);
-        var epScr = new EncoderParameters(1);
-        epScr.Param[0] = new EncoderParameter(Encoder.Quality, 60L);
-
-        MayakDirectShowCam cam = null;
-        bool camOk = false;
-        int emptyCamTicks = 0;
-        if (tryCam) {
-            cam = new MayakDirectShowCam();
-            camOk = cam.Start(camIndex);
-            if (!camOk) { cam.Dispose(); cam = null; }
-        }
-
-        try {
-            using (var tcp = new TcpClient("127.0.0.1", port))
-            using (var ns = tcp.GetStream()) {
-                while (true) {
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    byte[] jpg = null;
-                    try {
-                        if (camOk && cam != null) {
-                            jpg = cam.GrabJpeg(codec, epCam);
-                            if (jpg == null || jpg.Length == 0) {
-                                emptyCamTicks++;
-                                if (emptyCamTicks > 30) {
-                                    camOk = false;
-                                    cam.Dispose();
-                                    cam = null;
-                                }
-                            } else {
-                                emptyCamTicks = 0;
-                            }
-                        }
-                        if (!camOk) {
-                            var bounds = Screen.PrimaryScreen.Bounds;
-                            using (var scr = new Bitmap(bounds.Width, bounds.Height))
-                            using (var g1 = Graphics.FromImage(scr))
-                            using (var dst = new Bitmap(512, 288))
-                            using (var g2 = Graphics.FromImage(dst))
-                            using (var ms = new MemoryStream()) {
-                                g1.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
-                                g2.InterpolationMode = InterpolationMode.Bilinear;
-                                g2.DrawImage(scr, 0, 0, 512, 288);
-                                dst.Save(ms, codec, epScr);
-                                jpg = ms.ToArray();
-                            }
-                        }
-                    } catch {
-                        if (camOk) {
-                            camOk = false;
-                            try { if (cam != null) cam.Dispose(); } catch {}
-                            cam = null;
-                        }
-                    }
-
-                    if (jpg != null && jpg.Length > 0) {
-                        int n = jpg.Length;
-                        byte[] hdr = new byte[4] { (byte)(n >> 24), (byte)(n >> 16), (byte)(n >> 8), (byte)n };
-                        ns.Write(hdr, 0, 4);
-                        ns.Write(jpg, 0, n);
-                        ns.Flush();
-                    }
-                    int sleepMs = 80 - (int)sw.ElapsedMilliseconds;
-                    if (sleepMs > 10) Thread.Sleep(sleepMs);
-                }
-            }
-        } catch {
-        } finally {
-            if (cam != null) { try { cam.Dispose(); } catch {} }
-        }
-    }
+  } catch {
+    [Console]::Error.WriteLine("[CAM] WinRT init error: " + \$_.Exception.Message)
+    \$camOk = \$false
+  }
 }
-"@
-Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Windows.Forms, System.Net.Sockets
-[MayakWinVideo]::Run($localPort, ($useCam -eq 1), $selectedWinCameraIndex)
+
+try {
+  \$tcp = New-Object System.Net.Sockets.TcpClient("127.0.0.1", $localPort)
+  \$ns = \$tcp.GetStream()
+  \$emptyTicks = 0
+  while (\$true) {
+    \$sw = [System.Diagnostics.Stopwatch]::StartNew()
+    \$jpg = \$null
+    try {
+      if (\$camOk -and \$frameReader -ne \$null) {
+        \$frame = \$frameReader.TryAcquireLatestFrame()
+        if (\$frame -ne \$null) {
+          try {
+            \$vmf = \$frame.VideoMediaFrame
+            if (\$vmf -ne \$null -and \$vmf.SoftwareBitmap -ne \$null) {
+              \$sb = \$vmf.SoftwareBitmap
+              \$conv = \$null
+              if (\$sb.BitmapPixelFormat -ne [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8 -or \$sb.BitmapAlphaMode -ne [Windows.Graphics.Imaging.BitmapAlphaMode]::Ignore) {
+                \$conv = [Windows.Graphics.Imaging.SoftwareBitmap]::Convert(\$sb, [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Ignore)
+                \$sb = \$conv
+              }
+              \$ras = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
+              \$enc = Await-WinRT ([Windows.Graphics.Imaging.BitmapEncoder]::CreateAsync([Windows.Graphics.Imaging.BitmapEncoder]::JpegEncoderId, \$ras)) ([Windows.Graphics.Imaging.BitmapEncoder])
+              \$enc.SetSoftwareBitmap(\$sb)
+              \$enc.BitmapTransform.ScaledWidth = 480
+              \$enc.BitmapTransform.ScaledHeight = [uint32]([Math]::Max(180, [Math]::Min(360, [Math]::Round(\$sb.PixelHeight * (480.0 / [Math]::Max(1, \$sb.PixelWidth))))))
+              Await-WinRTAction (\$enc.FlushAsync())
+              \$sz = [uint32]\$ras.Size
+              if (\$sz -gt 0 -and \$sz -lt 350000) {
+                \$ras.Seek(0)
+                \$dr = New-Object Windows.Storage.Streams.DataReader(\$ras.GetInputStreamAt(0))
+                [void](Await-WinRT (\$dr.LoadAsync(\$sz)) ([uint32]))
+                \$bytes = New-Object byte[] \$sz
+                \$dr.ReadBytes(\$bytes)
+                \$jpg = \$bytes
+                \$dr.Dispose()
+              }
+              \$ras.Dispose()
+              if (\$conv -ne \$null) { \$conv.Dispose() }
+            }
+          } finally {
+            \$frame.Dispose()
+          }
+        }
+        if (\$jpg -eq \$null) {
+          \$emptyTicks++
+          if (\$emptyTicks -gt 40) {
+            [Console]::Error.WriteLine("[CAM] No frames from camera -> fallback to screen")
+            \$camOk = \$false
+          }
+        } else {
+          \$emptyTicks = 0
+        }
+      }
+      if (-not \$camOk) {
+        \$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        \$scr = New-Object System.Drawing.Bitmap(\$b.Width, \$b.Height)
+        \$g1 = [System.Drawing.Graphics]::FromImage(\$scr)
+        \$g1.CopyFromScreen(\$b.Location, [System.Drawing.Point]::Empty, \$b.Size)
+        \$dst = New-Object System.Drawing.Bitmap(512, 288)
+        \$g2 = [System.Drawing.Graphics]::FromImage(\$dst)
+        \$g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::Bilinear
+        \$g2.DrawImage(\$scr, 0, 0, 512, 288)
+        \$ms = New-Object System.IO.MemoryStream
+        \$dst.Save(\$ms, \$jpegCodec, \$epScr)
+        \$jpg = \$ms.ToArray()
+        \$ms.Dispose(); \$g2.Dispose(); \$dst.Dispose(); \$g1.Dispose(); \$scr.Dispose()
+      }
+    } catch {
+      if (\$camOk) {
+        [Console]::Error.WriteLine("[CAM] Frame error: " + \$_.Exception.Message)
+        \$camOk = \$false
+      }
+    }
+    if (\$jpg -ne \$null -and \$jpg.Length -gt 0) {
+      \$n = \$jpg.Length
+      \$hdr = [byte[]]@((\$n -shr 24) -band 255, (\$n -shr 16) -band 255, (\$n -shr 8) -band 255, \$n -band 255)
+      \$ns.Write(\$hdr, 0, 4)
+      \$ns.Write(\$jpg, 0, \$n)
+      \$ns.Flush()
+    }
+    \$sleepMs = 85 - [int]\$sw.ElapsedMilliseconds
+    if (\$sleepMs -gt 10) { Start-Sleep -Milliseconds \$sleepMs }
+  }
+} catch {
+} finally {
+  try { if (\$frameReader -ne \$null) { Await-WinRTAction (\$frameReader.StopAsync()); \$frameReader.Dispose() } } catch {}
+  try { if (\$mediaCapture -ne \$null) { \$mediaCapture.Dispose() } } catch {}
+  try { if (\$ns -ne \$null) { \$ns.Dispose() } } catch {}
+  try { if (\$tcp -ne \$null) { \$tcp.Dispose() } } catch {}
+}
 ''';
-      final tmpScript = File(
-          '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_vid_$localPort.ps1');
-      await tmpScript.writeAsString(psScript, flush: true);
-      _winVideoProcess = await Process.start(
-        'powershell',
+
+      final scriptFile = File(
+          '${Directory.systemTemp.path}${Platform.pathSeparator}mayak_win_video.ps1');
+      final psBytes = <int>[0xEF, 0xBB, 0xBF, ...utf8.encode(psScript)];
+      await scriptFile.writeAsBytes(psBytes, flush: true);
+
+      final proc = await Process.start(
+        'powershell.exe',
         [
           '-NoProfile',
           '-ExecutionPolicy',
           'Bypass',
           '-WindowStyle',
           'Hidden',
-          '-STA',
           '-File',
-          tmpScript.path,
+          scriptFile.path,
         ],
+        workingDirectory: Directory.systemTemp.path,
       );
-    } catch (_) {}
+      _winVideoProc = proc;
+      proc.stderr.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
+        if (line.trim().isNotEmpty) {
+          _addLog(line.trim(), triggerUi: false);
+        }
+      });
+    } catch (e) {
+      _addLog('[CAM] Не удалось запустить видеопоток Windows: $e');
+    }
   }
 
   Future<void> _stopWindowsVideoStreamer() async {
@@ -5503,13 +5446,22 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       _addLog('Отправитель файла не найден в списке контактов');
       return;
     }
-    if (!isPeerDirectlyConnected(pullTargetId)) {
-      _addLog('Нет прямой связи с ${contact.displayTitle} — дождитесь статуса «В сети» и попробуйте снова');
-      msg.isDownloading = false;
-      msg.transferProgress = 0.0;
-      onStateChanged();
-      return;
+    final udpPeer = _remoteUdpPeers[pullTargetId];
+    if (udpPeer != null) {
+      _sendUdpHolePunch(udpPeer.ip, udpPeer.port);
+      _ensureUdpPeerPunchLoop();
+    } else if (contact.lastAddress.startsWith('udp:')) {
+      final pts = contact.lastAddress.substring(4).split(':');
+      if (pts.length == 2) {
+        final p = int.tryParse(pts[1]) ?? 0;
+        if (pts[0].isNotEmpty && p > 0) {
+          _remoteUdpPeers[pullTargetId] = (ip: pts[0], port: p, lastSeenMs: DateTime.now().millisecondsSinceEpoch);
+          _sendUdpHolePunch(pts[0], p);
+          _ensureUdpPeerPunchLoop();
+        }
+      }
     }
+    _addLog('[FILE] Запрос скачивания fid=${msg.msgId} (${msg.fileName ?? "?"}) у ${contact.displayTitle} (direct=${isPeerDirectlyConnected(pullTargetId)}, udp=${_remoteUdpPeers.containsKey(pullTargetId)}, tcp=${_tcpPeers.containsValue(pullTargetId)})');
     msg.isDownloading = true;
     msg.transferProgress = 0.02;
     onStateChanged();
@@ -6162,7 +6114,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       }
     });
 
-    _addLog('Защищенный узел v3.1.3 готов (порт $listenPort)');
+    _addLog('Защищенный узел v3.1.4 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -7212,6 +7164,8 @@ try {
     if (!Platform.isWindows || _winAudioProc != null) return;
     try {
       const psAudio = r'''
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 $player = New-Object System.Windows.Media.MediaPlayer
@@ -7222,6 +7176,13 @@ $script:loadedPath = ""
 $player.Add_MediaEnded({
     $script:isPlaying = $false
     [Console]::Out.WriteLine('{"ended":true,"playing":false,"pos":0,"dur":0}')
+    [Console]::Out.Flush()
+})
+$player.Add_MediaFailed({
+    param($s, $e)
+    $script:isPlaying = $false
+    $msg = if ($e.ErrorException) { $e.ErrorException.Message } else { "MediaFailed" }
+    [Console]::Out.WriteLine('{"ended":true,"playing":false,"pos":0,"dur":0,"err":' + ($msg | ConvertTo-Json) + '}')
     [Console]::Out.Flush()
 })
 
@@ -7246,7 +7207,14 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         }
         $cmdLine = $line
         $dispatcher.Invoke([Action]{
-            if ($cmdLine.StartsWith("LOAD|")) {
+            if ($cmdLine.StartsWith("LOAD64|")) {
+                $p = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($cmdLine.Substring(7)))
+                $player.Stop()
+                $player.Open([Uri]::new($p))
+                $player.Play()
+                $script:loadedPath = $p
+                $script:isPlaying = $true
+            } elseif ($cmdLine.StartsWith("LOAD|")) {
                 $p = $cmdLine.Substring(5)
                 $player.Stop()
                 $player.Open([Uri]::new($p))
@@ -7293,6 +7261,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           '-File',
           tmpPs.path,
         ],
+        workingDirectory: Directory.systemTemp.path,
       );
       _winAudioProc = proc;
       _winAudioSub = proc.stdout
@@ -7301,6 +7270,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           .listen((line) {
         try {
           final map = jsonDecode(line) as Map<String, dynamic>;
+          if (map['err'] != null) {
+            _addLog('[AUDIO] Windows MediaPlayer ошибка: ${map['err']}');
+          }
           if (map['ended'] == true) {
             currentlyPlayingAudioPath = null;
             isAudioPlaying = false;
@@ -7356,7 +7328,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       audioDurationMs = 1000;
       currentlyPlayingAudioPath = filePath;
       isAudioPlaying = true;
-      _winAudioProc!.stdin.writeln('LOAD|$absPath');
+      final b64Path = base64Encode(utf8.encode(absPath));
+      _addLog('[AUDIO] Воспроизведение на ПК: $absPath (exists=${File(absPath).existsSync()})', triggerUi: false);
+      _winAudioProc!.stdin.writeln('LOAD64|$b64Path');
       onStateChanged();
     }
   }
@@ -7635,9 +7609,12 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       'fs': totalSize,
       'nick': nickname,
     };
-    if (resolvedThumbB64 != null && resolvedThumbB64.isNotEmpty) {
+    final isUdpOnlyOffer = !_tcpPeers.containsValue(targetNodeId) &&
+        !_blePeers.containsValue(targetNodeId);
+    if (!isUdpOnlyOffer && resolvedThumbB64 != null && resolvedThumbB64.isNotEmpty) {
       offerMap['tb64'] = resolvedThumbB64;
     }
+    _addLog('[FILE] Отправка FILE_OFFER fid=$fileId ($cleanFileName, ${totalSize}B, udpOnly=$isUdpOnlyOffer, hasThumb=${offerMap.containsKey('tb64')})');
     if (forwardedFrom != null && forwardedFrom.isNotEmpty) {
       offerMap['fwd'] = forwardedFrom;
     }
@@ -7690,6 +7667,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       } catch (_) {}
     }
     if (filePath == null || !await File(filePath).exists()) {
+      _addLog('[FILE] Отдача fid=$fileId отклонена: файл не найден на диске -> FILE_MISSING');
       final missPayload = jsonEncode({
         'v': 2,
         'kind': 'FILE_MISSING',
@@ -7738,9 +7716,11 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       final fileEphPub = await fileEphKeyPair.extractPublicKey();
       final fileEphPubHex = _toHex(fileEphPub.bytes);
 
+      _addLog('[FILE] Начинаю отдачу fid=$fileId ($cleanFileName, ${totalSize}B, chunks=$totalChunks, chunkSize=$effectiveChunkSize, udpOnly=$isUdpOnlyPeer)');
       for (int idx = 0; idx < totalChunks; idx++) {
         if (_activeFileStreamGen[streamKey] != myGen ||
-            !isPeerDirectlyConnected(targetNodeId)) {
+            (!isPeerDirectlyConnected(targetNodeId) && !_remoteUdpPeers.containsKey(targetNodeId))) {
+          _addLog('[FILE] Отдача fid=$fileId прервана на чанке $idx/$totalChunks');
           break;
         }
         await raf.setPosition(idx * effectiveChunkSize);
