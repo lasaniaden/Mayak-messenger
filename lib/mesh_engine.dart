@@ -1180,7 +1180,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.1.4';
+  static const String currentAppVersion = '3.1.5';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -2246,12 +2246,12 @@ try {
     sb.writeln('TCP peers: ${_tcpPeers.values.toSet().toList()}');
     sb.writeln('BLE peers: ${_blePeers.values.toSet().toList()}');
     sb.writeln('UDP peers: ${_remoteUdpPeers.entries.map((e) => '${e.key}=${e.value.ip}:${e.value.port}(age=${((DateTime.now().millisecondsSinceEpoch - e.value.lastSeenMs) / 1000).toStringAsFixed(1)}s)').toList()}');
-    sb.writeln('DHT nodes: ${_dhtClient.knownNodesCount} | ExtUDP: $stunExternalEndpoint | IPv6: $globalIpv6Address');
+    sb.writeln('DHT nodes: ${_dhtClient.knownNodesCount} | ExtUDP: $discoveredExternalEndpoint | IPv6: $globalIpv6Address');
     sb.writeln('Active incoming files: ${_incomingFiles.entries.map((e) => '${e.key}:${e.value.receivedChunkIndices.length}/${e.value.totalChunks}').toList()}');
-    sb.writeln('--- RECENT LOGS (last ${logs.length}) ---');
-    final startIdx = logs.length > 250 ? logs.length - 250 : 0;
-    for (int i = startIdx; i < logs.length; i++) {
-      sb.writeln(logs[i]);
+    sb.writeln('--- RECENT LOGS (last ${debugLogs.length}) ---');
+    final startIdx = debugLogs.length > 250 ? debugLogs.length - 250 : 0;
+    for (int i = startIdx; i < debugLogs.length; i++) {
+      sb.writeln(debugLogs[i]);
     }
     return sb.toString();
   }
@@ -4519,7 +4519,7 @@ function Await-WinRTAction(\$op) {
 \$epScr.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 58L)
 
 \$tryCam = ($useCam -eq 1)
-\$camIndex = $selectedWindowsCameraIndex
+\$camIndex = $selectedWinCameraIndex
 \$mediaCapture = \$null
 \$frameReader = \$null
 \$camOk = \$false
@@ -4692,7 +4692,7 @@ try {
         ],
         workingDirectory: Directory.systemTemp.path,
       );
-      _winVideoProc = proc;
+      _winVideoProcess = proc;
       proc.stderr.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
         if (line.trim().isNotEmpty) {
           _addLog(line.trim(), triggerUi: false);
@@ -6114,7 +6114,7 @@ try {
       }
     });
 
-    _addLog('Защищенный узел v3.1.4 готов (порт $listenPort)');
+    _addLog('Защищенный узел v3.1.5 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }

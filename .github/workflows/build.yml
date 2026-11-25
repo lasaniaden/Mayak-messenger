@@ -129,7 +129,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.1.4"
+                  versionName = "3.1.5"
               }}
 
               packaging {{
@@ -197,7 +197,7 @@ jobs:
                   minSdkVersion 23
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.1.4"
+                  versionName "3.1.5"
               }}
 
               packagingOptions {{
@@ -2773,7 +2773,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release --build-name=3.1.4 --build-number=$((3140 + ${GITHUB_RUN_NUMBER:-1}))
+        run: flutter build apk --release --build-name=3.1.5 --build-number=$((3150 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

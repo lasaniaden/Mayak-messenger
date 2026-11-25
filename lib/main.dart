@@ -7427,7 +7427,7 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
           _connectionCard(
             icon: Icons.bug_report_rounded,
             title: 'Журнал диагностики (файлы, звук, камера, сеть)',
-            statusText: 'Записей в памяти: ${engine.logs.length}',
+            statusText: 'Записей в памяти: ${engine.debugLogs.length}',
             statusColor: Colors.white70,
             tutorial:
                 'Если не скачивается голосовое/файл, пропадает статус «В сети» или не включается камера — скопируйте или сохраните лог сразу после попытки и отправьте его для разбора.',
