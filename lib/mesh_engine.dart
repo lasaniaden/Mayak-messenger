@@ -1180,7 +1180,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.1.0';
+  static const String currentAppVersion = '3.1.3';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -2107,33 +2107,121 @@ class MeshEngine {
       if (Platform.isWindows) {
         final exePath = Platform.resolvedExecutable;
         final appDir = File(exePath).parent.path;
+        final exeName = exePath.split(RegExp(r'[\\/]')).last;
         final curPid = pid;
         final psZip = outFile.path.replaceAll("'", "''");
         final psDir = appDir.replaceAll("'", "''");
-        final psExe = exePath.replaceAll("'", "''");
-        final psCmd =
-            "Write-Host 'Mayak Updater: waiting for app to close...'; "
-            "Wait-Process -Id $curPid -Timeout 15 -ErrorAction SilentlyContinue; "
-            "Start-Sleep -Milliseconds 1200; "
-            "\$ok = \$false; "
-            "for (\$i = 0; \$i -lt 5; \$i++) { "
-            "  try { "
-            "    Write-Host ('Extracting update (attempt ' + (\$i + 1) + ')...'); "
-            "    Expand-Archive -LiteralPath '$psZip' -DestinationPath '$psDir' -Force -ErrorAction Stop; "
-            "    \$ok = \$true; break "
-            "  } catch { Start-Sleep -Milliseconds 1200 } "
-            "}; "
-            "Remove-Item -LiteralPath '$psZip' -Force -ErrorAction SilentlyContinue; "
-            "Start-Sleep -Milliseconds 800; "
-            "Write-Host 'Starting updated Mayak...'; "
-            "Start-Process -FilePath '$psExe'";
+        final psExeName = exeName.replaceAll("'", "''");
+        final psStage = '${tmpDir.path}${sep}mayak_stage_${info.version}_${DateTime.now().millisecondsSinceEpoch}'.replaceAll("'", "''");
+        final psScriptPath = '${tmpDir.path}${sep}mayak_updater_${info.version}.ps1';
+        final psLogPath = '${tmpDir.path}${sep}mayak_updater.log'.replaceAll("'", "''");
+
+        final psBody = '''
+\$ErrorActionPreference = 'Stop'
+Set-Location \$env:TEMP
+\$log = '$psLogPath'
+function Log(\$m) {
+  \$line = "[MayakUpdater] " + (Get-Date -Format "HH:mm:ss") + " " + \$m
+  Write-Host \$line
+  Add-Content -LiteralPath \$log -Value \$line -ErrorAction SilentlyContinue
+}
+try {
+  \$zipPath = '$psZip'
+  \$appDir = '$psDir'
+  \$stageDir = '$psStage'
+  \$exeName = '$psExeName'
+  \$backupDir = \$appDir + '_old_backup'
+
+  Log "Ожидание закрытия Маяка (PID $curPid)..."
+  try { Wait-Process -Id $curPid -Timeout 6 -ErrorAction SilentlyContinue } catch {}
+  try {
+    \$still = Get-Process -Id $curPid -ErrorAction SilentlyContinue
+    if (\$still) { Stop-Process -Id $curPid -Force -ErrorAction SilentlyContinue }
+  } catch {}
+  Get-Process -Name 'p2p_mesh' -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      if (\$_.Path -and \$_.Path.StartsWith(\$appDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id \$_.Id -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
+  Start-Sleep -Milliseconds 1200
+
+  Log "Распаковка архива во временную папку..."
+  if (Test-Path -LiteralPath \$stageDir) { Remove-Item -LiteralPath \$stageDir -Recurse -Force -ErrorAction SilentlyContinue }
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  [System.IO.Compression.ZipFile]::ExtractToDirectory(\$zipPath, \$stageDir)
+
+  \$srcDir = \$stageDir
+  if (-not (Test-Path -LiteralPath (Join-Path \$srcDir \$exeName))) {
+    \$foundExe = Get-ChildItem -LiteralPath \$stageDir -Filter \$exeName -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (\$foundExe) { \$srcDir = \$foundExe.DirectoryName }
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path \$srcDir \$exeName))) {
+    throw "В архиве не найден \$exeName"
+  }
+
+  Log "Удаление старой папки и установка новой версии в \$appDir..."
+  if (Test-Path -LiteralPath \$backupDir) { Remove-Item -LiteralPath \$backupDir -Recurse -Force -ErrorAction SilentlyContinue }
+  \$replaced = \$false
+  for (\$attempt = 1; \$attempt -le 6; \$attempt++) {
+    try {
+      if (Test-Path -LiteralPath \$appDir) {
+        Rename-Item -LiteralPath \$appDir -NewName (Split-Path -Leaf \$backupDir) -ErrorAction Stop
+      }
+      New-Item -ItemType Directory -Path \$appDir -Force | Out-Null
+      Copy-Item -Path (Join-Path \$srcDir '*') -Destination \$appDir -Recurse -Force -ErrorAction Stop
+      if (Test-Path -LiteralPath (Join-Path \$appDir \$exeName)) {
+        \$replaced = \$true
+        break
+      }
+    } catch {
+      Log ("Попытка \$attempt не удалась: " + \$_.Exception.Message)
+      if (-not (Test-Path -LiteralPath \$appDir) -and (Test-Path -LiteralPath \$backupDir)) {
+        Rename-Item -LiteralPath \$backupDir -NewName (Split-Path -Leaf \$appDir) -ErrorAction SilentlyContinue
+      }
+      Start-Sleep -Milliseconds 1200
+    }
+  }
+
+  if (-not \$replaced) {
+    Log "Пробую прямую очистку содержимого папки..."
+    Get-ChildItem -LiteralPath \$appDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path (Join-Path \$srcDir '*') -Destination \$appDir -Recurse -Force -ErrorAction Stop
+  }
+
+  if (Test-Path -LiteralPath \$backupDir) {
+    Remove-Item -LiteralPath \$backupDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Item -LiteralPath \$stageDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath \$zipPath -Force -ErrorAction SilentlyContinue
+
+  \$newExe = Join-Path \$appDir \$exeName
+  Log "Запуск обновлённого Маяка: \$newExe"
+  Start-Sleep -Milliseconds 500
+  Start-Process -FilePath \$newExe -WorkingDirectory \$appDir
+} catch {
+  Log ("ОШИБКА ОБНОВЛЕНИЯ: " + \$_.Exception.Message)
+  if ((Test-Path -LiteralPath (\$appDir + '_old_backup')) -and -not (Test-Path -LiteralPath \$appDir)) {
+    Rename-Item -LiteralPath (\$appDir + '_old_backup') -NewName (Split-Path -Leaf \$appDir) -ErrorAction SilentlyContinue
+  }
+} finally {
+  Remove-Item -LiteralPath \$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+}
+''';
+
+        // UTF-8 with BOM для корректной работы с русскими путями в PowerShell 5.1
+        final psBytes = <int>[0xEF, 0xBB, 0xBF, ...utf8.encode(psBody)];
+        await File(psScriptPath).writeAsBytes(psBytes, flush: true);
+
         await Process.start(
           'powershell.exe',
-          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psScriptPath],
+          workingDirectory: tmpDir.path,
           mode: ProcessStartMode.detached,
         );
-        // Закрываем сокеты и выходим, чтобы файлы и Single-Instance Mutex мгновенно освободились
-        Future.delayed(const Duration(milliseconds: 250), () async {
+        // Закрываем сокеты и выходим, чтобы папка и Single-Instance Mutex мгновенно освободились
+        Future.delayed(const Duration(milliseconds: 200), () async {
           try {
             await _tcpServer?.close();
             await _tcpServerV6?.close();
@@ -2141,7 +2229,7 @@ class MeshEngine {
           } catch (_) {}
           exit(0);
         });
-        return 'Обновление загружено — закрываю Маяк для распаковки...';
+        return 'Обновление загружено — закрываю Маяк для замены папки и перезапуска...';
       }
       return 'Сохранено: ${outFile.path}';
     } catch (e) {
@@ -6074,7 +6162,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       }
     });
 
-    _addLog('Защищенный узел v3.1.2 готов (порт $listenPort)');
+    _addLog('Защищенный узел v3.1.3 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
