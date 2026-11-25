@@ -55,7 +55,7 @@ class MayakMeshApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: mayakNavigatorKey,
-      title: 'Маяк P2P v3.0.2',
+      title: 'Маяк P2P v3.1.0',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -3117,6 +3117,12 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     _lastKnownMsgCount = engine.getMessagesFor(widget.peerId).length;
     _scrollCtrl.addListener(_onScrollChanged);
     engine.addListenerState(_onEngineUpdate);
+    if (!widget.isBroadcast &&
+        engine.isAutoInterRegionalEnabled &&
+        engine.isDhtDiscoveryEnabled &&
+        !engine.isPeerDirectlyConnected(widget.peerId)) {
+      unawaited(engine.resolveContactEndpointFromDht(widget.peerId));
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
 
@@ -7186,7 +7192,7 @@ class _MayakSettingsScreenState extends State<MayakSettingsScreen> {
             ListTile(
               leading: const Icon(Icons.info_outline_rounded, color: Colors.white),
               title: const Text('О приложении'),
-              subtitle: const Text('Маяк v3.0.2 • Автообновление и справка',
+              subtitle: const Text('Маяк v3.1.0 • Автообновление и справка',
                   style: TextStyle(fontSize: 12, color: Colors.white54)),
               trailing: const Icon(Icons.chevron_right_rounded,
                   color: Colors.white38),
@@ -7448,7 +7454,7 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
                 SwitchListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Межрегиональный режим (UPnP + IPv6 + STUN)',
+                  title: const Text('Постоянный межрегиональный режим',
                       style: TextStyle(fontSize: 13)),
                   value: engine.isAutoInterRegionalEnabled,
                   activeColor: Colors.white,
@@ -7456,6 +7462,69 @@ class _ConnectionsSettingsScreenState extends State<ConnectionsSettingsScreen> {
                       ? null
                       : (v) => engine.setAutoInterRegionalEnabled(v),
                 ),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(
+                    'Автопоиск IP (Mainline DHT • ${engine.dhtNodesCount} узл.)',
+                    style: const TextStyle(fontSize: 12.5),
+                  ),
+                  subtitle: const Text(
+                    'Находит новый IP друзей при смене Wi-Fi ↔ 4G (с фильтром ТСПУ)',
+                    style: TextStyle(fontSize: 11, color: Colors.white54),
+                  ),
+                  value: engine.isDhtDiscoveryEnabled,
+                  activeColor: Colors.white,
+                  onChanged: (v) => engine.setDhtDiscoveryEnabled(v),
+                ),
+                if (engine.myStaticMayakId.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A0A0A),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Постоянный Маяк-ID (не меняется при смене IP):',
+                            style: TextStyle(fontSize: 11, color: Colors.white54)),
+                        const SizedBox(height: 4),
+                        SelectableText(
+                          engine.myStaticMayakId,
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 10.5, color: Colors.white),
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () {
+                                  Clipboard.setData(ClipboardData(text: engine.myStaticMayakId));
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Постоянный Маяк-ID скопирован')),
+                                  );
+                                },
+                                child: const Text('Копировать ID', style: TextStyle(fontSize: 12)),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            OutlinedButton(
+                              onPressed: () async {
+                                await engine.rotateMyNospam();
+                                if (mounted) setState(() {});
+                              },
+                              child: const Text('Сменить nospam', style: TextStyle(fontSize: 12)),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                ],
                 if (engine.isAutoInterRegionalEnabled)
                   OutlinedButton.icon(
                     onPressed: engine.isDiscoveringExternalAddr
@@ -9104,7 +9173,7 @@ class _NetConsoleScreenState extends State<NetConsoleScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Сетевая консоль • v3.0.2', style: TextStyle(fontSize: 16)),
+        title: const Text('Сетевая консоль • v3.1.0', style: TextStyle(fontSize: 16)),
         actions: [
           IconButton(
             tooltip: 'Очистить журнал',

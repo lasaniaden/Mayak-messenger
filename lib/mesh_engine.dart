@@ -9,6 +9,7 @@ import 'dart:ui' as ui;
 import 'package:cryptography/cryptography.dart';
 import 'package:image/image.dart' as img;
 import 'package:zxing2/qrcode.dart' as zx;
+import 'mayak_dht.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1164,7 +1165,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.0.2';
+  static const String currentAppVersion = '3.1.0';
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -1354,6 +1355,18 @@ class MeshEngine {
   String discoveredExternalEndpoint = '';
   String interRegionalStatusText = 'Выключен';
   final Map<String, ({String ip, int port, int lastSeenMs})> _remoteUdpPeers = {};
+  late final MayakDhtClient _dhtClient = MayakDhtClient(
+    getSocket: () => _callUdpSocket,
+    onLog: (m) => _addLog(m, triggerUi: false),
+  );
+  bool isDhtDiscoveryEnabled = true;
+  String myStaticMayakId = '';
+  Uint8List _myNospamBytes = Uint8List(4);
+  Timer? _dhtRepublishTimer;
+  Timer? _sleepWatchdogTimer;
+  int _lastWatchdogWallMs = 0;
+  final Stopwatch _watchdogMono = Stopwatch();
+  int get dhtNodesCount => _dhtClient.knownNodesCount;
   Timer? _stunKeepaliveTimer;
   Timer? _udpPeerPunchTimer;
   final List<String> _stunObservedEndpoints = [];
@@ -2567,6 +2580,11 @@ class MeshEngine {
   Future<void> _onCallUdpDatagram(Datagram dg) async {
     final d = dg.data;
     if (d.isEmpty) return;
+    // 0. Демультиплексирование Mainline DHT (KRPC bencode-словарь начинается с 0x64 'd')
+    if (d[0] == 0x64) {
+      _dhtClient.handleIncomingDatagram(dg);
+      return;
+    }
     // 1. Ответ STUN (RFC 5389 Binding Success Response 0x0101)
     if (d.length >= 28 && d[0] == 0x01 && d[1] == 0x01) {
       _tryParseStunResponse(d);
@@ -3403,6 +3421,10 @@ if ($cams) { $cams -join "`n" }
 
   Future<void> setAutoInterRegionalEnabled(bool enabled) async {
     isAutoInterRegionalEnabled = enabled;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('mayak_auto_interregional_v3', enabled);
+    } catch (_) {}
     if (enabled) {
       if (discoveredExternalEndpoint.isEmpty && upnpExternalIp.isEmpty && globalIpv6Address.isEmpty) {
         await discoverExternalEndpointAuto(forceRefresh: true);
@@ -3410,11 +3432,235 @@ if ($cams) { $cams -join "`n" }
         _refreshInterRegionalStatusText();
         onStateChanged();
       }
+      if (isDhtDiscoveryEnabled) {
+        unawaited(publishMyEndpointsToDht());
+      }
     } else {
       _stunKeepaliveTimer?.cancel();
       interRegionalStatusText = 'Выключен';
       onStateChanged();
     }
+  }
+
+  Future<void> setDhtDiscoveryEnabled(bool enabled) async {
+    isDhtDiscoveryEnabled = enabled;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('mayak_dht_enabled_v3', enabled);
+    } catch (_) {}
+    if (enabled && isAutoInterRegionalEnabled) {
+      unawaited(publishMyEndpointsToDht());
+    }
+    onStateChanged();
+  }
+
+  Future<void> _initStaticIdAndDhtSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedNospamHex = prefs.getString('mayak_nospam_hex_v3');
+      if (savedNospamHex != null && savedNospamHex.length == 8) {
+        _myNospamBytes = _fromHex(savedNospamHex);
+      } else {
+        _myNospamBytes = _randomBytes(4);
+        await prefs.setString('mayak_nospam_hex_v3', _toHex(_myNospamBytes));
+      }
+      if (signPubHex.length == 64) {
+        myStaticMayakId = MayakStaticId.buildFromPubAndNospam(_fromHex(signPubHex), _myNospamBytes);
+      }
+      isDhtDiscoveryEnabled = prefs.getBool('mayak_dht_enabled_v3') ?? true;
+      isAutoInterRegionalEnabled = prefs.getBool('mayak_auto_interregional_v3') ?? true;
+      final cachedNodes = prefs.getStringList('mayak_dht_nodes_v3');
+      if (cachedNodes != null && cachedNodes.isNotEmpty) {
+        _dhtClient.importCachedNodes(cachedNodes);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> rotateMyNospam() async {
+    _myNospamBytes = _randomBytes(4);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('mayak_nospam_hex_v3', _toHex(_myNospamBytes));
+    } catch (_) {}
+    if (signPubHex.length == 64) {
+      myStaticMayakId = MayakStaticId.buildFromPubAndNospam(_fromHex(signPubHex), _myNospamBytes);
+    }
+    _addLog('Сменён nospam — старый ID для новых заявок отключён (старые друзья сохранены)');
+    onStateChanged();
+  }
+
+  Future<({SimpleKeyPair slotKeyPair, Uint8List slotPub, Uint8List aeadKey, Uint8List salt})?> _derivePairDhtSlot({
+    required ContactProfile contact,
+    required bool isOutgoingFromMe,
+    required int utcDayEpoch,
+  }) async {
+    if (contact.dhPubHex.length != 64 || contact.signPubHex.length != 64 || signPubHex.length != 64) {
+      return null;
+    }
+    try {
+      final peerDh = SimplePublicKey(_fromHex(contact.dhPubHex), type: KeyPairType.x25519);
+      final shared = await _x25519.sharedSecretKey(keyPair: _dhKeyPair, remotePublicKey: peerDh);
+      final senderSign = isOutgoingFromMe ? signPubHex : contact.signPubHex;
+      final receiverSign = isOutgoingFromMe ? contact.signPubHex : signPubHex;
+      final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+      final seedKey = await hkdf.deriveKey(
+        secretKey: shared,
+        nonce: utf8.encode('mayak-dht-slot-v1'),
+        info: utf8.encode('seed|$senderSign|$receiverSign|$utcDayEpoch'),
+      );
+      final seedBytes = await seedKey.extractBytes();
+      final aeadKeyObj = await hkdf.deriveKey(
+        secretKey: shared,
+        nonce: utf8.encode('mayak-dht-slot-v1'),
+        info: utf8.encode('aead|$senderSign|$receiverSign|$utcDayEpoch'),
+      );
+      final aeadBytes = Uint8List.fromList(await aeadKeyObj.extractBytes());
+      final saltKeyObj = await Hkdf(hmac: Hmac.sha256(), outputLength: 8).deriveKey(
+        secretKey: shared,
+        nonce: utf8.encode('mayak-dht-slot-v1'),
+        info: utf8.encode('salt|$senderSign|$receiverSign|$utcDayEpoch'),
+      );
+      final saltBytes = Uint8List.fromList(await saltKeyObj.extractBytes());
+      final slotKp = await _ed25519.newKeyPairFromSeed(seedBytes);
+      final slotPub = Uint8List.fromList((await slotKp.extractPublicKey()).bytes);
+      return (slotKeyPair: slotKp, slotPub: slotPub, aeadKey: aeadBytes, salt: saltBytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Публикация своих актуальных координат в приватных суточных слотах Mainline DHT (до 24 контактов)
+  Future<int> publishMyEndpointsToDht() async {
+    if (!isAutoInterRegionalEnabled || !isDhtDiscoveryEnabled) return 0;
+    await _initCallUdpSocket();
+    if (discoveredExternalEndpoint.isEmpty && globalIpv6Address.isEmpty) {
+      await discoverExternalEndpointAuto();
+    }
+    if (discoveredExternalEndpoint.isEmpty && globalIpv6Address.isEmpty) return 0;
+
+    final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    final dayEpoch = nowSec ~/ 86400;
+    final epochs = <int>[dayEpoch];
+    if ((nowSec % 86400) >= 22 * 3600) {
+      epochs.add(dayEpoch + 1);
+    }
+
+    final payloadJson = jsonEncode({
+      'v': 1,
+      'u': discoveredExternalEndpoint,
+      'v6': globalIpv6Address,
+      'p': listenPort,
+      'ts': nowSec,
+    });
+    final plainBytes = utf8.encode(payloadJson);
+
+    int publishedContacts = 0;
+    final targets = knownContacts.values.take(24).toList();
+    for (final c in targets) {
+      for (final ep in epochs) {
+        final slot = await _derivePairDhtSlot(
+          contact: c,
+          isOutgoingFromMe: true,
+          utcDayEpoch: ep,
+        );
+        if (slot == null) continue;
+        final nonce = _randomBytes(12);
+        final box = await _cipher.encrypt(
+          plainBytes,
+          secretKey: SecretKey(slot.aeadKey),
+          nonce: nonce,
+          aad: utf8.encode('$ep|$nowSec'),
+        );
+        final blob = Uint8List(12 + box.cipherText.length + 16);
+        blob.setRange(0, 12, nonce);
+        blob.setRange(12, 12 + box.cipherText.length, box.cipherText);
+        blob.setRange(12 + box.cipherText.length, blob.length, box.mac.bytes);
+        final stored = await _dhtClient.putMutable(
+          slotKeyPair: slot.slotKeyPair,
+          valueBytes: blob,
+          seq: nowSec,
+          salt: slot.salt,
+        );
+        if (stored > 0) publishedContacts++;
+      }
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('mayak_dht_nodes_v3', _dhtClient.exportCachedNodes());
+    } catch (_) {}
+    _addLog('[DHT] Координаты обновлены в приватных слотах ($publishedContacts, узлов DHT: ${_dhtClient.knownNodesCount})', triggerUi: false);
+    onStateChanged();
+    return publishedContacts;
+  }
+
+  /// Автопоиск свежего IP:port друга в его приватном суточном слоте Mainline DHT + автозапуск пробивки!
+  Future<bool> resolveContactEndpointFromDht(String peerId) async {
+    if (!isAutoInterRegionalEnabled || !isDhtDiscoveryEnabled) return false;
+    final contact = knownContacts[peerId];
+    if (contact == null || isPeerDirectlyConnected(peerId)) return false;
+    await _initCallUdpSocket();
+
+    final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    final dayEpoch = nowSec ~/ 86400;
+    final epochsToTry = <int>[dayEpoch];
+    if ((nowSec % 86400) < 2 * 3600) {
+      epochsToTry.add(dayEpoch - 1);
+    }
+
+    for (final ep in epochsToTry) {
+      final slot = await _derivePairDhtSlot(
+        contact: contact,
+        isOutgoingFromMe: false,
+        utcDayEpoch: ep,
+      );
+      if (slot == null) continue;
+      final res = await _dhtClient.getMutable(pubKey32: slot.slotPub, salt: slot.salt);
+      if (res == null || res.value.length <= 28) continue;
+      try {
+        final nonce = res.value.sublist(0, 12);
+        final ct = res.value.sublist(12, res.value.length - 16);
+        final mac = res.value.sublist(res.value.length - 16);
+        final plain = await _cipher.decrypt(
+          SecretBox(ct, nonce: nonce, mac: Mac(mac)),
+          secretKey: SecretKey(slot.aeadKey),
+          aad: utf8.encode('$ep|${res.seq}'),
+        );
+        final map = jsonDecode(utf8.decode(plain)) as Map<String, dynamic>;
+        final extUdp = (map['u'] ?? '').toString().trim();
+        final v6 = (map['v6'] ?? '').toString().trim();
+        final tcpPort = (map['p'] as num?)?.toInt() ?? defaultTcpPort;
+
+        bool triggered = false;
+        if (extUdp.contains(':')) {
+          final parts = extUdp.split(':');
+          final uIp = parts.first.trim();
+          final uPort = int.tryParse(parts.last.trim()) ?? 0;
+          if (uIp.isNotEmpty && uPort > 0) {
+            _remoteUdpPeers[peerId] = (ip: uIp, port: uPort, lastSeenMs: 0);
+            _ensureUdpPeerPunchLoop();
+            for (int k = 0; k < 4; k++) {
+              Future.delayed(Duration(milliseconds: k * 350), () {
+                _sendUdpHolePunch(uIp, uPort);
+                if (k == 1 || k == 3) {
+                  _sendUdpMeshJson(uIp, uPort, _buildHelloJson());
+                }
+              });
+            }
+            _addLog('[DHT] Найден свежий адрес ${contact.displayTitle}: $uIp:$uPort -> старт пробивки!');
+            triggered = true;
+          }
+        }
+        if (v6.isNotEmpty && v6.contains(':')) {
+          unawaited(connectToHost(v6, tcpPort, expectedNodeId: peerId, timeout: const Duration(seconds: 4), forceNewConnection: true));
+          triggered = true;
+        }
+        if (triggered) {
+          onStateChanged();
+          return true;
+        }
+      } catch (_) {}
+    }
+    return false;
   }
 
   static bool _isPrivateOrCgnatIpv4(String ip) {
@@ -5071,8 +5317,30 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       return;
     }
 
-    // Если файла на устройстве нет (еще не скачивали ИЛИ стерли из кэша) — запрашиваем скачивание у отправителя (FILE_PULL_REQ)
-    final contact = knownContacts[msg.senderId];
+    // Проверяем кэш по fileId (если путь в msg.filePath устарел после обновления)
+    try {
+      final cacheDir = await _getInternalCacheFilesDir();
+      if (await cacheDir.exists()) {
+        await for (final ent in cacheDir.list()) {
+          if (ent is File && ent.path.contains(msg.msgId) && !ent.path.endsWith('.part')) {
+            msg.filePath = ent.path;
+            msg.isMediaRevealed = true;
+            msg.isDownloading = false;
+            msg.transferProgress = 1.0;
+            await _saveContactsAndChats();
+            onStateChanged();
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+
+    final oldAsm = _incomingFiles.remove(msg.msgId);
+    if (oldAsm != null) {
+      try { await oldAsm.openRaf?.close(); } catch (_) {}
+    }
+    final pullTargetId = msg.senderId == nodeId ? msg.peerId : msg.senderId;
+    final contact = knownContacts[pullTargetId];
     if (contact == null) {
       _addLog('Отправитель файла не найден в списке контактов');
       return;
@@ -5089,7 +5357,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
       'nick': nickname,
     });
     await _encryptAndQueueSealedDataPacket(
-      targetNodeId: msg.senderId,
+      targetNodeId: pullTargetId,
       contact: contact,
       msgId: reqId,
       sealedPayloadBytes: utf8.encode(reqPayload),
@@ -5493,7 +5761,7 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final sb = StringBuffer();
-    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v3.0.2) ===');
+    sb.writeln('=== MAYAK DIAGNOSTIC REPORT (v3.1.0) ===');
     sb.writeln('Time: ${now.toIso8601String()}');
     sb.writeln('Platform: ${Platform.operatingSystem} (${Platform.operatingSystemVersion})');
     sb.writeln('NodeId: $nodeId | Nick: $nickname');
@@ -5501,7 +5769,8 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     sb.writeln('TCP4 Server: ${_tcpServer != null ? "LISTEN :$listenPort" : "OFF"}');
     sb.writeln('TCP6 Server: ${_tcpServerV6 != null ? "LISTEN :$listenPort" : "OFF"}');
     sb.writeln('UDP Call/Mesh Socket: ${_callUdpSocket != null ? "OPEN :$_callUdpListenPort" : "OFF"}');
-    sb.writeln('InterRegional Enabled: $isAutoInterRegionalEnabled');
+    sb.writeln('InterRegional Enabled: $isAutoInterRegionalEnabled | DHT Enabled: $isDhtDiscoveryEnabled (nodes: ${_dhtClient.knownNodesCount})');
+    sb.writeln('Static Mayak-ID: ${myStaticMayakId.isEmpty ? "-" : myStaticMayakId}');
     sb.writeln('InterRegional Status: $interRegionalStatusText');
     sb.writeln('UPnP Mapped: $upnpPortMapped | UPnP Ext IP: ${upnpExternalIp.isEmpty ? "-" : upnpExternalIp}');
     sb.writeln('Global IPv6: ${globalIpv6Address.isEmpty ? "-" : globalIpv6Address}');
@@ -5645,7 +5914,44 @@ Add-Type -TypeDefinition \$code -ReferencedAssemblies System.Drawing, System.Win
     await _initCallUdpSocket();
     await refreshNetworkCache(force: true);
     await _startLanAutoDiscovery();
-    _addLog('Защищенный узел v1.5 готов (порт $listenPort)');
+    await _initStaticIdAndDhtSettings();
+    if (isAutoInterRegionalEnabled) {
+      unawaited(discoverExternalEndpointAuto(forceRefresh: true).then((_) {
+        if (isDhtDiscoveryEnabled) {
+          unawaited(publishMyEndpointsToDht());
+        }
+      }));
+    }
+    _dhtRepublishTimer?.cancel();
+    _dhtRepublishTimer = Timer.periodic(const Duration(minutes: 50), (_) {
+      if (isAutoInterRegionalEnabled && isDhtDiscoveryEnabled) {
+        unawaited(publishMyEndpointsToDht());
+      }
+    });
+    _watchdogMono
+      ..reset()
+      ..start();
+    _lastWatchdogWallMs = DateTime.now().millisecondsSinceEpoch;
+    _sleepWatchdogTimer?.cancel();
+    _sleepWatchdogTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final wallDelta = nowMs - _lastWatchdogWallMs;
+      final monoDelta = _watchdogMono.elapsedMilliseconds;
+      _lastWatchdogWallMs = nowMs;
+      _watchdogMono
+        ..reset()
+        ..start();
+      if ((wallDelta - monoDelta).abs() > 30000) {
+        _addLog('[SYS] Обнаружен выход из сна — обновляю сеть и координаты...', triggerUi: false);
+        unawaited(refreshNetworkCache(force: true));
+        if (isAutoInterRegionalEnabled) {
+          unawaited(discoverExternalEndpointAuto(forceRefresh: true).then((_) {
+            if (isDhtDiscoveryEnabled) unawaited(publishMyEndpointsToDht());
+          }));
+        }
+      }
+    });
+    _addLog('Защищенный узел v3.1 готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -7129,8 +7435,36 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
   Future<void> _streamFileChunksToPeer(
       String targetNodeId, String fileId) async {
     final contact = knownContacts[targetNodeId];
-    final filePath = offeredFileCatalog[fileId];
     if (contact == null) return;
+    String? filePath = offeredFileCatalog[fileId];
+    if (filePath == null || !await File(filePath).exists()) {
+      for (final list in chatHistory.values) {
+        for (final m in list) {
+          if (m.msgId == fileId && m.filePath != null && m.filePath!.isNotEmpty) {
+            if (await File(m.filePath!).exists()) {
+              filePath = m.filePath;
+              offeredFileCatalog[fileId] = filePath!;
+              break;
+            }
+          }
+        }
+        if (filePath != null && await File(filePath).exists()) break;
+      }
+    }
+    if (filePath == null || !await File(filePath).exists()) {
+      try {
+        final cacheDir = await _getInternalCacheFilesDir();
+        if (await cacheDir.exists()) {
+          await for (final ent in cacheDir.list()) {
+            if (ent is File && ent.path.contains(fileId) && !ent.path.endsWith('.part')) {
+              filePath = ent.path;
+              offeredFileCatalog[fileId] = filePath!;
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
     if (filePath == null || !await File(filePath).exists()) {
       final missPayload = jsonEncode({
         'v': 2,
@@ -7167,7 +7501,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         confirmedChunkIndex: 0,
       ),
     );
-    if (job.isSending) return;
+    if (job.isSending) {
+      pendingFileJobs.remove('${fileId}_$targetNodeId');
+    }
     job.isSending = true;
 
     final raf = await file.open(mode: FileMode.read);
@@ -8635,10 +8971,14 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             if (msg.msgId == fid) {
               msg.isDownloading = false;
               msg.transferProgress = 0.0;
+              if (!msg.text.contains('(удалён отправителем)')) {
+                msg.text = '${msg.text} (удалён отправителем)';
+              }
               break;
             }
           }
         }
+        onStateChanged();
         _addLog('Файл $fid больше не доступен на устройстве отправителя.');
       } else if (kind == 'GROUP_INVITE') {
         final gid = (envelope['gid'] ?? '').toString();
