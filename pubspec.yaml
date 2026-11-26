@@ -1,7 +1,7 @@
 name: p2p_mesh
 description: Autonomous P2P & BLE Mesh Intercom (Zero-Server)
 publish_to: 'none'
-version: 3.2.3+3231
+version: 3.2.4+3241
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -16,7 +16,7 @@ dependencies:
   image: ^4.2.0
   zxing2: ^0.2.3
   flutter_soloud: 3.2.7
-  flutter_webrtc: ^1.6.2
+  flutter_webrtc: 0.12.11
 
 dev_dependencies:
   flutter_test:
