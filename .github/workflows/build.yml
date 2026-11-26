@@ -103,6 +103,7 @@ jobs:
           android {{
               namespace = "com.mayak.mesh.p2p_mesh"
               compileSdk = 36
+              ndkVersion = "27.0.12077973"
 
               compileOptions {{
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -129,7 +130,7 @@ jobs:
                   minSdk = 24
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.2.2"
+                  versionName = "3.2.3"
               }}
 
               packaging {{
@@ -171,6 +172,7 @@ jobs:
           android {{
               namespace "com.mayak.mesh.p2p_mesh"
               compileSdk 36
+              ndkVersion "27.0.12077973"
 
               compileOptions {{
                   sourceCompatibility JavaVersion.VERSION_17
@@ -197,7 +199,7 @@ jobs:
                   minSdkVersion 24
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.2.2"
+                  versionName "3.2.3"
               }}
 
               packagingOptions {{
@@ -273,7 +275,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
-              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
 
               <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
@@ -2829,7 +2831,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release --build-name=3.2.2 --build-number=$((3220 + ${GITHUB_RUN_NUMBER:-1}))
+        run: flutter build apk --release --build-name=3.2.3 --build-number=$((3230 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
