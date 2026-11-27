@@ -4411,13 +4411,15 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                                     if (m.isMe) ...[
                                       const SizedBox(width: 4),
                                       Icon(
-                                        m.isDelivered
+                                        m.isRead || m.isDelivered
                                             ? Icons.done_all
                                             : Icons.schedule,
                                         size: 14,
-                                        color: m.isDelivered
-                                            ? MayakTheme.accentCyan
-                                            : Colors.amberAccent,
+                                        color: m.isRead
+                                            ? MayakTheme.accentEmerald
+                                            : (m.isDelivered
+                                                ? Colors.white60
+                                                : Colors.amberAccent),
                                       ),
                                     ],
                                   ],

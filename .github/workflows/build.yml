@@ -130,7 +130,7 @@ jobs:
                   minSdk = 24
                   targetSdk = 34
                   versionCode = {ver_code}
-                  versionName = "3.2.7"
+                  versionName = "3.2.8"
               }}
 
               packaging {{
@@ -199,7 +199,7 @@ jobs:
                   minSdkVersion 24
                   targetSdkVersion 34
                   versionCode {ver_code}
-                  versionName "3.2.7"
+                  versionName "3.2.8"
               }}
 
               packagingOptions {{
@@ -315,6 +315,11 @@ jobs:
                       android:exported="false"
                       android:foregroundServiceType="remoteMessaging|dataSync" />
 
+                  <receiver
+                      android:name=".MayakNotifActionReceiver"
+                      android:enabled="true"
+                      android:exported="false" />
+
 
                   <activity
                       android:name=".MainActivity"
@@ -354,6 +359,7 @@ jobs:
           import android.app.NotificationManager
           import android.app.PendingIntent
           import android.app.Service
+          import android.content.BroadcastReceiver
           import android.content.ContentValues
           import android.content.Context
           import android.content.Intent
@@ -389,6 +395,7 @@ jobs:
           import android.webkit.MimeTypeMap
           import androidx.core.app.ActivityCompat
           import androidx.core.app.NotificationCompat
+          import androidx.core.app.RemoteInput
           import androidx.core.content.ContextCompat
           import androidx.core.content.FileProvider
           import com.google.android.gms.nearby.Nearby
@@ -533,13 +540,114 @@ jobs:
               override fun onBind(intent: Intent?): IBinder? = null
           }
 
+          class MayakNotifActionReceiver : BroadcastReceiver() {
+              companion object {
+                  const val ACTION_MARK_READ = "com.mayak.mesh.ACTION_MARK_READ"
+                  const val ACTION_INLINE_REPLY = "com.mayak.mesh.ACTION_INLINE_REPLY"
+                  const val KEY_TEXT_REPLY = "key_text_reply"
+                  const val EXTRA_CHAT_ID = "extra_chat_id"
+                  const val EXTRA_MSG_ID = "extra_msg_id"
+                  const val EXTRA_NOTIF_ID = "extra_notif_id"
+                  const val EXTRA_TITLE = "extra_title"
+              }
+
+              override fun onReceive(context: Context, intent: Intent) {
+                  val action = intent.action ?: return
+                  val chatId = intent.getStringExtra(EXTRA_CHAT_ID) ?: ""
+                  val msgId = intent.getStringExtra(EXTRA_MSG_ID) ?: ""
+                  val notifId = intent.getIntExtra(EXTRA_NOTIF_ID, -1)
+                  val title = intent.getStringExtra(EXTRA_TITLE) ?: "Маяк"
+                  val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+
+                  if (action == ACTION_MARK_READ) {
+                      if (notifId >= 0) {
+                          try { nm?.cancel(notifId) } catch (_: Throwable) {}
+                      }
+                      MainActivity.dispatchNotificationAction(
+                          mapOf(
+                              "action" to "mark_read",
+                              "chatId" to chatId,
+                              "msgId" to msgId
+                          )
+                      )
+                  } else if (action == ACTION_INLINE_REPLY) {
+                      val results = RemoteInput.getResultsFromIntent(intent)
+                      val replyText = results?.getCharSequence(KEY_TEXT_REPLY)?.toString()?.trim() ?: ""
+                      if (replyText.isNotEmpty()) {
+                          if (notifId >= 0 && nm != null) {
+                              try {
+                                  val confirmNotif = NotificationCompat.Builder(context, MainActivity.MSG_NOTIF_CHANNEL_ID)
+                                      .setSmallIcon(android.R.drawable.stat_notify_chat)
+                                      .setContentTitle(title)
+                                      .setContentText("Вы: $replyText")
+                                      .setAutoCancel(true)
+                                      .setOnlyAlertOnce(true)
+                                      .setSilent(true)
+                                      .apply {
+                                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                              setTimeoutAfter(1400L)
+                                          }
+                                      }
+                                      .build()
+                                  nm.notify(notifId, confirmNotif)
+                                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                                      Handler(Looper.getMainLooper()).postDelayed({
+                                          try { nm.cancel(notifId) } catch (_: Throwable) {}
+                                      }, 1400L)
+                                  }
+                              } catch (_: Throwable) {
+                                  try { nm.cancel(notifId) } catch (_: Throwable) {}
+                              }
+                          }
+                          MainActivity.dispatchNotificationAction(
+                              mapOf(
+                                  "action" to "inline_reply",
+                                  "chatId" to chatId,
+                                  "msgId" to msgId,
+                                  "replyText" to replyText
+                              )
+                          )
+                      } else if (notifId >= 0) {
+                          try { nm?.cancel(notifId) } catch (_: Throwable) {}
+                      }
+                  }
+              }
+          }
+
           class MainActivity : FlutterActivity() {
               companion object {
+                  const val MSG_NOTIF_CHANNEL_ID = "mayak_poco_high_alert_v3"
                   var currentInstance: MainActivity? = null
+                  private val pendingNotifActions = java.util.Collections.synchronizedList(mutableListOf<Map<String, String>>())
+
+                  fun dispatchNotificationAction(payload: Map<String, String>) {
+                      val inst = currentInstance
+                      val ch = inst?.methodChannel
+                      if (inst != null && ch != null) {
+                          inst.mainHandler.post {
+                              try {
+                                  ch.invokeMethod("onNotificationAction", payload)
+                              } catch (_: Throwable) {
+                                  pendingNotifActions.add(payload)
+                              }
+                          }
+                      } else {
+                          pendingNotifActions.add(payload)
+                      }
+                  }
+
+                  fun drainPendingNotificationActions(): List<Map<String, String>> {
+                      synchronized(pendingNotifActions) {
+                          if (pendingNotifActions.isEmpty()) return emptyList()
+                          val copy = pendingNotifActions.toList()
+                          pendingNotifActions.clear()
+                          return copy
+                      }
+                  }
               }
 
               private val CHANNEL = "mayak/native"
-              private val NOTIF_CHANNEL_ID = "mayak_poco_high_alert_v3"
+              private val NOTIF_CHANNEL_ID = MSG_NOTIF_CHANNEL_ID
               private var methodChannel: MethodChannel? = null
               private var flutterEngineRef: FlutterEngine? = null
               private var multicastLock: WifiManager.MulticastLock? = null
@@ -880,11 +988,25 @@ jobs:
                               "showNotification" -> {
                                   val title = call.argument<String>("title") ?: "Новое сообщение"
                                   val body = call.argument<String>("body") ?: ""
+                                  val chatId = call.argument<String>("chatId") ?: ""
+                                  val msgId = call.argument<String>("msgId") ?: ""
+                                  val allowActions = call.argument<Boolean>("allowActions") ?: true
                                   val forceWhenOpen = call.argument<Boolean>("forceWhenOpen") ?: false
                                   if (!isAppInForeground || forceWhenOpen) {
-                                      showSystemNotificationWithPocoBypass(title, body)
+                                      showSystemNotificationWithPocoBypass(title, body, chatId, msgId, allowActions)
                                   }
                                   result.success(true)
+                              }
+                              "cancelNotificationForChat" -> {
+                                  val chatId = call.argument<String>("chatId") ?: ""
+                                  if (chatId.isNotEmpty()) {
+                                      val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                                      nm?.cancel(notifIdForChat(chatId))
+                                  }
+                                  result.success(true)
+                              }
+                              "getPendingNotificationActions" -> {
+                                  result.success(drainPendingNotificationActions())
                               }
                               "checkNearbyPermissions" -> {
                                   result.success(getMissingNearbyPermissions().isEmpty())
@@ -1693,7 +1815,17 @@ jobs:
                   )
               }
 
-              private fun showSystemNotificationWithPocoBypass(title: String, body: String) {
+              private fun notifIdForChat(chatId: String): Int {
+                  return 10000 + (chatId.hashCode() and 0x7FFF)
+              }
+
+              private fun showSystemNotificationWithPocoBypass(
+                  title: String,
+                  body: String,
+                  chatId: String = "",
+                  msgId: String = "",
+                  allowActions: Boolean = true
+              ) {
                   try {
                       val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
                       @Suppress("DEPRECATION")
@@ -1721,20 +1853,25 @@ jobs:
                   } catch (_: Throwable) {}
 
                   try {
+                      val notifId = if (chatId.isNotEmpty()) notifIdForChat(chatId) else notifIdCounter++
                       val intent = Intent(this, MainActivity::class.java).apply {
                           flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                          if (chatId.isNotEmpty()) {
+                              putExtra("open_chat_id", chatId)
+                          }
                       }
                       val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                           PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                       } else {
                           PendingIntent.FLAG_UPDATE_CURRENT
                       }
-                      val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
+                      val pendingIntent = PendingIntent.getActivity(this, notifId, intent, flags)
 
                       val builder = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
                           .setSmallIcon(android.R.drawable.stat_notify_chat)
                           .setContentTitle(title)
                           .setContentText(body)
+                          .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                           .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                           .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                           .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -1743,8 +1880,61 @@ jobs:
                           .setAutoCancel(true)
                           .setContentIntent(pendingIntent)
 
+                      if (allowActions && chatId.isNotEmpty()) {
+                          val readIntent = Intent(this, MayakNotifActionReceiver::class.java).apply {
+                              action = MayakNotifActionReceiver.ACTION_MARK_READ
+                              putExtra(MayakNotifActionReceiver.EXTRA_CHAT_ID, chatId)
+                              putExtra(MayakNotifActionReceiver.EXTRA_MSG_ID, msgId)
+                              putExtra(MayakNotifActionReceiver.EXTRA_NOTIF_ID, notifId)
+                              putExtra(MayakNotifActionReceiver.EXTRA_TITLE, title)
+                          }
+                          val readFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                              PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                          } else {
+                              PendingIntent.FLAG_UPDATE_CURRENT
+                          }
+                          val readPi = PendingIntent.getBroadcast(this, notifId * 2, readIntent, readFlags)
+                          val readAction = NotificationCompat.Action.Builder(
+                              android.R.drawable.ic_menu_view,
+                              "Прочитать",
+                              readPi
+                          )
+                              .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
+                              .setShowsUserInterface(false)
+                              .build()
+                          builder.addAction(readAction)
+
+                          val replyIntent = Intent(this, MayakNotifActionReceiver::class.java).apply {
+                              action = MayakNotifActionReceiver.ACTION_INLINE_REPLY
+                              putExtra(MayakNotifActionReceiver.EXTRA_CHAT_ID, chatId)
+                              putExtra(MayakNotifActionReceiver.EXTRA_MSG_ID, msgId)
+                              putExtra(MayakNotifActionReceiver.EXTRA_NOTIF_ID, notifId)
+                              putExtra(MayakNotifActionReceiver.EXTRA_TITLE, title)
+                          }
+                          val replyFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                              PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                          } else {
+                              PendingIntent.FLAG_UPDATE_CURRENT
+                          }
+                          val replyPi = PendingIntent.getBroadcast(this, notifId * 2 + 1, replyIntent, replyFlags)
+                          val remoteInput = RemoteInput.Builder(MayakNotifActionReceiver.KEY_TEXT_REPLY)
+                              .setLabel("Быстрый ответ...")
+                              .build()
+                          val replyAction = NotificationCompat.Action.Builder(
+                              android.R.drawable.ic_menu_send,
+                              "Ответить",
+                              replyPi
+                          )
+                              .addRemoteInput(remoteInput)
+                              .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
+                              .setShowsUserInterface(false)
+                              .setAllowGeneratedReplies(true)
+                              .build()
+                          builder.addAction(replyAction)
+                      }
+
                       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                      nm?.notify(notifIdCounter++, builder.build())
+                      nm?.notify(notifId, builder.build())
                   } catch (_: Throwable) {}
               }
 
@@ -2837,7 +3027,7 @@ jobs:
           flutter test test/mesh_core_test.dart
 
       - name: Build Release APK
-        run: flutter build apk --release --build-name=3.2.7 --build-number=$((3270 + ${GITHUB_RUN_NUMBER:-1}))
+        run: flutter build apk --release --build-name=3.2.8 --build-number=$((3280 + ${GITHUB_RUN_NUMBER:-1}))
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

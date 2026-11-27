@@ -595,6 +595,7 @@ class ChatMessage {
   final int timestamp;
   final bool isMe;
   bool isDelivered;
+  bool isRead;
   String? filePath;
   String? fileName;
   int? fileSize;
@@ -618,6 +619,7 @@ class ChatMessage {
     required this.timestamp,
     required this.isMe,
     this.isDelivered = false,
+    this.isRead = false,
     this.filePath,
     this.fileName,
     this.fileSize,
@@ -686,6 +688,7 @@ class ChatMessage {
         'ts': timestamp,
         'me': isMe,
         'ack': isDelivered,
+        'rd': isRead,
         'fp': filePath,
         'fn': fileName,
         'fs': fileSize,
@@ -732,6 +735,7 @@ class ChatMessage {
       timestamp: (j['ts'] as num?)?.toInt() ?? 0,
       isMe: isMeVal,
       isDelivered: (j['ack'] as bool?) ?? false,
+      isRead: (j['rd'] as bool?) ?? false,
       filePath: j['fp'] as String?,
       fileName: j['fn'] as String?,
       fileSize: (j['fs'] as num?)?.toInt(),
@@ -1183,7 +1187,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.2.7';
+  static const String currentAppVersion = '3.2.8';
 
   /// Безопасный парсер адреса узла (убирает udp:/tcp:, поддерживает IPv4, [IPv6]:port и голый IPv6)
   static ({String host, int port, bool isUdp}) parseEndpoint(String raw, {int defaultPort = 42070}) {
@@ -1636,6 +1640,11 @@ class MeshEngine {
 
   void markGroupRead(String groupId) {
     unreadGroupCounts[groupId] = 0;
+    if (Platform.isAndroid) {
+      unawaited(_nativeChannel.invokeMethod('cancelNotificationForChat', {
+        'chatId': groupChatKey(groupId),
+      }).catchError((_) {}));
+    }
     onStateChanged();
   }
 
@@ -5547,6 +5556,12 @@ try {
       unreadBroadcastCount = 0;
     } else {
       knownContacts[peerId]?.unreadCount = 0;
+      unawaited(sendReadReceipt(peerId));
+    }
+    if (Platform.isAndroid) {
+      unawaited(_nativeChannel.invokeMethod('cancelNotificationForChat', {
+        'chatId': peerId,
+      }).catchError((_) {}));
     }
     onStateChanged();
   }
@@ -6147,6 +6162,13 @@ try {
           _audioProgressTimer?.cancel();
           onStateChanged();
           break;
+        case 'onNotificationAction':
+          if (call.arguments is Map) {
+            await _handleNotificationActionPayload(
+              Map<String, dynamic>.from(call.arguments as Map),
+            );
+          }
+          break;
         case 'onNativeLog':
           final msg = call.arguments as String;
           _addLog(msg);
@@ -6293,6 +6315,9 @@ try {
     if (Platform.isWindows) unawaited(_cleanupWindowsOldUpdateFiles());
     _addLog('Защищенный узел v$currentAppVersion готов (порт $listenPort)');
 
+    if (Platform.isAndroid) {
+      unawaited(_drainPendingNotificationActions());
+    }
     unawaited(scanLocalSubnet(quickOnly: true));
   }
 
@@ -8051,8 +8076,10 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
   Future<void> _triggerIncomingNotification(
     String senderId,
     String senderName,
-    String text,
-  ) async {
+    String text, {
+    String? msgId,
+    bool allowActions = true,
+  }) async {
     final isChatCurrentlyVisible = (activeOpenChatId == senderId);
     try {
       await HapticFeedback.mediumImpact();
@@ -8066,10 +8093,152 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         await _nativeChannel.invokeMethod('showNotification', {
           'title': 'Маяк: $senderName',
           'body': text,
+          'chatId': senderId,
+          'msgId': msgId ?? '',
+          'allowActions': allowActions,
           'forceWhenOpen': !isChatCurrentlyVisible,
         });
       } catch (_) {}
     }
+  }
+
+  /// Отмечает входящие сообщения от [peerId] прочитанными и отправляет E2EE-подтверждение `MSG_READ`.
+  Future<bool> sendReadReceipt(String peerId, {String? upToMsgId}) async {
+    if (peerId.isEmpty ||
+        peerId == broadcastChannelId ||
+        peerId == savedChatKey ||
+        peerId.startsWith('group:')) {
+      return false;
+    }
+    final contact = knownContacts[peerId];
+    if (contact == null || contact.dhPubHex.isEmpty) return false;
+
+    final msgs = chatHistory[peerId];
+    final unreadIds = <String>[];
+    if (msgs != null) {
+      for (final m in msgs) {
+        if (!m.isMe && !m.isRead && m.msgId.isNotEmpty) {
+          m.isRead = true;
+          unreadIds.add(m.msgId);
+        }
+      }
+    }
+    if (upToMsgId != null && upToMsgId.isNotEmpty && !unreadIds.contains(upToMsgId)) {
+      if (msgs == null || !msgs.any((m) => m.msgId == upToMsgId && m.isMe)) {
+        unreadIds.add(upToMsgId);
+      }
+    }
+    if (unreadIds.isEmpty) return false;
+
+    final boundedIds = unreadIds.length > 50
+        ? unreadIds.sublist(unreadIds.length - 50)
+        : unreadIds;
+    final padLen = 16 + Random.secure().nextInt(32);
+    final payloadMap = <String, dynamic>{
+      'v': 2,
+      'kind': 'MSG_READ',
+      'msgIds': boundedIds,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+      'pad': base64Encode(_randomBytes(padLen)),
+    };
+    await _encryptAndQueueSealedDataPacket(
+      targetNodeId: peerId,
+      contact: contact,
+      msgId: 'rd_${_randomHex(12)}',
+      sealedPayloadBytes: utf8.encode(jsonEncode(payloadMap)),
+      persistInOutbox: true,
+    );
+    unawaited(_saveContactsAndChats());
+    return true;
+  }
+
+  /// Применяет полученное по E2EE подтверждение прочтения [msgIds] от [peerId].
+  int applyReadReceiptFromPeer(String peerId, Iterable<String> msgIds) {
+    final targetIds = msgIds.where((id) => id.isNotEmpty).toSet();
+    if (targetIds.isEmpty) return 0;
+    final msgs = chatHistory[peerId];
+    if (msgs == null || msgs.isEmpty) return 0;
+    var updated = 0;
+    for (final m in msgs) {
+      if (m.isMe && targetIds.contains(m.msgId)) {
+        if (!m.isDelivered || !m.isRead) {
+          m.isDelivered = true;
+          m.isRead = true;
+          updated++;
+        }
+      }
+    }
+    return updated;
+  }
+
+  /// Обрабатывает нажатие кнопки «Прочитать» в Android-уведомлении.
+  Future<void> markNotificationAsRead(String chatId, {String? msgId}) async {
+    if (chatId.isEmpty) return;
+    if (chatId == broadcastChannelId) {
+      unreadBroadcastCount = 0;
+    } else if (chatId.startsWith('group:')) {
+      final gid = chatId.substring(6);
+      unreadGroupCounts[gid] = 0;
+    } else {
+      knownContacts[chatId]?.unreadCount = 0;
+      await sendReadReceipt(chatId, upToMsgId: msgId);
+    }
+    if (Platform.isAndroid) {
+      unawaited(_nativeChannel.invokeMethod('cancelNotificationForChat', {
+        'chatId': chatId,
+      }).catchError((_) {}));
+    }
+    unawaited(_saveContactsAndChats());
+    onStateChanged();
+  }
+
+  /// Обрабатывает быстрый ответ (`RemoteInput`) из Android-уведомления и отправляет его по E2EE.
+  Future<bool> handleNotificationReply(
+    String chatId,
+    String replyText, {
+    String? msgId,
+  }) async {
+    final clean = replyText.trim();
+    if (chatId.isEmpty || clean.isEmpty) return false;
+    await markNotificationAsRead(chatId, msgId: msgId);
+    if (chatId.startsWith('group:')) {
+      final gid = chatId.substring(6);
+      await sendGroupMessage(gid, clean);
+      _addLog('Быстрый ответ из уведомления отправлен в группу');
+      return groupChats.containsKey(gid);
+    }
+    final sent = await sendMessage(chatId, clean);
+    if (sent) {
+      _addLog('Быстрый ответ из уведомления отправлен по E2EE');
+    }
+    return sent;
+  }
+
+  Future<void> _handleNotificationActionPayload(Map<String, dynamic> args) async {
+    final action = (args['action'] ?? '').toString();
+    final chatId = (args['chatId'] ?? '').toString();
+    final msgId = (args['msgId'] ?? '').toString();
+    if (chatId.isEmpty) return;
+    if (action == 'mark_read') {
+      await markNotificationAsRead(chatId, msgId: msgId);
+    } else if (action == 'inline_reply') {
+      final replyText = (args['replyText'] ?? '').toString();
+      await handleNotificationReply(chatId, replyText, msgId: msgId);
+    }
+  }
+
+  Future<void> _drainPendingNotificationActions() async {
+    try {
+      final raw = await _nativeChannel.invokeMethod<List<dynamic>>(
+        'getPendingNotificationActions',
+      );
+      if (raw == null || raw.isEmpty) return;
+      for (final item in raw) {
+        if (item is Map) {
+          await _handleNotificationActionPayload(Map<String, dynamic>.from(item));
+        }
+      }
+    } catch (_) {}
   }
 
   void _deduplicatePersistedContacts() {
@@ -9156,7 +9325,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       }
       onMessageReceived(chatMsg);
       unawaited(_triggerIncomingNotification(
-          broadcastChannelId, 'Общий эфир ($senderName)', decodedText));
+          broadcastChannelId, 'Общий эфир ($senderName)', decodedText,
+          msgId: pkt.msgId));
       unawaited(_saveContactsAndChats());
 
       if (pkt.ttl > 1) {
@@ -9266,7 +9436,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             unawaited(requestDownloadOrRevealMedia(offerMsg));
           }
           unawaited(_triggerIncomingNotification(
-              senderId, contact.displayTitle, '📎 Медиа/файл: $fn'));
+              senderId, contact.displayTitle, '📎 Медиа/файл: $fn',
+              msgId: fid));
           unawaited(_saveContactsAndChats());
         }
       } else if (kind == 'FILE_PULL_REQ') {
@@ -9305,6 +9476,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             senderId,
             contact.displayTitle,
             '📞 Пропущенный вызов (вы в другом звонке)',
+            msgId: pkt.msgId,
           ));
         } else {
           incomingCallFromPeerId = senderId;
@@ -9320,6 +9492,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             mode == 'video'
                 ? '📹 Входящий видеочат (ВЧ)'
                 : '📞 Входящий голосовой чат (ГЧ)',
+            msgId: pkt.msgId,
+            allowActions: false,
           ));
         }
       } else if (kind == 'CALL_ACCEPT') {
@@ -9533,7 +9707,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             unreadGroupCounts[gid] = (unreadGroupCounts[gid] ?? 0) + 1;
             _inspectMessageForTriggers(gMsg, groupChatKey(gid));
             unawaited(_triggerIncomingNotification(
-                groupChatKey(gid), '$gtitle • $sn', txt));
+                groupChatKey(gid), '$gtitle • $sn', txt,
+                msgId: mid));
             await _saveContactsAndChats();
           }
           // Multi-hop Mesh Relay: forward to all other group members so A <-> B <-> C works!
@@ -9693,8 +9868,23 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           }
         }
         unawaited(_triggerIncomingNotification(
-            senderId, contact.displayTitle, 'Реакция $emoji на сообщение'));
+            senderId, contact.displayTitle, 'Реакция $emoji на сообщение',
+            msgId: targetId));
         unawaited(_saveContactsAndChats());
+      } else if (kind == 'MSG_READ') {
+        final rawList = envelope['msgIds'];
+        final readIds = <String>{};
+        if (rawList is List) {
+          for (final item in rawList) {
+            final id = item.toString();
+            if (id.isNotEmpty) readIds.add(id);
+          }
+        }
+        final singleId = (envelope['msgId'] ?? '').toString();
+        if (singleId.isNotEmpty) readIds.add(singleId);
+        if (applyReadReceiptFromPeer(senderId, readIds) > 0) {
+          unawaited(_saveContactsAndChats());
+        }
       } else if (kind == 'MSG_EDIT') {
         final targetId = (envelope['targetId'] ?? '').toString();
         final newTxt = (envelope['txt'] ?? '').toString();
@@ -9733,10 +9923,13 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           _inspectMessageForTriggers(chatMsg, senderId);
           if (activeOpenChatId != senderId) {
             contact.unreadCount++;
+          } else {
+            unawaited(sendReadReceipt(senderId, upToMsgId: pkt.msgId));
           }
           onMessageReceived(chatMsg);
           unawaited(_triggerIncomingNotification(
-              senderId, contact.displayTitle, decodedText));
+              senderId, contact.displayTitle, decodedText,
+              msgId: pkt.msgId));
           unawaited(_saveContactsAndChats());
         }
       }
