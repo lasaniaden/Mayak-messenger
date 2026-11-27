@@ -1181,7 +1181,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.2.5';
+  static const String currentAppVersion = '3.2.6';
 
   /// Безопасный парсер адреса узла (убирает udp:/tcp:, поддерживает IPv4, [IPv6]:port и голый IPv6)
   static ({String host, int port, bool isUdp}) parseEndpoint(String raw, {int defaultPort = 42070}) {
