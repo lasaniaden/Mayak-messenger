@@ -3853,6 +3853,29 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                   ],
                 ),
               ),
+              if (m.isUploading)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  color: Colors.black54,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Отправка ${(m.transferProgress * 100).toInt()}% (${m.fileSizeFormatted})',
+                        style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: MayakTheme.accentCyan),
+                      ),
+                      const SizedBox(height: 4),
+                      LinearProgressIndicator(
+                        value: m.transferProgress,
+                        backgroundColor: Colors.white12,
+                        color: MayakTheme.accentCyan,
+                      ),
+                    ],
+                  ),
+                ),
               if (hasFileOnDisk && !showBlurredState)
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -3975,9 +3998,11 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                                 ? 'Файл удалён у отправителя'
                                 : (m.isDownloading
                                     ? 'Скачивание ${(m.transferProgress * 100).toInt()}% (${m.fileSizeFormatted})'
-                                    : (hasFileOnDisk
-                                        ? 'Скачан в кэш (${m.fileSizeFormatted})'
-                                        : 'Доступен для скачивания (${m.fileSizeFormatted})')),
+                                    : (m.isUploading
+                                        ? 'Отправка ${(m.transferProgress * 100).toInt()}% (${m.fileSizeFormatted})'
+                                        : (hasFileOnDisk
+                                            ? 'Скачан в кэш (${m.fileSizeFormatted})'
+                                            : 'Доступен для скачивания (${m.fileSizeFormatted})'))),
                             style: const TextStyle(
                                 fontSize: 11, color: Colors.white70),
                           ),
@@ -3986,7 +4011,7 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
                     ),
                   ],
                 ),
-                if (m.isDownloading) ...[
+                if (m.isDownloading || m.isUploading) ...[
                   const SizedBox(height: 8),
                   LinearProgressIndicator(
                     value: m.transferProgress,

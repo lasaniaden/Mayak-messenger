@@ -601,6 +601,7 @@ class ChatMessage {
   String? thumbB64;
   bool isMediaRevealed;
   bool isDownloading;
+  bool isUploading;
   bool isEdited;
   String? forwardedFrom;
   String? replyToMsgId;
@@ -623,6 +624,7 @@ class ChatMessage {
     this.thumbB64,
     bool? isMediaRevealed,
     this.isDownloading = false,
+    this.isUploading = false,
     this.isEdited = false,
     this.forwardedFrom,
     this.replyToMsgId,
@@ -1181,7 +1183,7 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.2.6';
+  static const String currentAppVersion = '3.2.7';
 
   /// Безопасный парсер адреса узла (убирает udp:/tcp:, поддерживает IPv4, [IPv6]:port и голый IPv6)
   static ({String host, int port, bool isUdp}) parseEndpoint(String raw, {int defaultPort = 42070}) {
@@ -5607,13 +5609,33 @@ try {
         _ensureUdpPeerPunchLoop();
       }
     }
-    _addLog('[FILE] Запрос скачивания fid=${msg.msgId} (${msg.fileName ?? "?"}) у ${contact.displayTitle} (direct=${isPeerDirectlyConnected(pullTargetId)}, udp=${_remoteUdpPeers.containsKey(pullTargetId)}, tcp=${_tcpPeers.containsValue(pullTargetId)})');
-    msg.isDownloading = true;
-    msg.transferProgress = 0.02;
+    final existingAsm = _incomingFiles[msg.msgId];
+    List<int>? missingList;
+    int fromIdx = 0;
+    if (existingAsm != null && existingAsm.receivedChunkIndices.isNotEmpty) {
+      final miss = <int>[];
+      for (int i = 0; i < existingAsm.totalChunks; i++) {
+        if (!existingAsm.receivedChunkIndices.contains(i)) {
+          miss.add(i);
+          if (miss.length > 150) break;
+        }
+      }
+      if (miss.isNotEmpty && miss.length <= 150) {
+        missingList = miss;
+      } else if (miss.isNotEmpty) {
+        fromIdx = miss.first;
+      }
+      msg.isDownloading = true;
+      msg.transferProgress = existingAsm.receivedChunkIndices.length / existingAsm.totalChunks;
+    } else {
+      msg.isDownloading = true;
+      msg.transferProgress = 0.02;
+    }
+    _addLog('[FILE] Запрос ${missingList != null ? "докачки (${missingList.length} чанков)" : (fromIdx > 0 ? "докачки с #$fromIdx" : "скачивания")} fid=${msg.msgId} (${msg.fileName ?? "?"}) у ${contact.displayTitle} (direct=${isPeerDirectlyConnected(pullTargetId)}, udp=${_remoteUdpPeers.containsKey(pullTargetId)}, tcp=${_tcpPeers.containsValue(pullTargetId)})');
     onStateChanged();
 
     _downloadWatchdogTimers.remove(msg.msgId)?.cancel();
-    _downloadWatchdogTimers[msg.msgId] = Timer(const Duration(seconds: 12), () {
+    _downloadWatchdogTimers[msg.msgId] = Timer(const Duration(seconds: 15), () {
       _downloadWatchdogTimers.remove(msg.msgId);
       if (msg.isDownloading && msg.transferProgress <= 0.03) {
         msg.isDownloading = false;
@@ -5624,12 +5646,18 @@ try {
     });
 
     final reqId = _randomHex(12);
-    final reqPayload = jsonEncode({
+    final reqMap = <String, dynamic>{
       'v': 2,
       'kind': 'FILE_PULL_REQ',
       'fid': msg.msgId,
       'nick': nickname,
-    });
+    };
+    if (missingList != null) {
+      reqMap['missing'] = missingList;
+    } else if (fromIdx > 0) {
+      reqMap['fromIdx'] = fromIdx;
+    }
+    final reqPayload = jsonEncode(reqMap);
     await _encryptAndQueueSealedDataPacket(
       targetNodeId: pullTargetId,
       contact: contact,
@@ -7758,7 +7786,8 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
 
   /// Потоковая отдача чанков файла по запросу получателя (когда получатель нажал кнопку «Скачать» на заблюренном превью!)
   Future<void> _streamFileChunksToPeer(
-      String targetNodeId, String fileId) async {
+      String targetNodeId, String fileId,
+      {List<int>? onlyIndices, int startIdx = 0}) async {
     final contact = knownContacts[targetNodeId];
     if (contact == null) return;
     String? filePath = offeredFileCatalog[fileId];
@@ -7840,8 +7869,26 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       final fileEphPub = await fileEphKeyPair.extractPublicKey();
       final fileEphPubHex = _toHex(fileEphPub.bytes);
 
-      _addLog('[FILE] Начинаю отдачу fid=$fileId ($cleanFileName, ${totalSize}B, chunks=$totalChunks, chunkSize=$effectiveChunkSize, udpOnly=$isUdpOnlyPeer)');
-      for (int idx = 0; idx < totalChunks; idx++) {
+      ChatMessage? senderMsg;
+      for (final m in getMessagesFor(targetNodeId)) {
+        if (m.msgId == fileId) {
+          senderMsg = m;
+          break;
+        }
+      }
+      final indicesToSend = (onlyIndices != null && onlyIndices.isNotEmpty)
+          ? onlyIndices.where((i) => i >= 0 && i < totalChunks).toList()
+          : List<int>.generate(max(0, totalChunks - startIdx), (k) => startIdx + k);
+      int lastUploadUiMs = 0;
+      if (senderMsg != null && indicesToSend.isNotEmpty) {
+        senderMsg.isUploading = true;
+        senderMsg.transferProgress = startIdx > 0 ? (startIdx / totalChunks) : 0.01;
+        onStateChanged();
+      }
+
+      _addLog('[FILE] Начинаю отдачу fid=$fileId ($cleanFileName, ${totalSize}B, send=${indicesToSend.length}/$totalChunks, chunkSize=$effectiveChunkSize, udpOnly=$isUdpOnlyPeer)');
+      for (int step = 0; step < indicesToSend.length; step++) {
+        final idx = indicesToSend[step];
         if (_activeFileStreamGen[streamKey] != myGen ||
             (!isPeerDirectlyConnected(targetNodeId) && !_remoteUdpPeers.containsKey(targetNodeId))) {
           _addLog('[FILE] Отдача fid=$fileId прервана на чанке $idx/$totalChunks');
@@ -7887,6 +7934,18 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
           skipPadding: isUdpOnlyPeer,
         );
 
+        if (senderMsg != null) {
+          final nowUi = DateTime.now().millisecondsSinceEpoch;
+          final prog = (onlyIndices != null && onlyIndices.isNotEmpty)
+              ? ((totalChunks - indicesToSend.length + step + 1) / totalChunks)
+              : ((idx + 1) / totalChunks);
+          senderMsg.transferProgress = prog.clamp(0.01, 1.0);
+          if (nowUi - lastUploadUiMs >= 300 || step == indicesToSend.length - 1) {
+            lastUploadUiMs = nowUi;
+            onStateChanged();
+          }
+        }
+
         if (winWaiter != null) {
           await winWaiter.future.timeout(const Duration(milliseconds: 1500),
               onTimeout: () {});
@@ -7898,6 +7957,14 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     } finally {
       job.isSending = false;
       pendingFileJobs.remove('${fileId}_$targetNodeId');
+      for (final m in getMessagesFor(targetNodeId)) {
+        if (m.msgId == fileId) {
+          m.isUploading = false;
+          if (m.transferProgress >= 0.99) m.transferProgress = 1.0;
+          break;
+        }
+      }
+      onStateChanged();
       await raf.close();
     }
   }
@@ -8204,6 +8271,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
   }) async {
     if (port <= 0 || host.isEmpty || host == '127.0.0.1' || host == 'udp' || host == 'tcp' || host.startsWith('BLE') || host == 'Через Mesh') return;
     if (!forceNewConnection) {
+      if (expectedNodeId != null && _tcpPeers.containsValue(expectedNodeId)) {
+        return;
+      }
       for (final s in _tcpPeers.keys) {
         try {
           if (s.remoteAddress.address == host) return;
@@ -8271,16 +8341,16 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
                   line,
                   remoteAddr: remoteAddr,
                   onHello: (peerId, peerNick) async {
+                    final nowHelloMs = DateTime.now().millisecondsSinceEpoch;
                     for (final entry in _tcpPeers.entries.toList()) {
                       if (entry.value == peerId && entry.key != socket) {
-                        try {
-                          if (entry.key.remoteAddress.address !=
-                              socket.remoteAddress.address) {
-                            _cleanupSocket(entry.key);
-                          }
-                        } catch (_) {
-                          _cleanupSocket(entry.key);
+                        final oldLastRx = _tcpLastRxMs[entry.key] ?? 0;
+                        if (nowHelloMs - oldLastRx < 10000) {
+                          // Старый сокет живой — закрываем лишний дубль, не разрывая активную передачу!
+                          _cleanupSocket(socket);
+                          return;
                         }
+                        _cleanupSocket(entry.key);
                       }
                     }
 
@@ -9202,7 +9272,20 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       } else if (kind == 'FILE_PULL_REQ') {
         final fid = (envelope['fid'] ?? '').toString();
         if (fid.isNotEmpty) {
-          unawaited(_streamFileChunksToPeer(senderId, fid));
+          List<int>? onlyIdx;
+          if (envelope['missing'] is List) {
+            onlyIdx = (envelope['missing'] as List)
+                .map((e) => (e as num?)?.toInt() ?? -1)
+                .where((i) => i >= 0)
+                .toList();
+          }
+          final fromIdx = (envelope['fromIdx'] as num?)?.toInt() ?? 0;
+          unawaited(_streamFileChunksToPeer(
+            senderId,
+            fid,
+            onlyIndices: onlyIdx,
+            startIdx: fromIdx,
+          ));
         }
       } else if (kind == 'CALL_INVITE') {
         final mode = (envelope['mode'] ?? 'voice').toString();
