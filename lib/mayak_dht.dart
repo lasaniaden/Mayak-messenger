@@ -348,6 +348,8 @@ class MayakDhtClient {
     ('router.bittorrent.com', 6881),
     ('router.utorrent.com', 6881),
     ('router.bitcomet.com', 6881),
+    ('dht.aelitis.com', 6881),
+    ('router.silotis.us', 6881),
   ];
 
   Uint8List _ownNodeId = Uint8List.fromList(
@@ -364,6 +366,46 @@ class MayakDhtClient {
   MayakDhtClient({required this.getSocket, required this.onLog});
 
   int get knownNodesCount => _nodes.length;
+
+  /// Экспорт живых DHT-узлов для обмена между подключёнными пирами (DHT PEX)
+  List<Map<String, dynamic>> exportActiveNodes({int limit = 20}) {
+    final sorted = _nodes.values.toList()
+      ..sort((a, b) => b.lastSeenMs.compareTo(a.lastSeenMs));
+    return sorted.take(limit).map((n) => {
+      'ip': n.ip,
+      'p': n.port,
+      'id': base64Encode(n.id),
+    }).toList();
+  }
+
+  /// Импорт DHT-узлов от собеседника (спасает, если оператор режет порт 6881)
+  int importExternalNodes(List<dynamic> list) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    int added = 0;
+    for (final item in list) {
+      if (item is! Map) continue;
+      final ip = (item['ip'] ?? '').toString().trim();
+      final port = (item['p'] as num?)?.toInt() ?? 0;
+      final idB64 = (item['id'] ?? '').toString();
+      if (ip.isEmpty || ip.contains(':') || port <= 0 || port > 65535 || idB64.isEmpty) continue;
+      try {
+        final idBytes = base64Decode(idB64);
+        if (idBytes.length != 20) continue;
+        final key = '$ip:$port';
+        if (!_nodes.containsKey(key)) {
+          _nodes[key] = DhtNodeInfo(id: Uint8List.fromList(idBytes), ip: ip, port: port, lastSeenMs: now);
+          added++;
+        }
+      } catch (_) {}
+    }
+    if (added > 0) {
+      onLog('[DHT-PEX] Получено $added живых узлов от собеседника (всего: ${_nodes.length})');
+      if (_nodes.length < 30 && !isBootstrapping) {
+        unawaited(bootstrap());
+      }
+    }
+    return added;
+  }
 
   List<String> exportCachedNodes({int limit = 120}) {
     final sorted = _nodes.values.toList()

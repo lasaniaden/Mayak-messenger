@@ -452,6 +452,10 @@ class MayakWebRtcController {
   }
 
   Future<void> disposeSession() async {
+    final localStream = _localStream;
+    final remoteStream = _remoteStream;
+    final pc = _pc;
+
     isActive = false;
     isConnected = false;
     hasLocalVideo = false;
@@ -460,36 +464,43 @@ class MayakWebRtcController {
     _pendingRemoteIce.clear();
     _videoSender = null;
     _sendSignal = null;
-
-    try {
-      if (_localStream != null) {
-        for (final t in _localStream!.getTracks()) {
-          try {
-            await t.stop();
-          } catch (_) {}
-        }
-        await _localStream!.dispose();
-      }
-    } catch (_) {}
     _localStream = null;
-
-    try {
-      await _remoteStream?.dispose();
-    } catch (_) {}
     _remoteStream = null;
+    _pc = null;
 
+    // КРИТИЧНО для Android EGL: сначала отвязываем рендереры и убираем RTCVideoView с экрана,
+    // ждём кадр Flutter, и только потом уничтожаем нативные треки и PeerConnection.
     if (_renderersReady) {
       try {
         localRenderer.srcObject = null;
         remoteRenderer.srcObject = null;
       } catch (_) {}
     }
+    onStateChanged?.call();
+    await Future.delayed(const Duration(milliseconds: 120));
 
     try {
-      await _pc?.close();
-      await _pc?.dispose();
+      if (localStream != null) {
+        for (final t in localStream.getTracks()) {
+          try {
+            await t.stop();
+          } catch (_) {}
+        }
+      }
     } catch (_) {}
-    _pc = null;
+
+    try {
+      await pc?.close();
+      await pc?.dispose();
+    } catch (_) {}
+
+    try {
+      await localStream?.dispose();
+    } catch (_) {}
+
+    try {
+      await remoteStream?.dispose();
+    } catch (_) {}
     onStateChanged?.call();
   }
 }

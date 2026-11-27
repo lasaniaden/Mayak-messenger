@@ -1181,7 +1181,47 @@ class AppUpdateInfo {
 }
 
 class MeshEngine {
-  static const String currentAppVersion = '3.2.4';
+  static const String currentAppVersion = '3.2.5';
+
+  /// Безопасный парсер адреса узла (убирает udp:/tcp:, поддерживает IPv4, [IPv6]:port и голый IPv6)
+  static ({String host, int port, bool isUdp}) parseEndpoint(String raw, {int defaultPort = 42070}) {
+    var s = raw.trim();
+    bool isUdp = false;
+    if (s.startsWith('udp:')) {
+      isUdp = true;
+      s = s.substring(4).trim();
+    } else if (s.startsWith('tcp:')) {
+      s = s.substring(4).trim();
+    }
+    if (s.isEmpty || s.startsWith('BLE') || s == 'Через Mesh') {
+      return (host: '', port: 0, isUdp: isUdp);
+    }
+    if (s.startsWith('[')) {
+      final endBracket = s.indexOf(']');
+      if (endBracket > 1) {
+        final h = s.substring(1, endBracket).trim();
+        var p = defaultPort;
+        if (endBracket + 2 <= s.length && s[endBracket + 1] == ':') {
+          p = int.tryParse(s.substring(endBracket + 2).trim()) ?? defaultPort;
+        }
+        return (host: h, port: p, isUdp: isUdp);
+      }
+    }
+    final firstColon = s.indexOf(':');
+    final lastColon = s.lastIndexOf(':');
+    if (firstColon != -1 && firstColon == lastColon) {
+      final h = s.substring(0, firstColon).trim();
+      final p = int.tryParse(s.substring(firstColon + 1).trim()) ?? defaultPort;
+      return (host: h, port: p, isUdp: isUdp);
+    }
+    // Голый IPv6 (несколько двоеточий) или хост без порта
+    return (host: s, port: defaultPort, isUdp: isUdp);
+  }
+
+  static bool isPrivateLanIpv4(String ip) {
+    if (ip.isEmpty || ip.contains(':')) return false;
+    return ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.');
+  }
   static const String githubRepo = 'lasaniaden/Mayak-messenger';
   static const String broadcastChannelId = 'BROADCAST';
   static const int discoveryPort = 42069;
@@ -2543,10 +2583,8 @@ class MeshEngine {
     }
     final c = knownContacts[peerId];
     if (c != null && c.lastAddress.isNotEmpty) {
-      var addr = c.lastAddress.trim();
-      if (addr.startsWith('udp:')) addr = addr.substring(4);
-      final host = addr.split(':').first.trim();
-      if (host.isNotEmpty && !host.startsWith('BLE')) return host;
+      final ep = parseEndpoint(c.lastAddress, defaultPort: defaultTcpPort);
+      if (ep.host.isNotEmpty) return ep.host;
     }
     return null;
   }
@@ -2894,7 +2932,7 @@ class MeshEngine {
 
   void _sendUdpHolePunch(String ip, int port) {
     final sock = _callUdpSocket;
-    if (sock == null || ip.isEmpty || port <= 0) return;
+    if (sock == null || ip.isEmpty || port <= 0 || ip.contains(':')) return;
     try {
       // Переменный паддинг (0..32 байт) против сигнатурной классификации фиксированных хендшейков
       final padLen = Random.secure().nextInt(33);
@@ -2915,7 +2953,7 @@ class MeshEngine {
 
   void _sendUdpMeshJson(String ip, int port, String jsonLine) {
     final sock = _callUdpSocket;
-    if (sock == null || ip.isEmpty || port <= 0) return;
+    if (sock == null || ip.isEmpty || port <= 0 || ip.contains(':')) return;
     try {
       final body = utf8.encode(jsonLine);
       if (body.length > 60000) return;
@@ -3894,10 +3932,10 @@ if ($cams) { $cams -join "`n" }
 
         bool triggered = false;
         if (extUdp.contains(':')) {
-          final parts = extUdp.split(':');
-          final uIp = parts.first.trim();
-          final uPort = int.tryParse(parts.last.trim()) ?? 0;
-          if (uIp.isNotEmpty && uPort > 0) {
+          final parsed = parseEndpoint(extUdp, defaultPort: 0);
+          final uIp = parsed.host;
+          final uPort = parsed.port;
+          if (uIp.isNotEmpty && !uIp.contains(':') && uPort > 0) {
             _remoteUdpPeers[peerId] = (ip: uIp, port: uPort, lastSeenMs: 0);
             _ensureUdpPeerPunchLoop();
             for (int k = 0; k < 4; k++) {
@@ -4348,7 +4386,7 @@ if ($cams) { $cams -join "`n" }
   String buildInterRegionalInviteLink() {
     final upnpPublic = upnpExternalIp.isNotEmpty && !_isPrivateOrCgnatIpv4(upnpExternalIp);
     final stunIp = discoveredExternalEndpoint.isNotEmpty
-        ? discoveredExternalEndpoint.split(':').first
+        ? parseEndpoint(discoveredExternalEndpoint, defaultPort: 0).host
         : '';
     final ips = <String>[
       if (upnpPublic) upnpExternalIp,
@@ -4372,10 +4410,10 @@ if ($cams) { $cams -join "`n" }
   }
 
   Future<void> startPttTransmit() async {
-    if (activeCallPeerId != null || isPttTransmitting || !pttAutoReceiveEnabled) return;
+    if (activeCallPeerId != null || isPttTransmitting) return;
     isPttTransmitting = true;
     onStateChanged();
-    await _playPttBeep(true);
+    unawaited(_playPttBeep(true));
     if (Platform.isAndroid) {
       try {
         await _nativeChannel
@@ -4470,7 +4508,7 @@ if ($cams) { $cams -join "`n" }
       }
     } catch (_) {}
     _pttRxTimeoutTimer?.cancel();
-    _pttRxTimeoutTimer = Timer(const Duration(milliseconds: 900), () {
+    _pttRxTimeoutTimer = Timer(const Duration(milliseconds: 1400), () {
       _finishIncomingPtt();
     });
   }
@@ -5009,11 +5047,14 @@ try {
       'udpPort': _callUdpListenPort,
     });
     if (!_tcpPeers.containsValue(peerId) && contact.lastAddress.isNotEmpty) {
-      final parts = contact.lastAddress.split(':');
-      final host = parts.first.trim();
-      final port = parts.length > 1 ? (int.tryParse(parts[1]) ?? defaultTcpPort) : defaultTcpPort;
-      if (host.isNotEmpty && !host.startsWith('BLE')) {
-        unawaited(connectToHost(host, port, expectedNodeId: peerId, forceNewConnection: true));
+      final ep = parseEndpoint(contact.lastAddress, defaultPort: defaultTcpPort);
+      if (ep.host.isNotEmpty && ep.port > 0) {
+        if (ep.isUdp) {
+          _sendUdpHolePunch(ep.host, ep.port);
+          _ensureUdpPeerPunchLoop();
+        } else {
+          unawaited(connectToHost(ep.host, ep.port, expectedNodeId: peerId, forceNewConnection: true));
+        }
       }
     }
     final inviteBytes = utf8.encode(payload);
@@ -5147,15 +5188,20 @@ try {
     if (notifyPeer && pid != null) {
       final contact = knownContacts[pid];
       if (contact != null) {
-        final payload = jsonEncode({'v': 2, 'kind': 'CALL_END'});
-        await _encryptAndQueueSealedDataPacket(
-          targetNodeId: pid,
-          contact: contact,
-          msgId: _randomHex(12),
-          sealedPayloadBytes: utf8.encode(payload),
-          persistInOutbox: false,
-          keepInTransitBuffer: false,
-        );
+        final payloadBytes = utf8.encode(jsonEncode({'v': 2, 'kind': 'CALL_END'}));
+        Future<void> sendEndOnce() async {
+          await _encryptAndQueueSealedDataPacket(
+            targetNodeId: pid,
+            contact: contact,
+            msgId: _randomHex(12),
+            sealedPayloadBytes: payloadBytes,
+            persistInOutbox: false,
+            keepInTransitBuffer: false,
+          );
+        }
+        await sendEndOnce();
+        Future.delayed(const Duration(milliseconds: 250), () => unawaited(sendEndOnce()));
+        Future.delayed(const Duration(milliseconds: 600), () => unawaited(sendEndOnce()));
       }
     }
     onStateChanged();
@@ -5554,14 +5600,11 @@ try {
       _sendUdpHolePunch(udpPeer.ip, udpPeer.port);
       _ensureUdpPeerPunchLoop();
     } else if (contact.lastAddress.startsWith('udp:')) {
-      final pts = contact.lastAddress.substring(4).split(':');
-      if (pts.length == 2) {
-        final p = int.tryParse(pts[1]) ?? 0;
-        if (pts[0].isNotEmpty && p > 0) {
-          _remoteUdpPeers[pullTargetId] = (ip: pts[0], port: p, lastSeenMs: DateTime.now().millisecondsSinceEpoch);
-          _sendUdpHolePunch(pts[0], p);
-          _ensureUdpPeerPunchLoop();
-        }
+      final ep = parseEndpoint(contact.lastAddress, defaultPort: 0);
+      if (ep.host.isNotEmpty && !ep.host.contains(':') && ep.port > 0) {
+        _remoteUdpPeers[pullTargetId] = (ip: ep.host, port: ep.port, lastSeenMs: DateTime.now().millisecondsSinceEpoch);
+        _sendUdpHolePunch(ep.host, ep.port);
+        _ensureUdpPeerPunchLoop();
       }
     }
     _addLog('[FILE] Запрос скачивания fid=${msg.msgId} (${msg.fileName ?? "?"}) у ${contact.displayTitle} (direct=${isPeerDirectlyConnected(pullTargetId)}, udp=${_remoteUdpPeers.containsKey(pullTargetId)}, tcp=${_tcpPeers.containsValue(pullTargetId)})');
@@ -6198,15 +6241,13 @@ try {
         for (final c in knownContacts.values.toList()) {
           if (isPeerDirectlyConnected(c.nodeId)) continue;
           if (c.lastAddress.startsWith('udp:')) {
-            final parts = c.lastAddress.substring(4).split(':');
-            if (parts.length == 2) {
-              final ip = parts[0].trim();
-              final port = int.tryParse(parts[1].trim()) ?? 0;
-              if (ip.isNotEmpty && port > 0) {
-                _sendUdpHolePunch(ip, port);
-                if (_onlineReconnectTicks == 1 || _onlineReconnectTicks % 4 == 0) {
-                  _sendUdpMeshJson(ip, port, _buildHelloJson());
-                }
+            final ep = parseEndpoint(c.lastAddress, defaultPort: 0);
+            final ip = ep.host;
+            final port = ep.port;
+            if (ip.isNotEmpty && !ip.contains(':') && port > 0) {
+              _sendUdpHolePunch(ip, port);
+              if (_onlineReconnectTicks == 1 || _onlineReconnectTicks % 4 == 0) {
+                _sendUdpMeshJson(ip, port, _buildHelloJson());
               }
             }
           }
@@ -6222,7 +6263,7 @@ try {
     });
 
     if (Platform.isWindows) unawaited(_cleanupWindowsOldUpdateFiles());
-    _addLog('Защищенный узел v3.2.4 готов (порт $listenPort)');
+    _addLog('Защищенный узел v$currentAppVersion готов (порт $listenPort)');
 
     unawaited(scanLocalSubnet(quickOnly: true));
   }
@@ -6629,18 +6670,9 @@ try {
 
   /// Пакет синхронизации при встрече любых двух узлов (передает контакты, баны, триггерные слова, журнал нарушений и апелляции даже между разными сетями!)
   String _buildPeerSyncJson() {
-    final peers = knownContacts.values
-        .map((c) => {
-              'id': c.nodeId,
-              'nick': c.nickname,
-              'dh': c.dhPubHex,
-              'sg': c.signPubHex,
-              'hw': c.hwFingerprint,
-              'os': c.platformInfo,
-            })
-        .toList();
     return jsonEncode({
-      'peer_sync': peers,
+      'peer_sync': const [],
+      'dht_pex': _dhtClient.exportActiveNodes(limit: 20),
       'banned_ids': bannedNodeIds.toList(),
       'banned_hw': bannedHwFingerprints.toList(),
       'trigger_words': adminTriggerWords,
@@ -6850,10 +6882,10 @@ try {
 
     final extUdp = (decoded['extUdp'] ?? '').toString().trim();
     if (extUdp.contains(':')) {
-      final pParts = extUdp.split(':');
-      final uIp = pParts.first.trim();
-      final uPort = int.tryParse(pParts.last.trim()) ?? 0;
-      if (uIp.isNotEmpty && uPort > 0) {
+      final parsed = parseEndpoint(extUdp, defaultPort: 0);
+      final uIp = parsed.host;
+      final uPort = parsed.port;
+      if (uIp.isNotEmpty && !uIp.contains(':') && uPort > 0) {
         await _initCallUdpSocket();
         _remoteUdpPeers[targetId] = (
           ip: uIp,
@@ -7860,7 +7892,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
               onTimeout: () {});
           _fileWindowAckWaiters.remove('${fileId}_$idx');
         } else {
-          await Future.delayed(Duration(milliseconds: isUdpOnlyPeer ? 12 : 5));
+          await Future.delayed(Duration(milliseconds: isUdpOnlyPeer ? 10 : 3));
         }
       }
     } finally {
@@ -8038,9 +8070,10 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final cleanNick = (nick ?? '').trim();
     final cleanHw = (hwFingerprint ?? '').trim();
     final cleanOs = (platformInfo ?? '').trim();
-    final cleanIp = (address != null && address.contains(':'))
-        ? address.split(':').first
-        : (address ?? '');
+    final parsedNewAddr = parseEndpoint(address ?? '', defaultPort: 0);
+    final cleanIp = (!parsedNewAddr.isUdp && isPrivateLanIpv4(parsedNewAddr.host))
+        ? parsedNewAddr.host
+        : '';
 
     final existing = knownContacts[nodeId];
     if (existing != null) {
@@ -8059,13 +8092,11 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       final sameHw = cleanHw.isNotEmpty &&
           oldContact.hwFingerprint.isNotEmpty &&
           oldContact.hwFingerprint == cleanHw;
-      final oldIp = oldContact.lastAddress.contains(':')
-          ? oldContact.lastAddress.split(':').first
-          : oldContact.lastAddress;
-      final sameLanIp = cleanIp.isNotEmpty &&
-          cleanIp != 'Через Mesh' &&
-          !cleanIp.startsWith('BLE') &&
-          oldIp == cleanIp;
+      final parsedOldAddr = parseEndpoint(oldContact.lastAddress, defaultPort: 0);
+      final oldIp = (!parsedOldAddr.isUdp && isPrivateLanIpv4(parsedOldAddr.host))
+          ? parsedOldAddr.host
+          : '';
+      final sameLanIp = cleanIp.isNotEmpty && oldIp.isNotEmpty && oldIp == cleanIp;
       final sameOfflineByNick = !oldContact.isOnline &&
           cleanNick.isNotEmpty &&
           !cleanNick.startsWith('Android-') &&
@@ -8171,7 +8202,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     Duration timeout = const Duration(seconds: 2),
     bool forceNewConnection = false,
   }) async {
-    if (port <= 0 || host == '127.0.0.1') return;
+    if (port <= 0 || host.isEmpty || host == '127.0.0.1' || host == 'udp' || host == 'tcp' || host.startsWith('BLE') || host == 'Через Mesh') return;
     if (!forceNewConnection) {
       for (final s in _tcpPeers.keys) {
         try {
@@ -8463,31 +8494,13 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
 
       // ИСПРАВЛЕНИЕ ПУНКТОВ 5 и 8: Синхронизация контактов, банов, триггеров и апелляций между сетями (Store-and-Forward)
       if (map.containsKey('peer_sync')) {
-        final list = map['peer_sync'] as List;
         bool changedAny = false;
-        for (final item in list) {
-          final m = Map<String, dynamic>.from(item as Map);
-          final pid = m['id'] as String;
-          final pdh = (m['dh'] as String?) ?? '';
-          final psg = (m['sg'] as String?) ?? '';
-          final phw = (m['hw'] as String?) ?? '';
-          final pos = (m['os'] as String?) ?? '';
-          if (pid != nodeId &&
-              !deletedContactIds.contains(pid) &&
-              !knownContacts.containsKey(pid)) {
-            final expectedId = await _calcNodeId(_fromHex(pdh));
-            if (expectedId == pid) {
-              _upsertContact(
-                nodeId: pid,
-                dhPubHex: pdh,
-                signPubHex: psg,
-                nick: (m['nick'] as String?) ?? 'Узел $pid',
-                hwFingerprint: phw,
-                platformInfo: pos,
-                address: 'Через Mesh',
-              );
-              changedAny = true;
-            }
+        // v3.2.5: контакты собеседников больше не копируются автоматически (приватность адресной книги).
+        // Зато импортируем живые DHT-узлы (DHT PEX), чтобы помочь устройствам за блокировкой порта 6881.
+        if (map['dht_pex'] is List) {
+          final pexList = map['dht_pex'] as List;
+          if (pexList.isNotEmpty) {
+            _dhtClient.importExternalNodes(pexList);
           }
         }
         if (map['cleared_triggers'] is List) {
@@ -9193,20 +9206,39 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         }
       } else if (kind == 'CALL_INVITE') {
         final mode = (envelope['mode'] ?? 'voice').toString();
-        incomingCallFromPeerId = senderId;
-        incomingCallMode = mode;
-        _incomingCallId = (envelope['callId'] ?? '').toString();
-        _incomingCallUdpPort = _remoteUdpPeers[senderId]?.port ??
-            (envelope['udpPort'] as num?)?.toInt() ??
-            callMediaUdpPort;
-        unawaited(_startIncomingRingtone(caller: contact.displayTitle, mode: mode));
-        unawaited(_triggerIncomingNotification(
-          senderId,
-          contact.displayTitle,
-          mode == 'video'
-              ? '📹 Входящий видеочат (ВЧ)'
-              : '📞 Входящий голосовой чат (ГЧ)',
-        ));
+        final alreadyInCall = (activeCallPeerId != null && activeCallPeerId != senderId) ||
+            (incomingCallFromPeerId != null && incomingCallFromPeerId != senderId);
+        if (alreadyInCall) {
+          final busyPayload = jsonEncode({'v': 2, 'kind': 'CALL_BUSY'});
+          unawaited(_encryptAndQueueSealedDataPacket(
+            targetNodeId: senderId,
+            contact: contact,
+            msgId: _randomHex(12),
+            sealedPayloadBytes: utf8.encode(busyPayload),
+            persistInOutbox: false,
+            keepInTransitBuffer: false,
+          ));
+          unawaited(_triggerIncomingNotification(
+            senderId,
+            contact.displayTitle,
+            '📞 Пропущенный вызов (вы в другом звонке)',
+          ));
+        } else {
+          incomingCallFromPeerId = senderId;
+          incomingCallMode = mode;
+          _incomingCallId = (envelope['callId'] ?? '').toString();
+          _incomingCallUdpPort = _remoteUdpPeers[senderId]?.port ??
+              (envelope['udpPort'] as num?)?.toInt() ??
+              callMediaUdpPort;
+          unawaited(_startIncomingRingtone(caller: contact.displayTitle, mode: mode));
+          unawaited(_triggerIncomingNotification(
+            senderId,
+            contact.displayTitle,
+            mode == 'video'
+                ? '📹 Входящий видеочат (ВЧ)'
+                : '📞 Входящий голосовой чат (ГЧ)',
+          ));
+        }
       } else if (kind == 'CALL_ACCEPT') {
         if (activeCallPeerId == senderId && !isCallAccepted) {
           isCallAccepted = true;
@@ -9235,14 +9267,16 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
             remoteVideoFrameBytes = null;
           }
         }
-      } else if (kind == 'CALL_REJECT') {
+      } else if (kind == 'CALL_REJECT' || kind == 'CALL_BUSY') {
         if (activeCallPeerId == senderId) {
           activeCallPeerId = null;
           isCallAccepted = false;
           remoteVideoFrameBytes = null;
-    localVideoFrameBytes = null;
+          localVideoFrameBytes = null;
           _activeCallMediaKey = null;
-          callStatusText = 'Вызов отклонён';
+          callStatusText = kind == 'CALL_BUSY'
+              ? 'Абонент занят в другом звонке'
+              : 'Вызов отклонён';
           unawaited(_stopCallTonesOutgoing());
           unawaited(_stopCallMediaPipelines());
           unawaited(_playCallEndTone());
@@ -9598,7 +9632,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
       } else {
         final decodedText = (envelope['txt'] as String?) ?? '';
         final fwd = envelope['fwd'] as String?;
-        if (!deletedMessageIds.contains(pkt.msgId)) {
+        final existingMsgs = getMessagesFor(senderId);
+        if (!deletedMessageIds.contains(pkt.msgId) &&
+            !existingMsgs.any((m) => m.msgId == pkt.msgId)) {
           final chatMsg = ChatMessage(
             msgId: pkt.msgId,
             peerId: senderId,
@@ -9678,7 +9714,7 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     final tot = (env['tot'] as int?) ?? 1;
     final chunkBytes = base64Decode((env['b64'] as String?) ?? '');
 
-    if (tot <= 0 || tot > 40000 || totalSize > 1050 * 1024 * 1024) return;
+    if (tot <= 0 || tot > 500000 || totalSize > 1050 * 1024 * 1024) return;
     if (deletedMessageIds.contains(fileId) || _revokedFileIds.contains(fileId)) {
       final stale = _incomingFiles.remove(fileId);
       if (stale != null) {
@@ -9865,7 +9901,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
     }
 
     for (final entry in _remoteUdpPeers.entries.toList()) {
+      if (sentPeerIds.contains(entry.key)) continue;
       if (pkt.dstNodeId == broadcastChannelId || pkt.dstNodeId == entry.key) {
+        sentPeerIds.add(entry.key);
         _sendUdpMeshJson(entry.value.ip, entry.value.port, serialized);
       }
     }
@@ -9929,8 +9967,9 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
         for (final entry in _tcpPeers.entries.toList()) {
           final sock = entry.key;
           final lastRx = _tcpLastRxMs[sock] ?? nowMs;
-          if (nowMs - lastRx > 16000) {
-            _addLog('[ONLINE] TCP таймаут 16с без ответа: ${entry.value} -> OFFLINE', triggerUi: false);
+          final tcpTimeoutMs = (_incomingFiles.isNotEmpty || pendingFileJobs.isNotEmpty) ? 60000 : 35000;
+          if (nowMs - lastRx > tcpTimeoutMs) {
+            _addLog('[ONLINE] TCP таймаут ${tcpTimeoutMs ~/ 1000}с без ответа: ${entry.value} -> OFFLINE', triggerUi: false);
             _cleanupSocket(sock);
           } else if (_beaconTickCounter % 2 == 0) {
             _sendTcpLine(sock, jsonEncode({'ping_req': _randomHex(6), 'from': nodeId}));
@@ -9970,12 +10009,11 @@ $reader = [System.Threading.Tasks.Task]::Run([Action]{
               c.lastAddress.isNotEmpty &&
               !c.lastAddress.startsWith('udp:') &&
               c.lastAddress.contains(':')) {
-            final addrParts = c.lastAddress.split(':');
-            if (addrParts.length == 2 && !addrParts[0].startsWith('BLE')) {
-              final port = int.tryParse(addrParts[1]) ?? defaultTcpPort;
+            final ep = parseEndpoint(c.lastAddress, defaultPort: defaultTcpPort);
+            if (!ep.isUdp && ep.host.isNotEmpty && ep.port > 0) {
               unawaited(connectToHost(
-                addrParts[0],
-                port,
+                ep.host,
+                ep.port,
                 expectedNodeId: c.nodeId,
                 timeout: const Duration(milliseconds: 500),
               ));
